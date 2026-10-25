@@ -33,7 +33,7 @@ T23恢复配置新增 `LINGXING_REQUESTS_ENABLED`（默认true，严格接受tru
 
 `confirmation.current` 是列表摘要，不代表已经满足正式成品导出条件；后续接口仍检查阻塞异常、当前确认、箱编码、冻结和版本。前端处理向导另检查同步是否结束；状态读取失败不能按“没有任务”放行。
 
-前端 `/batches` 使用此接口；“新建批次”或 `/batches/new` 进入选择发货次、选择需求、核对建立、结果四步，建立结果显式进入已有组处理向导。处理深链 `/batches/<处理容器UUID>?groupId=<组UUID>&wizard=process` 支持成员、同步商品、核对确认、成品导出，旧 `groupId/tab/demandId` 详情链接保留。向导复用下列业务接口，不新增自动合组或自动同步行为；恢复边界和未知请求重放见[运行说明](../operations.md#发货批次工作区与向导2026-10-18)。店铺维护入口归于 `/settings/seller-mappings`，API 路径保持。
+前端 `/batches` 使用此接口；“新建批次”或 `/batches/new` 进入选择发货次、选择需求、核对建立、结果四步，建立结果显式进入已有组处理向导。处理深链 `/batches/<处理容器UUID>?groupId=<组UUID>&wizard=process` 支持成员、同步商品、核对确认、成品导出，旧 `groupId/tab/demandId` 详情链接保留。向导复用下列业务接口，不新增自动合组或自动同步行为；恢复边界和未知请求重放见[运行说明](../operations/runbook.md#发货批次工作区与向导2026-10-18)。店铺维护入口归于 `/settings/seller-mappings`，API 路径保持。
 
 ## 发货次与内部组
 

@@ -18,7 +18,7 @@
 
 运行 `corepack pnpm m5-m8:verify` 和 `corepack pnpm m5-m8:browser`。前者在 `.local/development` 下的独立验收根保存 `integration.json/recovery.json`，后者保存 `.local/m5-m8/frontend/result.json` 及截图。完整原始证据不随公开源码发布。
 
-同时执行类型检查、lint、单元测试、生产构建及隐私检查。M7 数值精度边界单测防止 Excel 数值转换损失有效位数；真实模板接收、签章、物流签收、平台成功反馈和财务签收仍按 [交付说明](../m5-m8-implementation.md) 单列待验。
+同时执行类型检查、lint、单元测试、生产构建及隐私检查。M7 数值精度边界单测防止 Excel 数值转换损失有效位数；真实模板接收、签章、物流签收、平台成功反馈和财务签收仍按 [交付说明](../development/m5-m8-implementation.md) 单列待验。
 
 ## 本机开发环境
 

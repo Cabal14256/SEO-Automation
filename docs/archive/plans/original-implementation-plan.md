@@ -1,5 +1,7 @@
 # 发货全流程自动化系统实施方案
 
+> 历史阶段计划：保留编写当时的设计、安排和判断，不作为现行功能或操作说明。当前范围见[实现状态](../../development/implementation-status.md)、[业务规则](../../business/rules.md)与[运行维护](../../operations/runbook.md)；同目录背景见[历史索引](../README.md)。新发票不再以 M3 实物箱整组确认为前置条件，外部业务操作继续由人员执行。
+
 > 更新日期：2026-10-11。本文件作为系统开发、模块交付和业务验收的统一依据。系统采用 TypeScript 技术栈和 Neo 任务工作台界面，按模块逐步交付；每个模块完成后即可使用，并继续复用同一批业务数据。
 
 ## 一、建设目标与业务范围
@@ -429,11 +431,11 @@ docs/business/field-mapping.md     字段与数据来源
 docs/business/rules.md             已确认规则及版本
 docs/business/us-allocation-algorithm.md  US箱分配、子批次和编码算法
 docs/business/shipment-table-feasibility.md  发货表格模块可行性
-docs/data-model.md                 发货模块数据库对象、版本和事务
+docs/architecture/data-model.md                 发货模块数据库对象、版本和事务
 docs/integrations/capabilities.md   接口验证结果
 docs/acceptance/scenarios.md        验收场景
-docs/implementation-status.md      模块进度与实际偏差
-docs/operations.md                 安装、升级、备份和恢复
+docs/development/implementation-status.md      模块进度与实际偏差
+docs/operations/runbook.md                 安装、升级、备份和恢复
 ```
 
 以上为拟交付路径，目前工作区的业务应用尚待开发。实施时在开发记录中写明计划与实际的偏差、原因和恢复方式，使后续开发可以从最新记录继续。

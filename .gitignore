@@ -13,8 +13,7 @@ data/
 scripts/lingxing/probe.local.json
 
 # Private business sources, raw research and acceptance evidence stay local.
-docs/private/**
-!docs/private/README.md
+/docs/private/
 docs/research/**
 !docs/research/README.md
 docs/acceptance/evidence/**

@@ -22,9 +22,9 @@ async function file(repo, path, text) {
 async function commit(repo, message = 'Synthetic fixture') {
   await git(repo, ['add', '--all']); await git(repo, ['-c', 'commit.gpgSign=false', 'commit', '-m', message]);
 }
-test('public boundaries preserve readmes and reject originals, runtime, credential and archive files', () => {
-  for (const path of ['docs/research/README.md', 'docs/private/README.md', 'docs/acceptance/evidence/README.md', '.env.example', 'apps/server/src/parser.test.ts']) assert.equal(privatePath(path), false, path);
-  for (const path of ['docs/research/any/raw.md', 'docs/acceptance/evidence/screenshot.png', 'docs/private/source.xlsx', 'docs/templates/import.xlsx', '.local/privacy/known-values.json', 'apps/server/.env', 'scripts/probe.local.json', 'archive.zip', 'database.sqlite3-wal', 'apps/server/dist/api.js']) assert.equal(privatePath(path), true, path);
+test('public boundaries reject all private files while preserving other public directory notices', () => {
+  for (const path of ['docs/research/README.md', 'docs/acceptance/evidence/README.md', '.env.example', 'apps/server/src/parser.test.ts']) assert.equal(privatePath(path), false, path);
+  for (const path of ['docs/research/any/raw.md', 'docs/acceptance/evidence/screenshot.png', 'docs/private/README.md', 'docs/private/nested/example.md', 'docs\\private\\README.md', 'docs/private/source.xlsx', 'docs/templates/import.xlsx', '.local/privacy/known-values.json', 'apps/server/.env', 'scripts/probe.local.json', 'archive.zip', 'database.sqlite3-wal', 'apps/server/dist/api.js']) assert.equal(privatePath(path), true, path);
 });
 test('patterns and private manifest catch identifiers without printing matching content', () => {
   const shipment = `FBA${'1A2B3C4D5E'}`;
@@ -59,6 +59,14 @@ test('credential and binary checks allow explicit placeholders and reject real-s
   assert.deepEqual(scanContent('commit', Buffer.from(publicIdentity)), []);
   assert.equal(scanContent('commit', Buffer.from(publicIdentity), [publicIdentity]).at(0).rule, 'private-known-value');
 });
+test('GitHub web-commit bot identity is public while other contacts remain blocked', () => {
+  const bot = 'noreply@github.com';
+  assert.deepEqual(scanContent('commit', Buffer.from(`committer GitHub <${bot}>`)), []);
+  assert.equal(scanContent('commit', Buffer.from(bot), [bot]).at(0).rule, 'private-known-value');
+  const contact = ['maintainer', 'github.com'].join('@');
+  assert.equal(scanContent('commit', Buffer.from(contact)).at(0).rule, 'contact-email');
+  assert.equal(scanContent('commit', Buffer.from(bot + '.untrusted.dev')).at(0).rule, 'contact-email');
+});
 test('repository scan covers tracked ignored artifacts and untracked public files', () => fixture(async (_, repo) => {
   await file(repo, 'docs/research/raw.md', 'private input'); await commit(repo);
   await file(repo, '.gitignore', 'docs/research/**\n.local/\n');
@@ -74,6 +82,24 @@ test('history inspection catches a private source removed from the current tree'
   await rm(join(repo, 'docs/research/raw.md')); await file(repo, 'source.ts', 'export {};'); await commit(repo);
   assert.deepEqual(await scanFiles(repo, await candidates(repo)), []);
   assert((await scanHistory(repo)).findings.some((finding) => finding.rule === 'private-history-path'));
+}));
+test('only the exact previously published private-directory notice is allowed in history', () => fixture(async (_, repo) => {
+  // Previously public text only; business examples must never become fixtures.
+  const notice = '# 受控业务资料\n\n此目录用于本地受控业务文件，不随公开仓库发布。原始工作簿、SOP、发票、报关、物流资料和图片可能含公司、店铺、商品、地址、联系人、税务及交易数据；目录中除本说明外的内容均由版本控制和公开导出排除。\n\n应用数据应放在项目外的 `DATA_DIR`，凭据放在未跟踪的环境配置中。公开测试和文档仅使用独立编造的示例。不要把真实原件换个名称当成脱敏文件，也不要把原件哈希、截图或解压后的 XML 放入公开目录。\n\n本次处理前的原件已保留在项目外的私有备份目录；具体路径由本地维护记录管理，公开仓库不提供来源文件清单。\n';
+  await file(repo, 'docs/private/README.md', notice); await commit(repo);
+  assert((await scanFiles(repo, await candidates(repo))).some((finding) => finding.rule === 'private-or-generated-path'));
+  assert.deepEqual((await scanHistory(repo)).findings, []);
+  const marker = ['受控', '业务资料'].join('');
+  assert((await scanHistory(repo, [marker])).findings.some((finding) => finding.rule === 'private-known-value'));
+  await file(repo, 'docs/private/README.md', notice + '\nNew local example\n'); await commit(repo);
+  assert((await scanHistory(repo)).findings.some((finding) => finding.rule === 'private-history-path'));
+}));
+test('public export excludes a tracked private README even when no ignore rule exists', () => fixture(async (root, repo) => {
+  await file(repo, 'source.ts', 'export {};');
+  await file(repo, 'docs/private/README.md', 'Local business example'); await commit(repo);
+  const out = join(root, 'public'); const report = await exportPublic({ repo, out });
+  assert.equal(report.result, 'passed');
+  assert(!(await candidates(out)).some((path) => path.startsWith('docs/private/')));
 }));
 test('private filenames are blocked and redacted from working tree and history reports', () => fixture(async (_, repo) => {
   const marker = ['Synthetic', 'SensitiveName'].join('-');

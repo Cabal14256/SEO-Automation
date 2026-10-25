@@ -23,7 +23,7 @@ export function inside(parent, child) {
 }
 export function privatePath(path) {
   path = path.replaceAll('\\', '/');
-  if (/^docs\/(?:private|research|acceptance\/evidence)\/README\.md$/i.test(path)) return false;
+  if (/^docs\/(?:research|acceptance\/evidence)\/README\.md$/i.test(path)) return false;
   return /(?:^|\/)(?:\.git|\.local|\.vite|node_modules|dist|data|private|coverage|test-results|playwright-report|__pycache__)(?:\/|$)/i.test(path)
     || /^docs\/(?:research|acceptance\/evidence|templates)\//i.test(path)
     || /(?:^|\/)\.env(?:\.(?!example$)[^/]*)?$/i.test(path)
@@ -79,7 +79,9 @@ export function scanContent(path, bytes, values = []) {
     const line = text.slice(text.lastIndexOf('\n', match.index) + 1, text.indexOf('\n', match.index) < 0 ? text.length : text.indexOf('\n', match.index));
     if (/(?:^|:)pnpm-lock\.yaml$/.test(path) && /^\s+deprecated:\s/.test(line)) continue;
     const domain = match[0].split('@').at(-1).toLowerCase();
-    if (domain === 'users.noreply.github.com') continue;
+    // GitHub private identities and its exact web-commit bot address are public
+    // metadata. Known private values below still take precedence over this rule.
+    if (domain === 'users.noreply.github.com' || match[0].toLowerCase() === 'noreply@github.com') continue;
     if (!/(?:^|\.)(?:example\.(?:com|org|net|invalid)|localhost|invalid|test|local)$/.test(domain)) report('contact-email', match.index);
   }
   for (const match of text.matchAll(/[\p{Script=Han}]{2,}(?:有限责任公司|有限公司|股份公司)/gu)) if (!/(?:示例|测试|演示|虚构|模拟)/.test(match[0])) report('company-legal-name', match.index);
@@ -124,7 +126,11 @@ export async function scanHistory(repo, values = []) {
     const sensitiveFilename = path && scanContent('filename', Buffer.from(path), values).length > 0;
     const label = `history:${oid.slice(0, 12)}${path ? `:${sensitiveFilename ? '<private-filename>' : path}` : ''}`;
     if (sensitiveFilename) findings.push({ path: label, line: 1, rule: 'sensitive-history-filename' });
-    if (path && privatePath(path)) { findings.push({ path: label, line: 1, rule: 'private-history-path' }); continue; }
+    // This exact, reviewed public notice was tracked before docs/private became
+    // entirely local. Keep inspecting its contents without allowing any new
+    // private README, any other path, or this file in the current tree/export.
+    const legacyPublicNotice = path === 'docs/private/README.md' && oid === 'a037a5d4f8cc0287d94d0c3b6312632cfe215409';
+    if (path && privatePath(path) && !legacyPublicNotice) { findings.push({ path: label, line: 1, rule: 'private-history-path' }); continue; }
     if (Number(size) > 8 * 1024 * 1024) { findings.push({ path: label, line: 1, rule: 'oversized-history-object' }); continue; }
     inspect.push({ oid, label });
   }

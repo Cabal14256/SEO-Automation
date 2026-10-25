@@ -1,6 +1,6 @@
 # M5–M8 实施与技术验收
 
-更新：2026-10-22，Asia/Shanghai。需求见 [实施计划](./M5-M8%20PLAN.md)。
+本文记录 2026-10-22 的 M5–M8 阶段交付与验收边界；后续变更和完整迁移范围见[当前实现状态](./implementation-status.md)及[运行维护](../operations/runbook.md)。业务时区为 Asia/Shanghai。阶段需求见 [实施计划](../archive/plans/m5-m8-plan.md)。
 
 ## 已实现链路
 
@@ -12,7 +12,7 @@
 
 ## 入口、默认与限制
 
-发货管理新增“领星单据与分配”“物流与交接”“报关与 9810”“批次归档”；费用入口为 `/finance`。旧 M2–M4 路由与向导保留。接口见 [工作流 API](./api/workflows.md)。
+发货管理新增“领星单据与分配”“物流与交接”“报关与 9810”“批次归档”；费用入口为 `/finance`。旧 M2–M4 路由与向导保留。接口见 [工作流 API](../api/workflows.md)。
 
 - **领星始终只读**。创建单据、库存分配、确认发货、备注及费用修改都由人员在外部系统执行，系统保存核对结果和凭据。
 - M5、物流、报关及费用分别分组，按箱关联。一张 M4 文件可对应多张外部单，费用细化到外部单号。
@@ -35,9 +35,9 @@ corepack pnpm m5-m8:browser
 
 隔离集成使用独立 PostgreSQL、DATA_DIR 和合成身份，禁止外部业务请求。覆盖 M2/M3/M4 真实技术链路、M5–M8、重放、冲突、缺货、部分交接、七页复核、分摊、补账、归档失效及独立恢复。浏览器使用 HTTP 夹具，覆盖操作恢复、下载、键盘和桌面／窄屏。技术通过不替代接收系统实际导入、真实批次及业务签收。
 
-本轮结果见 [技术验收记录](./acceptance/m5-m8-technical.md) 和 [前端操作与验证](./acceptance/m5-m8-frontend.md)。
+本轮结果见 [技术验收记录](../acceptance/m5-m8-technical.md) 和 [前端操作与验证](../acceptance/m5-m8-frontend.md)。
 
-升级前按 [运行说明](./operations.md) 备份数据库和 DATA_DIR，停止旧 API/Worker，执行 `corepack pnpm db:migrate` 应用 `0017_flashy_surge`，启动新版本。迁移仅新增工作流表，不补造旧批次完成事实。独立 Worker 处理 `workflow-file-export`；恢复后核对来源文件和未决生成任务。
+升级前按 [运行说明](../operations/runbook.md) 备份数据库和 DATA_DIR，停止旧 API/Worker，执行 `corepack pnpm db:migrate` 应用 `0017_flashy_surge`，启动新版本。迁移仅新增工作流表，不补造旧批次完成事实。独立 Worker 处理 `workflow-file-export`；恢复后核对来源文件和未决生成任务。
 
 ## 待补真实资料
 

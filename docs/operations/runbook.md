@@ -1,5 +1,13 @@
 # 运行与维护说明
 
+## 使用范围与当前入口
+
+本页用于内部维护，包含按日期追加的当前操作和历史阶段记录。账号、端口、路径与服务名是本项目环境约定，其他环境须独立适配；不应直接照搬到生产。当前能力与待验事项见[实现状态](../development/implementation-status.md)，文档分类见[总导航](../README.md)。
+
+截至 2026-10-25，发货按月内发货次管理；发票采用后台任务、整批统一检查与集中补齐，检查通过后生成合并 XLSX。新发票不要求 M3 实物箱整组确认，采用有效 M2、箱码及最终逐箱数据。当前操作以[单据 API](../api/documents.md)、[箱规说明](../business/invoice-box-data.md)及实现状态中的最新变更为准，下文旧周范围、手动逐票步骤与 M3 门槛仅用于历史兼容。
+
+升级前备份数据库及 `DATA_DIR`，执行全部待应用迁移；下文各阶段记录的迁移编号只描述当时的变更，不能作为当前升级的终止版本。首次环境配置见[依赖与首次启动](#依赖与首次启动)，受控业务样例不得进入 Git。
+
 ## 月内发货次操作（2026-10-24）
 
 发货时间统一显示“某月第几次”，需求、发货、报表及制作发票入口取消周选择。不同周或月份导入的需求可一起安排，首次业务日期保留为来源事实。人工建立与自动导入共用月计数器；人工选择编号日期及首票需求，整次建立成功才领取次数，之后手动同步与核对，不会因创建而访问领星。
@@ -14,7 +22,7 @@
 
 实物箱确认已从工作区移除。完成 M2 数量、箱关系、箱序和箱码校验后，直接建立发票；系统从绑定的领星逐箱快照带入 PO、KG 毛重和 CM 长宽高。在“单票资料 → 逐箱制单资料”按箱修改，保存资料修订后再校验与生成。自动来源与最终采用值并列展示，人工修改只作用于本票；每箱“恢复自动值”移除该箱全部覆盖，点击后仍须保存资料修订。显式清空会作为缺值阻塞生成。来源缺值或未知单位可在本票填入有效值；箱身份及数量问题仍须回 M2 处理。
 
-已有文件通过“更正”修改箱规，重新生成并复核；旧文件和历史保持原内容。发票及后续工作流采用同一最终逐箱值，物流回收重量、计费重和报关毛净重等独立事实仍按各模块填写。重新打开读取已保存修订；显式采用更新来源保留相同内部箱 ID 的人工覆盖，已移出本票箱的覆盖会移除。详细取值及兼容规则见[发票箱规](./business/invoice-box-data.md)。
+已有文件通过“更正”修改箱规，重新生成并复核；旧文件和历史保持原内容。发票及后续工作流采用同一最终逐箱值，物流回收重量、计费重和报关毛净重等独立事实仍按各模块填写。重新打开读取已保存修订；显式采用更新来源保留相同内部箱 ID 的人工覆盖，已移出本票箱的覆盖会移除。详细取值及兼容规则见[发票箱规](../business/invoice-box-data.md)。
 
 此次调整不删除旧 M3 表、确认、实物 XLSX、任务或历史引用；备份与归档继续保留并校验这些材料。恢复验证兼容没有 M3 引用的新发票，以及有 M3 引用的历史发票；历史引用仍须实际存在。下文旧 M3 操作只作历史兼容参考，不是当前发票的生成门槛。
 
@@ -22,7 +30,7 @@
 
 先备份数据库和 DATA_DIR，停止旧 API/Worker，执行 `corepack pnpm db:migrate` 应用 `0017_flashy_surge`，再启动新版本。迁移只增加工作流表，不认定旧批次完成。新增队列 `workflow-file-export` 由独立 Worker 处理。
 
-先准备领星单据并登记库存分配结果，回收物流订单、箱唛和重量，完成线下出货复核后放行。实际已交但条件不全时填写异常原因保留事实。报关和9810分别绑定提交文件及反馈；费用按外部单号核对，补账／退款追加行后重新结清。批次归档页实时展示阻塞项；成功且依赖有效的 ZIP 才显示已归档。历史包保留但不能替代新确认。详见 [M5–M8 说明](./m5-m8-implementation.md)。
+先准备领星单据并登记库存分配结果，回收物流订单、箱唛和重量，完成线下出货复核后放行。实际已交但条件不全时填写异常原因保留事实。报关和9810分别绑定提交文件及反馈；费用按外部单号核对，补账／退款追加行后重新结清。批次归档页实时展示阻塞项；成功且依赖有效的 ZIP 才显示已归档。历史包保留但不能替代新确认。详见 [M5–M8 说明](../development/m5-m8-implementation.md)。
 
 ## 自动确认与编码（2026-10-20）
 
@@ -72,7 +80,7 @@
 
 技术验证使用 `corepack pnpm m4:verify`、`corepack pnpm m4:browser`，历史 M3 回归用于兼容检查。丰信接收系统实际导入、物流线下复核和人工签收分别记录为业务验收；未实际完成时继续待验。独立商业发票、其他报关文件及外部写入不在首期范围。
 
-更新：2026-10-19，业务时区 `Asia/Shanghai`。当前已交付需求提交、周批次、人工分组和完整只读制表；需求导入使用五步向导及显式保存的草稿箱，发货批次使用下述列表、新建与处理向导，店铺映射归入设置。T13/T22 资料预检、对账与人工签收工具见[验收说明](./acceptance/t13-t22-runbook.md)。当前电脑独立试用环境的服务、内部 HTTPS、备份和恢复操作见[试用部署](./deployment/trial.md)。真实增量、业务签收、整机重启、第二台局域网客户端及独立介质验证仍按实际证据单列，不能由技术测试代替。下文旧阶段操作保留作历史参考。
+更新：2026-10-19，业务时区 `Asia/Shanghai`。当前已交付需求提交、周批次、人工分组和完整只读制表；需求导入使用五步向导及显式保存的草稿箱，发货批次使用下述列表、新建与处理向导，店铺映射归入设置。T13/T22 资料预检、对账与人工签收工具见[验收说明](../acceptance/t13-t22-runbook.md)。当前电脑独立试用环境的服务、内部 HTTPS、备份和恢复操作见[试用部署](../deployment/trial.md)。真实增量、业务签收、整机重启、第二台局域网客户端及独立介质验证仍按实际证据单列，不能由技术测试代替。下文旧阶段操作保留作历史参考。
 
 ## 发货管理工作区（2026-10-18）
 
@@ -123,7 +131,7 @@
 | 普通页面勾选、尚未生成预览的店铺选择 | 恢复后重新核对；不承诺把普通勾选当作持久确认。 |
 | 已发起而结果未知的业务提交 | 原 payload、`previewId`、选择范围和 `operationId` 用于原请求恢复；先重试原提交或核对提交记录，不能把未知结果当作已知失败。 |
 
-草稿 API 和并发保存规则见[需求导入契约](./api/imports.md#导入草稿箱2026-10-19)。当前头程业务渠道仍由人工填写；领星发货单渠道的官方 API [调研已完成](./integrations/fba-logistics-channel.md)，尚未接入在线补全，不自动调用这些接口。
+草稿 API 和并发保存规则见[需求导入契约](../api/imports.md#导入草稿箱2026-10-19)。当前头程业务渠道仍由人工填写；领星发货单渠道的官方 API [调研已完成](../integrations/fba-logistics-channel.md)，尚未接入在线补全，不自动调用这些接口。
 
 ### 关闭、刷新与恢复（2026-10-18 历史）
 
@@ -143,14 +151,14 @@
 
 其他窗口重新解析后，已核对的旧源行版本会失效。点击“核对最新解析版本”，回第二步读取并核对新源行，之后才能生成新预览或普通提交；历史解析仍不可新提交。恢复原未知提交属于原请求重放，保留其原始内容与操作编号。
 
-向导 UI 回归脚本为 [`scripts/t25/import-wizard-browser.mjs`](../scripts/t25/import-wizard-browser.mjs)，使用独立 Vite 和内存 HTTP fixtures，不连接业务数据库或领星：
+向导 UI 回归脚本为 [`scripts/t25/import-wizard-browser.mjs`](../../scripts/t25/import-wizard-browser.mjs)，使用独立 Vite 和内存 HTTP fixtures，不连接业务数据库或领星：
 
 ```powershell
 $env:IMPORT_BROWSER_CHANNEL = 'chrome'
 node scripts/t25/import-wizard-browser.mjs
 ```
 
-截图及 `result.json` 默认位于 `.local/t25/frontend/`，可用 `IMPORT_WIZARD_EVIDENCE_DIR` 指定目录，也可执行 `corepack pnpm imports:wizard:browser`。本轮向导12项检查通过；真实文件、确认与主列表回归及工程结果见[验收记录（私有记录说明）](./acceptance/evidence/README.md)。UI 技术结果不替代真实业务签收。
+截图及 `result.json` 默认位于 `.local/t25/frontend/`，可用 `IMPORT_WIZARD_EVIDENCE_DIR` 指定目录，也可执行 `corepack pnpm imports:wizard:browser`。本轮向导12项检查通过；真实文件、确认与主列表回归及工程结果见[验收记录（私有记录说明）](../acceptance/evidence/README.md)。UI 技术结果不替代真实业务签收。
 
 ## 设置与店铺映射（2026-10-18）
 
@@ -238,7 +246,7 @@ D 盘根目录仅保留一个 `D:/SCM-Automation` 总目录，源码仍位于该
 
 目录迁移应依次完成停机前基线、工作区与 Git 恢复点、正常停止应用与数据库、目录迁移、Windows 服务及备份任务路径更新，再核对文件哈希、数据库、健康状态及隔离恢复。详细机器清单和回退入口只保存在本机 `.local/migration` 中。此前验收 JSON 保留当时的旧目录，当前运行路径以本节和受控配置为准。
 
-根源码仓库采用新的干净历史，原历史不合并回来；日常开发与 GitHub 发布共用根仓库。旧公开快照仅用于归档，不再维护第二套源码，详见 [GitHub 发布](./github-publishing.md)。
+根源码仓库采用新的干净历史，原历史不合并回来；日常开发与 GitHub 发布共用根仓库。旧公开快照仅用于归档，不再维护第二套源码，详见 [GitHub 发布](../publishing/github-publishing.md)。
 
 正式首个管理员可用 `corepack pnpm --filter @scm/server admin:create --email <邮箱> --name <姓名> --role admin` 创建。密码通过交互输入；不要使用 `--password` 明文参数。仅支持管理员账户；CLI和HTTP创建/变更为其他角色均被拒绝，公开注册继续关闭。CLI是受控本机管理入口，HTTP账号管理必须有有效管理员会话。
 
@@ -246,7 +254,7 @@ D 盘根目录仅保留一个 `D:/SCM-Automation` 总目录，源码仍位于该
 
 升级前先停本项目API/Worker，再执行迁移与构建。迁移`0004_even_madelyne_pryor.sql`要求已有数据中至少存在一个有效管理员；不满足时中止，不会把普通账户自动升权。迁移保留现有管理员，停用非管理员、清空其登录会话并删除其`account`登录凭据；保留历史`user`身份、上传人/操作人关联和全部业务/审计记录。数据库约束禁止非管理员处于可用状态，账户默认角色改为admin。迁移会记录`account.admin_only_migration`及处理数量，不记录密码。
 
-本机受控`accounts.json`及`browser-accounts.json`已仅保留原管理员条目，原账号和密码不变。其他环境升级后也只保留原管理员条目，不展示凭据内容。浏览器或编辑器若仍显示旧文件内容，应重新打开文件。本机实际保留2个有效管理员、停用6个非管理员，清理22个会话和47条登录凭据，详见[管理员账户验收（私有记录说明）](./acceptance/evidence/README.md)。旧M0/D05/T09四角色报告保留为变更前历史证据。
+本机受控`accounts.json`及`browser-accounts.json`已仅保留原管理员条目，原账号和密码不变。其他环境升级后也只保留原管理员条目，不展示凭据内容。浏览器或编辑器若仍显示旧文件内容，应重新打开文件。具体账号处理结果仅保存在受控本地，公开说明不披露账号及会话数量，详见[管理员账户验收（私有记录说明）](../acceptance/evidence/README.md)。旧M0/D05/T09四角色报告保留为变更前历史证据。
 
 专项复查使用受控本地账号文件（默认`D:/SCM-Automation/.local/development/accounts.json`），运行`corepack pnpm admin:verify --report D:/SCM-Automation/.local/admin-only/integration.json`。脚本自启隔离API，验证原管理员登录、历史文件读取、旧角色/旧会话拒绝及账号创建/解禁限制；清理自身技术身份，不修改真实业务文件。
 
@@ -265,7 +273,7 @@ D 盘根目录仅保留一个 `D:/SCM-Automation` 总目录，源码仍位于该
 
 启动不会自动安装、构建或迁移；代码变更先执行检查与构建，再 `app-restart`。脚本用 PID、启动时间及入口路径确认进程身份。Windows 开发脚本终止应用进程时，数据库回滚未提交事务；此行为不等于生产服务优雅退出。不要手工结束所有 `node` 或 `postgres` 进程。
 
-`GET /api/v1/health` 的数据库断线返回 503；`worker=unknown/stale` 表示没有心跳或超过 30 秒未更新。`db-stop`、`db-start` 仅控制配置中的独立集群，可用于故障演练。数据库恢复后检查健康，必要时 `app-restart`；页面点击“重试”或刷新，不能以旧统计宣称在线。M0 接口与恢复策略见 [M0 接口说明](./api/m0.md)。
+`GET /api/v1/health` 的数据库断线返回 503；`worker=unknown/stale` 表示没有心跳或超过 30 秒未更新。`db-stop`、`db-start` 仅控制配置中的独立集群，可用于故障演练。数据库恢复后检查健康，必要时 `app-restart`；页面点击“重试”或刷新，不能以旧统计宣称在线。M0 接口与恢复策略见 [M0 接口说明](../api/m0.md)。
 
 ## 重跑本轮验收
 
@@ -288,7 +296,7 @@ corepack pnpm m0:browser
 
 浏览器脚本使用已锁定的 Playwright 和本机 Chrome。也可设 `M0_BROWSER_CHANNEL=msedge`；使用 Playwright 自带浏览器时执行 `corepack pnpm exec playwright install chromium` 并清除 channel 设置。本轮自带 Chromium 下载未完成，实际验证使用本机 Chrome。截图和 JSON 默认写入忽略目录 `.local/m0/browser`。停独立数据库后设置 `M0_BROWSER_MODE=outage` 可运行真实断线页面检查，完成后务必 `db-start`、恢复 healthy 模式并检查服务。
 
-`typecheck/lint/test/build` 是静态及单元检查；领星探测的18项是离线模拟回归；M0集成/浏览器使用真实本机数据库。它们都不能替代业务人员的真实货件与文件验收。当前管理员策略的重新验证见[管理员账户验收（私有记录说明）](./acceptance/evidence/README.md)，原M0结果见[历史验收记录（私有记录说明）](./acceptance/evidence/README.md)。
+`typecheck/lint/test/build` 是静态及单元检查；领星探测的18项是离线模拟回归；M0集成/浏览器使用真实本机数据库。它们都不能替代业务人员的真实货件与文件验收。当前管理员策略的重新验证见[管理员账户验收（私有记录说明）](../acceptance/evidence/README.md)，原M0结果见[历史验收记录（私有记录说明）](../acceptance/evidence/README.md)。
 
 ## T05 飞书取样与只读核验
 
@@ -304,7 +312,7 @@ corepack pnpm seller-mappings:seed --source 'D:/SCM-Automation/data/lingxing-pro
 
 源路径必须为本机真实快照，不能传报告摘要；用户ID可从管理员当前会话取得，不是密码。原件不修改，复制后建立 DATA_DIR 内不可变文件索引。该命令仅新增缺少 sid 的 candidate，不覆盖已维护记录；同源重复运行不新增文件。失败共同回滚目录、索引和审计，并清理新写文件。当前全部目录店铺候选已初始化，无需重复批准或重复调用外部接口。该数据不承诺反映缓存之后的授权变化。
 
-技术验证：在独立开发库运行 `corepack pnpm --filter @scm/server exec tsx src/seller-mapping-acceptance.ts --report ../../.local/t05/seller-mapping-integration.json`；浏览器运行前设置 `T05_CREDENTIALS_FILE` 为受控验收账号JSON，执行 `node scripts/t05/seller-mappings-browser.mjs`，需要本机 Chrome 时设置 `T05_BROWSER_CHANNEL=chrome`。脚本使用隔离技术映射，清理自身业务测试数据，真实全部目录店铺候选不被批准；测试账号保留停用审计。结果和业务验收边界见 [本轮验收记录（私有记录说明）](./acceptance/evidence/README.md)。
+技术验证：在独立开发库运行 `corepack pnpm --filter @scm/server exec tsx src/seller-mapping-acceptance.ts --report ../../.local/t05/seller-mapping-integration.json`；浏览器运行前设置 `T05_CREDENTIALS_FILE` 为受控验收账号JSON，执行 `node scripts/t05/seller-mappings-browser.mjs`，需要本机 Chrome 时设置 `T05_BROWSER_CHANNEL=chrome`。脚本使用隔离技术映射，清理自身业务测试数据，真实全部目录店铺候选不被批准；测试账号保留停用审计。结果和业务验收边界见 [本轮验收记录（私有记录说明）](../acceptance/evidence/README.md)。
 
 本机受控目录 `D:/SCM-Automation/.local/development/data/t05` 中，`inbox/initial` 放初始实际需求文件，`inbox/daily` 放同源/同模板之后一次实际追加或更正文件；可采用飞书人工导出或确定模板的人工填写路线。来源、填写或导出时间/范围、全量或追加语义及业务决定填入 `source-manifest.review.json`。当前尚未取得真实文件对，不能拿参考表或合成数据补充为“已验样本”。`review` 中是现有参考表结构、缓存店铺及待批准的别名候选，不是生产配置。
 
@@ -313,7 +321,7 @@ corepack pnpm seller-mappings:seed --source 'D:/SCM-Automation/data/lingxing-pro
 ./scripts/t05/inspect.ps1 -Source 'D:/SCM-Automation/.local/development/data/t05/inbox/initial/真实导出.xlsx' -Out 'D:/SCM-Automation/.local/development/data/t05/review/initial-profile.json'
 ```
 
-工具自动定位附带 Python，也可传 `-PythonPath`；仅使用标准库，不改变应用运行依赖。支持 XLSX、CSV、TSV，保留物理类型和日期格式，不自动赋予业务日期含义、不执行公式；旧 XLS 明确不支持。源文件与已存在报告不可覆盖。报告不含正文行值，但有私有来源路径与表头，保持在受控目录。工具说明见 [核验工具](../scripts/t05/README.md)，实际缺项和业务填写要求见 [T05 输入确认](./business/feishu-intake.md)。
+工具自动定位附带 Python，也可传 `-PythonPath`；仅使用标准库，不改变应用运行依赖。支持 XLSX、CSV、TSV，保留物理类型和日期格式，不自动赋予业务日期含义、不执行公式；旧 XLS 明确不支持。源文件与已存在报告不可覆盖。报告不含正文行值，但有私有来源路径与表头，保持在受控目录。工具说明见 [核验工具](../../scripts/t05/README.md)，实际缺项和业务填写要求见 [T05 输入确认](../business/feishu-intake.md)。
 
 ## T09 需求上传与解析
 
@@ -334,7 +342,7 @@ $env:IMPORT_BROWSER_EVIDENCE_DIR = 'D:/SCM-Automation/.local/t09/browser'
 corepack pnpm imports:browser
 ```
 
-浏览器脚本自建临时测试账号，使用实际API/Worker和原附件，不要求导出真实会话。验收排队跨重启或撤权场景时，不得让其他Worker同时消费import-parse；当前受管服务已升级，重跑前用 `./scripts/m0/runtime.ps1 app-stop` 暂停本项目应用，保持数据库运行，顺序执行脚本，最后用 `./scripts/m0/runtime.ps1 app-start` 恢复。初次浏览器验收使用旧版受管Worker和独立新版测试Worker；收尾14项集成重跑时已暂停受管应用，完毕恢复并核验健康。日常启动不受测试隔离要求影响。源码、原件、索引与本轮证据范围见 [T09验收记录（私有记录说明）](./acceptance/evidence/README.md)，契约见 [导入API](./api/imports.md)。
+浏览器脚本自建临时测试账号，使用实际API/Worker和原附件，不要求导出真实会话。验收排队跨重启或撤权场景时，不得让其他Worker同时消费import-parse；当前受管服务已升级，重跑前用 `./scripts/m0/runtime.ps1 app-stop` 暂停本项目应用，保持数据库运行，顺序执行脚本，最后用 `./scripts/m0/runtime.ps1 app-start` 恢复。初次浏览器验收使用旧版受管Worker和独立新版测试Worker；收尾14项集成重跑时已暂停受管应用，完毕恢复并核验健康。日常启动不受测试隔离要求影响。源码、原件、索引与本轮证据范围见 [T09验收记录（私有记录说明）](../acceptance/evidence/README.md)，契约见 [导入API](../api/imports.md)。
 
 ## 店铺来源设置与只读同步
 
@@ -361,7 +369,7 @@ corepack pnpm seller-catalog:browser
 corepack pnpm seller-catalog:browser --history-only
 ```
 
-既有真实同步与技术测试分界见[店铺来源验收（私有记录说明）](./acceptance/evidence/README.md)，不代表本轮再次执行外部查询。当前成品月/批次表与XLSX操作见上方工作区说明；整个流程保持领星业务数据只读。
+既有真实同步与技术测试分界见[店铺来源验收（私有记录说明）](../acceptance/evidence/README.md)，不代表本轮再次执行外部查询。当前成品月/批次表与XLSX操作见上方工作区说明；整个流程保持领星业务数据只读。
 
 ## 构建与部署边界（通用）
 
@@ -434,7 +442,7 @@ corepack pnpm reports:verify
 corepack pnpm m2:e2e
 ```
 
-后三个服务端验收使用独立随机技术数据且不访问企业API；`m2:e2e`默认也不发领星请求，需运行新版API/Worker和本机Chrome，验证后清理自身数据。真实查询必须显式加`--live`；本轮受控预算记录累计78/100次，不自动重置或覆盖。生成的成品、原始欧洲快照、快照哈希及浏览器截图在`.local/t12-m2/e2e/`；离线重跑放在其`offline/`子目录。技术报告和业务签收边界见[T12/M2验收（私有记录说明）](./acceptance/evidence/README.md)。
+后三个服务端验收使用独立随机技术数据且不访问企业API；`m2:e2e`默认也不发领星请求，需运行新版API/Worker和本机Chrome，验证后清理自身数据。真实查询必须显式加`--live`；本轮受控预算记录累计78/100次，不自动重置或覆盖。生成的成品、原始欧洲快照、快照哈希及浏览器截图在`.local/t12-m2/e2e/`；离线重跑放在其`offline/`子目录。技术报告和业务签收边界见[T12/M2验收（私有记录说明）](../acceptance/evidence/README.md)。
 
 ## 历史兼容：M3 实物箱核对操作（2026-10-18）
 
@@ -450,7 +458,7 @@ corepack pnpm m2:e2e
 
 发现来源实质变化时新确认／导出暂停，采用后全组重核；等值重采保留进度。已确认后修改实测使原确认失效，新测量保留且所有箱回到待核对。响应丢失须以相同内容和原操作号重试，页面在当前标签页保存未定结果操作号；采集失败明确重试，预算不自动增加，最近成功数据和观察时间保留。
 
-工程入口为 `corepack pnpm m3:verify`（隔离数据库／API／Worker技术夹具，并顺序执行M2分组、同步恢复和导出回归）和 `corepack pnpm m3:browser`（隔离浏览器流程及桌面／窄屏恢复）。技术检查已通过，完整结果见[M3技术验收（私有记录说明）](./acceptance/evidence/README.md)。用户明确没有可用真实批次，现场逐箱核对与明确人工签收仍为pending；技术检查和归档复算不能代替签收。
+工程入口为 `corepack pnpm m3:verify`（隔离数据库／API／Worker技术夹具，并顺序执行M2分组、同步恢复和导出回归）和 `corepack pnpm m3:browser`（隔离浏览器流程及桌面／窄屏恢复）。技术检查已通过，完整结果见[M3技术验收（私有记录说明）](../acceptance/evidence/README.md)。用户明确没有可用真实批次，现场逐箱核对与明确人工签收仍为pending；技术检查和归档复算不能代替签收。
 
 `node scripts/m3/archive-check.mjs` 可只读复算既有`data/lingxing-probe`和`data/lingxing-reference-check`原档案：每sid/FBA选最新同轮完整列表／详情／装箱组，核对原件前后哈希、Reference、逐箱关系、LB/IN换算及三表数字格式；不外联、不写数据库。结果在`.local/m3/archive.json`和显著命名的技术复算XLSX中，模拟“一致”仅用于隔离生成器输入，不表示现场核对或人工确认。
 
@@ -464,8 +472,8 @@ corepack pnpm m2:e2e
 
 恢复与本轮试用默认 `LINGXING_REQUESTS_ENABLED=false`，阻止鉴权、缓存令牌读取后的业务请求、续约和重试；显式凭据或旧排队任务不能绕过开关。真实业务同步前需核对凭据配置及原预算剩余22次。新导出在发布事务中保存已冻结投影，与发布后页面状态一致；历史文件不回改。
 
-每日备份任务、恢复密钥、隔离恢复端口和故障演练命令统一见[试用操作说明](./deployment/trial.md)。同机目录备份只算暂存，不能标为独立介质通过；系统重启由用户保存工作后执行。
+每日备份任务、恢复密钥、隔离恢复端口和故障演练命令统一见[试用操作说明](../deployment/trial.md)。同机目录备份只算暂存，不能标为独立介质通过；系统重启由用户保存工作后执行。
 
 ## 从领星补齐单据资料
 
-在“发票与单据”打开草稿，保存已有编辑后，点击“查询领星资料”。逐商品核对品名、材质、HS、价格来源和币种、链接及图片归档情况，填写采用原因，再点击“采用领星资料补齐空项”。默认不确认价格；只有逐项核对后才勾选价格确认。采用保存新的单据和资料版本，保留已有非空值，随后重新校验。权限不足会显示具体 API 名称；在领星开放平台为当前应用开通后重新查询，详见[接口权限说明](./integrations/lingxing-document-profiles.md)。主体、VAT、交税/报关方式、预约配送时段等尚需本票确认。
+在“发票与单据”打开草稿，保存已有编辑后，点击“查询领星资料”。逐商品核对品名、材质、HS、价格来源和币种、链接及图片归档情况，填写采用原因，再点击“采用领星资料补齐空项”。默认不确认价格；只有逐项核对后才勾选价格确认。采用保存新的单据和资料版本，保留已有非空值，随后重新校验。权限不足会显示具体 API 名称；在领星开放平台为当前应用开通后重新查询，详见[接口权限说明](../integrations/lingxing-document-profiles.md)。主体、VAT、交税/报关方式、预约配送时段等尚需本票确认。

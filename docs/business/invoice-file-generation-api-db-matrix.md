@@ -4,7 +4,7 @@
 
 ## M4 当前实现（2026-10-19）
 
-本期目标已经明确为丰信 B2B 单票 XLSX，版本化申报资料、模板、分票草稿、校验、生成、复核、更正及历史已实现；独立商业发票与其他报关文件仍属后续。下文前期调查中“M3 未实现”“B2B 与申报资料留待后续”“格式未选择”不再表示当前状态。实际接口和持久化分别见[单据 API](../api/documents.md)、[数据模型](../data-model.md)，业务门槛见[当前规则](./rules.md)。真实接收系统导入、现场核对及签收继续待验。
+本期目标已经明确为丰信 B2B 单票 XLSX，版本化申报资料、模板、分票草稿、校验、生成、复核、更正及历史已实现；独立商业发票与其他报关文件仍属后续。下文前期调查中“M3 未实现”“B2B 与申报资料留待后续”“格式未选择”不再表示当前状态。实际接口和持久化分别见[单据 API](../api/documents.md)、[数据模型](../architecture/data-model.md)，业务门槛见[当前规则](./rules.md)。真实接收系统导入、现场核对及签收继续待验。
 
 ## 当前箱规调整（2026-10-23）
 
@@ -26,7 +26,7 @@ M3 已接入独立的 Reference／PO、领星毛重箱规来源、KG／CM 换算
 
 核心货件与箱字段来源于接口规范和私有验证，真实样本清单不公开，也不代表非 STA、全部国家或正式单据已通过验收；箱名别名、数量口径和分组按[算法说明](./us-allocation-algorithm.md)处理。
 
-领星货件接口不能替代申报主数据。中文/英文最终申报品名、材质、用途、品牌、型号、HS 编码、申报单价、币种、数量单位、VAT、报关方式、交税方式、渠道规则、卖方主体和模板版本，需要项目内维护的主数据或人工确认。当前M1/M2已实现需求、批次、不可变商品箱候选、确认和制表导出；M3独立实物复核及M4申报主数据、单据生成仍未交付。实际关系见[数据模型](../data-model.md)，不沿用本页早期“尚无发货业务表”的结论。
+领星货件接口不能替代申报主数据。中文/英文最终申报品名、材质、用途、品牌、型号、HS 编码、申报单价、币种、数量单位、VAT、报关方式、交税方式、渠道规则、卖方主体和模板版本，需要项目内维护的主数据或人工确认。M1/M2 已实现需求、批次、不可变商品箱候选、确认和制表导出，M4 已实现申报资料维护及首期 B2B 单据生成；M3 保留历史兼容，新发票不再要求实物整组确认。实际关系见[数据模型](../architecture/data-model.md)，不沿用前期调查中“尚无发货业务表”或“M3/M4 未交付”的结论。
 
 最小可用生成路径是：
 
@@ -111,7 +111,7 @@ M3 已接入独立的 Reference／PO、领星毛重箱规来源、KG／CM 换算
 
 ## 数据库需要实现的业务实体
 
-`docs/data-model.md` 已规划以下基础实体：`weekly_batch`、`sub_batch`、`shipment`、`shipment_item`、`box`、`box_item`、`source_import`、`sync_snapshot`、`validation_issue`、`manual_decision` 和 `export_version`。
+`docs/architecture/data-model.md` 已规划以下基础实体：`weekly_batch`、`sub_batch`、`shipment`、`shipment_item`、`box`、`box_item`、`source_import`、`sync_snapshot`、`validation_issue`、`manual_decision` 和 `export_version`。
 
 为支持文件生成，还需要补充或明确以下实体：
 
@@ -152,7 +152,7 @@ M3 已接入独立的 Reference／PO、领星毛重箱规来源、KG／CM 换算
 
 ## 依据
 
-- [2026-10-18用户确认与M3待定范围](./rules.md#m3取值依据与待定范围2026-10-18)
+- [2026-10-18 M3 历史取值与确认规则](./rules.md#历史规则m3取值依据与确认规则2026-10-18)
 - 受控发票流程资料及物流商 B2B 模板（真实文件名不公开）：字段和现有流程依据；SOP中的外部写入、库存和打印操作不属于本轮执行指令。
 - [官方货件装箱接口](https://apidoc.lingxing.com/new/api-docs/FBA/ListShipmentBoxes/)与[货件详情接口](https://apidoc.lingxing.com/new/api-docs/FBA/ShipmentDetailList/)：2026-10-18只读核对返回字段；本轮未新增真实领星业务请求。
 - [领星接口能力](../integrations/capabilities.md)
@@ -163,5 +163,5 @@ M3 已接入独立的 Reference／PO、领星毛重箱规来源、KG／CM 换算
 - [装箱接口（私有研究说明）](../research/README.md)
 - [FBA 商品列表接口（私有研究说明）](../research/README.md)
 - [库存接口（私有研究说明）](../research/README.md)
-- [发货模块数据模型](../data-model.md)
-- [项目实施计划](../发货全流程自动化系统实施计划-技术栈重设计版.md)
+- [发货模块数据模型](../architecture/data-model.md)
+- [项目实施计划](../archive/plans/original-implementation-plan.md)

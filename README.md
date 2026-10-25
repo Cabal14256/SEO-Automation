@@ -1,48 +1,124 @@
-# 发货全流程自动化系统
+# SCM Automation · 发货流程自动化工作台
 
-M5–M8 已增加本地单据与分配核对、物流交接、报关／9810、费用分摊及归档；领星保持只读。入口、运行限制和待补真实资料见 [交付说明](./docs/m5-m8-implementation.md)。
+面向特定内部跨境发货流程的 TypeScript 项目，将需求导入、货件整理、箱数据核对、单据生成和后续履约记录串联到同一个工作台，保留来源、修订、文件版本与操作记录。
 
-TypeScript 单仓项目，包含 React 工作台、Hono API、独立 Worker 和 PostgreSQL。支持店铺双来源、需求上传与草稿、差异确认、周批次人工分组、领星只读同步、M2 制表和 M4 丰信 B2B 单票 XLSX。发票直接采用领星逐箱数据，并允许在本票修改 PO、毛重和长宽高，不再要求实物箱确认。
+> [!WARNING]
+> **内部项目声明**
+>
+> 本项目围绕特定内部业务规则、账号权限、第三方接口及运行环境开发，公开源码仅供内部研究、维护和技术参考。项目中的字段映射、页面与自动化脚本选择器、账号配置、单据模板和业务判断均具有明显的环境依赖性，不保证适用于其他组织、账号或业务场景。
+>
+> **不建议直接复制、照搬或用于生产环境。** 如需参考实现，请先独立完成安全审查、合规评估、测试验证和环境适配，取得必要的数据与接口授权，并自行承担使用风险。示例、测试通过和历史技术记录均不代表真实业务验收或生产就绪。
 
-本仓库中的店铺名称、编号、货件和商品示例均使用虚构数据。真实业务文件、接口响应、数据库备份、截图及历史验收资料保留在受控本地目录，不随公开仓库发布。示例和自动化测试不能代替真实业务签收。
+[文档导航](docs/README.md) · [当前实现与限制](docs/development/implementation-status.md) · [运行维护](docs/operations/runbook.md) · [隐私与发布](docs/publishing/privacy.md)
+
+## 项目范围
+
+| 环节 | 当前能力 |
+| --- | --- |
+| 需求接收 | XLSX 与在线表格导入、店铺匹配、差异预览、显式提交、账号隔离的草稿 |
+| 发货整理 | 按月管理发货次与票号，支持自动整理、人工分组及完整 FBA 货件关联 |
+| 数据与制表 | 领星只读查询、商品与逐箱核对、箱序与箱码、发货表 XLSX 导出 |
+| 发票与单据 | 版本化资料和模板、后台出单任务、集中补齐、单票及整批合并 XLSX、文件复核与更正 |
+| 后续流程 | 本地单据与分配核对、物流交接、报关与 9810 记录、费用分摊及批次归档 |
+| 维护与追溯 | 管理员认证、独立 Worker、操作审计、不可变文件、数据库迁移及备份恢复工具 |
+
+领星业务数据保持**只读**。外部建单、库存分配、发货确认及费用回填等动作由业务人员在相应系统执行，本项目登记结果与核对凭据。当前发票直接采用领星／M2 逐箱快照，允许本票修订箱规；旧 M3 实物箱确认仅保留历史兼容。具体规则见[业务规则](docs/business/rules.md)与[发票箱规](docs/business/invoice-box-data.md)。
+
+第三方账号权限、渠道与国家覆盖、接收系统实际导入、真实批次签收及目标设备部署仍需逐项验证。M5–M8 的交付范围和待补资料见[实施说明](docs/development/m5-m8-implementation.md)。
+
+## 技术与结构
+
+项目采用 pnpm workspace：React + Vite 提供工作台，Hono 提供 API，独立 Worker 执行后台任务；PostgreSQL 保存业务记录和任务状态，Drizzle 管理数据模型与迁移，共享契约使用 Zod 校验。
 
 ```text
-apps/web/              React + Vite 工作台
-apps/server/           Hono API、独立 Worker、Drizzle 迁移
-packages/contracts/    浏览器与服务端共用的字段校验
-docs/                  业务规则、数据模型、接口、验收场景和运行说明
+apps/web/              React 工作台
+apps/server/           Hono API、Worker、数据库迁移
+packages/contracts/    前后端共享契约与字段校验
+scripts/               开发、验收、部署、隐私检查工具
+docs/                  分类文档与历史计划
 ```
 
-开发需要 Node.js >=24.22.1 <25、Corepack 和 PostgreSQL 18。版本文件固定为 `24.22.1`；这是 2026-10-21 安全更新，修复 Brotli、TLS、DNS 等漏洞，详见 [Node.js 官方公告](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)。升级运行时后须重启 API 和 Worker；历史发布包自带的 `runtime/node.exe` 也须通过新发布包更新。
+API 与 Worker 分别启动，业务文件保存在私有 `DATA_DIR`，数据库保存文件索引及哈希。构建部署时 API 可提供 `apps/web/dist`。数据关系见[数据模型](docs/architecture/data-model.md)。
 
-1. 运行 `corepack pnpm install --frozen-lockfile`。
-2. 复制 `apps/server/.env.example` 为 `apps/server/.env`，配置数据库连接、认证密钥和受控私有数据目录。不要提交凭据或业务文件。
-3. 运行 `corepack pnpm db:migrate`，按[运行说明](./docs/operations.md)创建首个管理员账号。
-4. 运行 `corepack pnpm dev` 启动 API 和 Web；另开终端运行 `corepack pnpm dev:worker`。浏览器访问 Vite 输出的本机地址。
+## 本地研究与开发
 
-无需数据库时，可运行 `node scripts/lingxing/probe.mjs --demo` 查看模拟取数报告；真实账号接入见[脚本说明](./docs/integrations/lingxing-probe.md)。
+以下命令从仓库根目录执行。项目当前要求 Node.js `>=24.22.1 <25`、Corepack、pnpm `12.11.2` 和 PostgreSQL 18；运行时版本以 [package.json](package.json)、[.node-version](.node-version) 和锁文件为准。配套环境管理与部署脚本主要面向 Windows / PowerShell。
+
+### 离线示例
+
+无需数据库或真实账号，可先查看使用虚构数据的取数报告：
+
+```powershell
+node scripts/lingxing/probe.mjs --demo --out .local/demo/lingxing-probe
+```
+
+这只演示数据结构和核对方式，不启动完整工作台，也不验证真实接口权限。完整说明见[领星探测脚本](docs/integrations/lingxing-probe.md)。
+
+### 启动工作台
+
+1. 安装依赖：
+
+   ```powershell
+   corepack pnpm install --frozen-lockfile
+   ```
+
+2. 复制 `apps/server/.env.example` 为 `apps/server/.env`，配置独立的开发数据库、随机认证密钥和私有文件目录。调整示例中的机器路径；离线研究时设置 `LINGXING_REQUESTS_ENABLED=false`。真实凭据仅保存在受控本地配置中。
+
+3. 确认数据库可访问后执行迁移：
+
+   ```powershell
+   corepack pnpm db:migrate
+   ```
+
+4. 按[首次启动说明](docs/operations/runbook.md#依赖与首次启动)创建管理员，密码通过交互输入。系统关闭公开注册，仅支持管理员账户。
+
+5. 分别在两个终端启动 API／Web 和 Worker：
+
+   ```powershell
+   corepack pnpm dev
+   ```
+
+   ```powershell
+   corepack pnpm dev:worker
+   ```
+
+浏览器访问 Vite 输出的本机地址，默认 `http://localhost:5173`；默认 API 地址为 `http://localhost:3001`。Windows 独立集群初始化、进程管理及故障恢复另见[运行维护](docs/operations/runbook.md)，应在阅读后选择适合本机的配置方式。
+
+### 常用检查
 
 ```powershell
 corepack pnpm typecheck
 corepack pnpm lint
 corepack pnpm test
 corepack pnpm build
-```
-
-需求导入支持“飞书表格”和“需求导入”两种结构，业务日期固定为首次接收时的上海日期；重复导入不重复建立需求，变更需要显式确认。未完成内容可保存至账号隔离的草稿箱。批次、商品与逐箱表、导出记录通过发货工作区管理；导出或打印后冻结，更正建立新版本。整个流程仅查询领星业务数据。
-
-发货管理提供发货工作台和发票与单据入口。M2 四步向导完成数量核对、箱序和箱码；发票草稿可先保存，生成需有效 M2、箱码、完整有效的最终箱数据及申报资料。取数、人工修改、历史兼容和下游文件说明见[发票箱规](./docs/business/invoice-box-data.md)。单据资料和模板版本在设置中维护，文件复核、取消、更正及历史按[操作说明](./docs/operations.md)执行。
-
-本机源码、开发及试用资料统一收纳在 `SCM-Automation` 下。源码保留在根目录；`.local/development` 保存开发数据库和文件，`.local/trial` 保存独立试用环境，`.local/archive` 保存旧历史及演练副本。整个 `.local` 和真实配置均被 Git 忽略。
-
-公开到 GitHub 前，在源码根目录执行：
-
-```powershell
-corepack pnpm privacy:install-hook
+corepack pnpm privacy:test
 corepack pnpm privacy:check
 corepack pnpm privacy:history
 ```
 
-整理后的根仓库使用新的干净历史，日常开发与 GitHub 发布共用这一个仓库。原 Git 历史、旧公开快照及原始资料仅作为被忽略的本机归档保存，不将旧提交、分支或标签合并回来。仅添加 `.gitignore` 不会清除已有历史中的敏感文件；尚未整理过的副本须先完成旧历史归档和干净历史迁移。`privacy:export` 仅保留为可选的项目外快照工具，不是日常发布步骤。默认检查不证明未知业务数据已被全部识别，新增样例应始终使用独立编造的数据。上传步骤见 [GitHub 发布](./docs/github-publishing.md)。
+集成、浏览器和部署验收分别需要对应的隔离环境，入口见[验收文档](docs/README.md#验收与验证)。技术验证不能替代业务人员对真实数据和文件的复核。
 
-完整说明见[文档索引](./docs/README.md)、[实现状态](./docs/implementation-status.md)和[隐私发布说明](./docs/privacy.md)。生产环境由 API 提供 `apps/web/dist`，API 与 Worker 为独立进程；部署和恢复按[运行说明](./docs/operations.md)在目标设备验收。
+## 文档入口
+
+| 阅读目的 | 入口 |
+| --- | --- |
+| 查找全部文档、区分现行规则与历史方案 | [文档导航](docs/README.md) |
+| 了解实现范围和待验事项 | [当前实现状态](docs/development/implementation-status.md) |
+| 理解业务字段、数量口径及制单规则 | [业务规则](docs/business/rules.md)、[字段映射](docs/business/field-mapping.md) |
+| 阅读接口与数据设计 | [API 导航](docs/README.md#接口契约)、[数据模型](docs/architecture/data-model.md) |
+| 配置、运行、部署和恢复 | [运行维护](docs/operations/runbook.md)、[试用部署](docs/deployment/trial.md) |
+| 准备 GitHub 展示与上传 | [隐私说明](docs/publishing/privacy.md)、[发布步骤](docs/publishing/github-publishing.md) |
+
+## 私有资料与 Git 边界
+
+**`docs/private/` 是仅供本地使用的业务示例目录，整个目录（包括其中的 README）均不纳入 Git，也不随源码或发布包上传。** 目录可能包含原始业务示例，不能因文件名带有“示例”就视为可公开素材。公开文档不依赖该目录即可阅读。
+
+原始研究、验收证据、业务模板、真实配置、数据库、备份及截图也应保存在受控且被忽略的位置；公开测试与文档示例应独立编造。`.local/` 用于本地开发、试用和归档数据，不属于源码。
+
+首次克隆后可安装本地推送检查：
+
+```powershell
+corepack pnpm privacy:install-hook
+```
+
+发布前检查当前文件、暂存区与 Git 历史，按[GitHub 发布步骤](docs/publishing/github-publishing.md)操作。`.gitignore` 不会移除已经跟踪的文件或清除旧提交；检查器也不能识别所有未知业务资料，仍需人工复核。
