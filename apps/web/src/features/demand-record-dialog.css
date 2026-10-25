@@ -1,0 +1,20 @@
+.demand-record-dialog { min-width: 0; padding: 24px; }
+.demand-record-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.demand-record-heading h3 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+.demand-record-heading p, .demand-record-dialog form > p { margin: 8px 0 0; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.demand-record-dialog h4 { margin: 20px 0 0; font-size: 16px; }
+.demand-record-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.demand-record-values, .demand-record-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; margin: 24px 0; }
+.demand-record-values > div, .demand-record-fields > .field { min-width: 0; }
+.demand-record-values dt { margin-bottom: 6px; color: var(--color-muted); font-size: 12px; }
+.demand-record-values dd { margin: 0; font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.demand-record-wide { grid-column: 1 / -1; }
+.demand-record-reason { margin-top: 24px; }
+.demand-record-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 20px; }
+.demand-record-actions > button { white-space: nowrap; }
+.demand-record-heading .demand-record-actions { margin-top: 0; }
+.demand-record-history { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--color-line); }
+.demand-record-history > summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+.demand-record-guard { margin: 20px 0; padding: 16px; border: 1px solid var(--color-line); border-radius: 9px; background: var(--color-canvas); font-size: 13px; line-height: 1.8; }
+.demand-record-guard > p { margin: 0; }
+@media (max-width: 560px) { .demand-record-dialog { padding: 20px 16px; } .demand-record-values, .demand-record-fields { grid-template-columns: minmax(0, 1fr); } }

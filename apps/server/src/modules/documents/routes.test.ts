@@ -1,0 +1,196 @@
+import { randomUUID } from 'node:crypto';
+import { Hono } from 'hono';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+const mocks = vi.hoisted(() => ({ session: vi.fn(), requireActor: vi.fn(), candidates: vi.fn(), list: vi.fn(), create: vi.fn(), revise: vi.fn(), validate: vi.fn(), cancel: vi.fn(), correct: vi.fn(), review: vi.fn(), get: vi.fn(), exports: vi.fn(), requestExport: vi.fn(), readExport: vi.fn(), boss: vi.fn(), lingxingPreview: vi.fn(), lingxingApply: vi.fn(), imagePreview: vi.fn(), fieldOptions: vi.fn(), profileWrite: vi.fn(), profileStatus: vi.fn(), profileGet: vi.fn(), autoStart: vi.fn(), autoGet: vi.fn(), autoList: vi.fn(), autoRetry: vi.fn(), autoRequirements: vi.fn(), autoSupplement: vi.fn(), autoDelete: vi.fn(), bundleRead: vi.fn() }));
+vi.mock('../../auth.js', () => ({ auth: { api: { getSession: mocks.session } } }));
+vi.mock('../../config.js', () => ({ readConfig: () => ({ WEB_ORIGIN: 'http://localhost:5173', BETTER_AUTH_URL: 'http://localhost:3001' }) }));
+vi.mock('../../db/client.js', () => ({ db: { transaction: async (action: (tx: unknown) => unknown) => action({}) } }));
+vi.mock('../batches/service.js', () => ({ BatchError: class extends Error { constructor(public code: string, public status: number, message: string, public details?: unknown) { super(message); } }, requireBatchActor: mocks.requireActor }));
+vi.mock('./service.js', () => ({ cancelDocument: mocks.cancel, correctDocument: mocks.correct, createDocument: mocks.create, documentOperation: vi.fn(), getDocument: mocks.get, listDocumentCandidates: mocks.candidates, listDocumentProfiles: vi.fn(), listDocuments: mocks.list, listDocumentTemplates: vi.fn(), reviewDocument: mocks.review, reviseDocument: mocks.revise, validateDocument: mocks.validate, writeDocumentProfile: mocks.profileWrite, getDocumentProfile: mocks.profileGet, changeDocumentProfileStatus: mocks.profileStatus }));
+vi.mock('./exports.js', () => ({ getDocumentExport: vi.fn(), listDocumentExports: mocks.exports, readDocumentExport: mocks.readExport, requestDocumentExport: mocks.requestExport }));
+vi.mock('./workbook.js', () => ({ cleanDocumentTemplate: vi.fn() }));
+vi.mock('./lingxing-sync.js', () => ({ previewDocumentLingxing: mocks.lingxingPreview, applyDocumentLingxing: mocks.lingxingApply }));
+vi.mock('./field-options.js', () => ({ getDocumentFieldOptions: mocks.fieldOptions }));
+vi.mock('./product-image.js', () => ({ previewDocumentProductImage: mocks.imagePreview }));
+vi.mock('./automation.js', () => ({ startDocumentAutomation: mocks.autoStart, getDocumentAutomation: mocks.autoGet, listDocumentAutomations: mocks.autoList, retryDocumentAutomation: mocks.autoRetry, getDocumentAutomationRequirements: mocks.autoRequirements, supplementDocumentAutomation: mocks.autoSupplement, deleteDocumentAutomation: mocks.autoDelete }));
+vi.mock('./document-bundle.js', () => ({ readDocumentBundle: mocks.bundleRead }));
+import { createDocumentExportRoutes, createDocumentProfileRoutes, createDocumentRoutes } from './routes.js';
+const app = () => new Hono().route('/api/v1/documents', createDocumentRoutes(mocks.boss)).route('/api/v1/document-exports', createDocumentExportRoutes()).route('/api/v1/document-profiles', createDocumentProfileRoutes());
+beforeEach(() => { for (const mock of Object.values(mocks)) mock.mockReset(); mocks.session.mockResolvedValue({ user: { id: 'admin', role: 'admin', banned: false } }); mocks.requireActor.mockResolvedValue({}); mocks.candidates.mockResolvedValue({ items: [], total: 0, weekStartDate: '2026-10-19' }); mocks.list.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20 }); mocks.get.mockResolvedValue({ document: {}, validation: null }); mocks.exports.mockResolvedValue({ items: [] }); mocks.create.mockResolvedValue({ document: { id: randomUUID() } }); mocks.boss.mockReturnValue(null); });
+describe('document authenticated API boundary', () => {
+  it('cancels and soft deletes one versioned task without requiring a queue and protects the authenticated write boundary', async () => {
+    const server = app(), id = randomUUID(), input = { operationId: randomUUID(), expectedVersion: 147, reason: '删除指定任务' };
+    const request = (body: unknown = input, headers = {}) => server.request(`/api/v1/documents/automations/${id}/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    mocks.autoDelete.mockResolvedValue({ automationId: id, deleted: true, replayed: false });
+    expect((await request()).status).toBe(200); expect(mocks.autoDelete).toHaveBeenCalledWith(id, 'admin', input); expect(mocks.boss).not.toHaveBeenCalled();
+    expect((await request({ ...input, expectedVersion: 0 })).status).toBe(422);
+    expect((await request(input, { Origin: 'https://untrusted.invalid' })).status).toBe(403);
+    mocks.session.mockResolvedValueOnce(null); expect((await request()).status).toBe(401);
+    mocks.session.mockResolvedValueOnce({ user: { id: 'viewer', role: 'user', banned: false } }); expect((await request()).status).toBe(403);
+    expect(mocks.autoDelete).toHaveBeenCalledOnce();
+  });
+  it('serves unified batch requirements and validates supplement versions without accessing export routes', async () => {
+    const server = app(), id = randomUUID(), documentId = randomUUID(), boss = {}; mocks.boss.mockReturnValue(boss);
+    mocks.autoRequirements.mockResolvedValue({ job: { id, phase: 'needs_input', supplement: { descriptors: [], issues: [] } } });
+    expect((await server.request(`/api/v1/documents/automations/${id}/requirements`)).status).toBe(200); expect(mocks.autoRequirements).toHaveBeenCalledWith(id, 'admin');
+    const input = { operationId: randomUUID(), expectedVersion: 3, documentVersions: { [documentId]: 4 }, values: [{ id: 'field-vat', value: 'VAT123' }] };
+    mocks.autoSupplement.mockResolvedValue({ job: { id, phase: 'preparing' }, replayed: false });
+    const request = (body: unknown) => server.request(`/api/v1/documents/automations/${id}/supplement`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    expect((await request(input)).status).toBe(202); expect(mocks.autoSupplement).toHaveBeenCalledWith(boss, id, 'admin', input);
+    expect((await request({ ...input, values: [input.values[0], input.values[0]] })).status).toBe(422);
+    mocks.boss.mockReturnValue(null); expect((await request(input)).status).toBe(503);
+    expect(mocks.autoSupplement).toHaveBeenCalledOnce(); expect(mocks.requestExport).not.toHaveBeenCalled();
+  });
+  it('downloads only a completed validated bundle and passes missing/stale bundle errors through', async () => {
+    const server = app(), id = randomUUID();
+    mocks.bundleRead.mockResolvedValue({ file: { mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', originalName: '整批发票.xlsx' }, bytes: Buffer.from('fixture-xlsx') });
+    const response = await server.request(`/api/v1/documents/automations/${id}/download`);
+    expect(response.status).toBe(200); expect(response.headers.get('Content-Disposition')).toContain(encodeURIComponent('整批发票.xlsx')); expect(mocks.bundleRead).toHaveBeenCalledWith(id, 'admin');
+    mocks.session.mockResolvedValueOnce(null); expect((await server.request(`/api/v1/documents/automations/${id}/download`)).status).toBe(401);
+    expect(mocks.readExport).not.toHaveBeenCalled();
+  });
+  it('routes automatic invoice tasks ahead of document IDs and reads recent jobs without a worker', async () => {
+    const server = app(), id = randomUUID(), shippingRunId = randomUUID();
+    mocks.autoGet.mockResolvedValue({ job: { id } }); mocks.autoList.mockResolvedValue({ items: [] });
+    expect((await server.request('/api/v1/documents/automations')).status).toBe(200);
+    expect(mocks.autoList).toHaveBeenCalledWith('admin', undefined);
+    expect((await server.request(`/api/v1/documents/automations?shippingRunId=${shippingRunId}`)).status).toBe(200);
+    expect(mocks.autoList).toHaveBeenCalledWith('admin', shippingRunId);
+    expect((await server.request(`/api/v1/documents/automations/${id}`)).status).toBe(200);
+    expect(mocks.autoGet).toHaveBeenCalledWith(id, 'admin'); expect(mocks.get).not.toHaveBeenCalled(); expect(mocks.boss).not.toHaveBeenCalled();
+    expect((await server.request('/api/v1/documents/automations?shippingRunId=invalid')).status).toBe(422);
+  });
+  it('requires an available durable queue before accepting an automatic start or retry', async () => {
+    const server = app(), input = { operationId: randomUUID(), shippingRunId: randomUUID(), demandIds: [randomUUID()] }, headers = { 'Content-Type': 'application/json' };
+    expect((await server.request('/api/v1/documents/automations', { method: 'POST', headers, body: JSON.stringify(input) })).status).toBe(503);
+    expect((await server.request(`/api/v1/documents/automations/${randomUUID()}/retry`, { method: 'POST', headers, body: JSON.stringify({ operationId: randomUUID(), expectedVersion: 1 }) })).status).toBe(503);
+    expect(mocks.autoStart).not.toHaveBeenCalled(); expect(mocks.autoRetry).not.toHaveBeenCalled();
+  });
+  it('passes the exact selected scope, existing draft version and retry operation to the authenticated service', async () => {
+    const server = app(), boss = {}, headers = { 'Content-Type': 'application/json' }, id = randomUUID(); mocks.boss.mockReturnValue(boss);
+    mocks.autoStart.mockResolvedValue({ job: { id }, replayed: false }); mocks.autoRetry.mockResolvedValue({ job: { id }, replayed: false });
+    const input = { operationId: randomUUID(), shippingRunId: randomUUID(), demandIds: [randomUUID()], fields: { customsMode: '普通报关' } };
+    expect((await server.request('/api/v1/documents/automations', { method: 'POST', headers, body: JSON.stringify(input) })).status).toBe(202);
+    expect(mocks.autoStart).toHaveBeenCalledWith(boss, 'admin', input);
+    const draft = { operationId: randomUUID(), shippingRunId: input.shippingRunId, documentId: randomUUID(), expectedVersion: 4 };
+    expect((await server.request('/api/v1/documents/automations', { method: 'POST', headers, body: JSON.stringify(draft) })).status).toBe(202);
+    expect(mocks.autoStart).toHaveBeenCalledWith(boss, 'admin', draft);
+    const retry = { operationId: randomUUID(), expectedVersion: 7, itemIds: [randomUUID()] };
+    expect((await server.request(`/api/v1/documents/automations/${id}/retry`, { method: 'POST', headers, body: JSON.stringify(retry) })).status).toBe(202);
+    expect(mocks.autoRetry).toHaveBeenCalledWith(boss, id, 'admin', retry);
+    for (const invalid of [{ ...input, demandIds: [] }, { ...draft, expectedVersion: undefined }, { ...draft, demandIds: input.demandIds }]) expect((await server.request('/api/v1/documents/automations', { method: 'POST', headers, body: JSON.stringify(invalid) })).status).toBe(422);
+    expect(mocks.autoStart).toHaveBeenCalledTimes(2);
+  });
+  it('rejects unauthenticated, non-admin and cross-origin automatic work before task service access', async () => {
+    const server = app(), input = { operationId: randomUUID(), shippingRunId: randomUUID() }, post = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) };
+    mocks.session.mockResolvedValueOnce(null); expect((await server.request('/api/v1/documents/automations', post)).status).toBe(401);
+    mocks.session.mockResolvedValueOnce({ user: { id: 'viewer', role: 'user', banned: false } }); expect((await server.request('/api/v1/documents/automations')).status).toBe(403);
+    expect((await server.request('/api/v1/documents/automations', { ...post, headers: { ...post.headers, Origin: 'https://untrusted.invalid' } })).status).toBe(403);
+    expect(mocks.autoStart).not.toHaveBeenCalled(); expect(mocks.autoList).not.toHaveBeenCalled();
+  });
+  it('binds read-only product image previews to the authenticated invoice, version and identity', async () => {
+    const id = randomUUID(), input = { expectedVersion: 2, sid: 12, msku: 'M', fnsku: 'F', sku: 'S', url: 'https://images.example/product.png' }, server = app();
+    mocks.imagePreview.mockResolvedValue({ image: { imageBase64: 'preview', imageExtension: 'png' } });
+    const request = (body = input, headers = {}) => server.request(`/api/v1/documents/${id}/product-image-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    const response = await request(); expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ image: { imageBase64: 'preview', imageExtension: 'png' } });
+    expect(mocks.imagePreview).toHaveBeenCalledWith(id, 'admin', input);
+    expect((await request({ ...input, expectedVersion: 0 })).status).toBe(422);
+    expect((await request(input, { Origin: 'https://untrusted.invalid' })).status).toBe(403);
+    mocks.session.mockResolvedValueOnce(null); expect((await request()).status).toBe(401);
+    mocks.session.mockResolvedValueOnce({ user: { id: 'viewer', role: 'user', banned: false } }); expect((await request()).status).toBe(403);
+    expect(mocks.imagePreview).toHaveBeenCalledTimes(1);
+  });
+  it('limits expanded image JSON to document create/revise/correct routes while preserving ordinary field limits', async () => {
+    const server = app(), id = randomUUID(), input = { operationId: randomUUID(), weekStartDate: '2026-10-19', demandIds: [id], title: 'Image' };
+    const request = (path: string, bytes: number, body: unknown) => server.request(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': String(bytes) }, body: JSON.stringify(body) });
+    expect((await request('/api/v1/documents', 11 * 1024 * 1024, input)).status).toBe(201);
+    expect((await request('/api/v1/documents', 13 * 1024 * 1024, input)).status).toBe(413);
+    expect((await request('/api/v1/document-profiles', 11 * 1024 * 1024, {})).status).toBe(413);
+    expect((await request(`/api/v1/documents/${id}/product-image-preview`, 11 * 1024 * 1024, {})).status).toBe(413);
+    expect((await request('/api/v1/documents', 4100, { ...input, fields: { remarks: 'x'.repeat(4001) } })).status).toBe(422);
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+  });
+  it('accepts same-ID address edits and binds soft deletion and restore to actor and expected version', async () => {
+    const server = app(), id = randomUUID(), operationId = randomUUID(), headers = { 'Content-Type': 'application/json' };
+    const input = { operationId, profileId: id, expectedVersion: 3, category: 'address', key: 'New label', reason: 'Rename', data: { destinationFc: 'IND9', recipientName: 'Receiver', addressLine1: '10 Road', city: 'City', postalCode: '00123', countryCode: 'US' } };
+    mocks.profileWrite.mockResolvedValue({ profile: { id, key: 'New label', version: 4 } });
+    expect((await server.request('/api/v1/document-profiles', { method: 'POST', headers, body: JSON.stringify(input) })).status).toBe(201);
+    expect(mocks.profileWrite).toHaveBeenCalledWith('admin', input);
+    const invalid = { ...input, data: { ...input.data, countryCode: 'USA', destinationFc: '' } };
+    expect((await server.request('/api/v1/document-profiles', { method: 'POST', headers, body: JSON.stringify(invalid) })).status).toBe(422);
+    expect(mocks.profileWrite).toHaveBeenCalledTimes(1);
+    const operation = { operationId, expectedVersion: 4, reason: 'Delete' };
+    mocks.profileStatus.mockResolvedValue({ profile: { id, status: 'retired', version: 5 } });
+    expect((await server.request(`/api/v1/document-profiles/${id}/retire`, { method: 'POST', headers, body: JSON.stringify(operation) })).status).toBe(200);
+    expect(mocks.profileStatus).toHaveBeenCalledWith(id, 'admin', operation, 'retired');
+    expect((await server.request(`/api/v1/document-profiles/${id}/restore`, { method: 'POST', headers, body: JSON.stringify({ ...operation, expectedVersion: 5 }) })).status).toBe(200);
+    expect(mocks.profileStatus).toHaveBeenLastCalledWith(id, 'admin', { ...operation, expectedVersion: 5 }, 'active');
+    mocks.profileGet.mockResolvedValue({ profile: { id, status: 'retired' } });
+    expect((await server.request(`/api/v1/document-profiles/${id}`)).status).toBe(200);
+    expect(mocks.profileGet).toHaveBeenCalledWith(id, 'admin');
+    mocks.profileStatus.mockClear(); mocks.session.mockResolvedValueOnce(null);
+    expect((await server.request(`/api/v1/document-profiles/${id}/restore`, { method: 'POST', headers, body: JSON.stringify(operation) })).status).toBe(401);
+    expect(mocks.profileStatus).not.toHaveBeenCalled();
+  });
+  it('serves reference field options to active admins without treating the route as a document ID', async () => {
+    mocks.fieldOptions.mockResolvedValue({ services: ['丰信参考服务'] });
+    const server = app(), response = await server.request('/api/v1/documents/field-options');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ services: ['丰信参考服务'] });
+    expect(mocks.fieldOptions).toHaveBeenCalledWith('admin');
+    expect(mocks.get).not.toHaveBeenCalled();
+    mocks.fieldOptions.mockClear(); mocks.session.mockResolvedValueOnce(null);
+    expect((await server.request('/api/v1/documents/field-options')).status).toBe(401);
+    mocks.session.mockResolvedValueOnce({ user: { id: 'viewer', role: 'user', banned: false } });
+    expect((await server.request('/api/v1/documents/field-options')).status).toBe(403);
+    expect(mocks.fieldOptions).not.toHaveBeenCalled();
+  });
+  it('binds Lingxing preview and adoption to the authenticated actor, document and expected version', async () => {
+    const id = randomUUID(), operationId = randomUUID(), previewOperationId = randomUUID();
+    mocks.lingxingPreview.mockResolvedValue({ preview: {}, replayed: false });
+    mocks.lingxingApply.mockResolvedValue({ document: {}, replayed: false });
+    const server = app();
+    const preview = await server.request(`/api/v1/documents/${id}/lingxing-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId, expectedVersion: 2 }) });
+    expect(preview.status).toBe(200);
+    expect(mocks.lingxingPreview).toHaveBeenCalledWith(id, 'admin', { operationId, expectedVersion: 2 });
+    const input = { operationId, previewOperationId, expectedVersion: 2, reason: 'Reviewed source' };
+    const adoption = await server.request(`/api/v1/documents/${id}/lingxing-apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+    expect(adoption.status).toBe(200);
+    expect(mocks.lingxingApply).toHaveBeenCalledWith(id, 'admin', { ...input, confirmPrices: false });
+    const unsafe = await server.request(`/api/v1/documents/${id}/lingxing-apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, products: [{ unitPriceConfirmed: true }] }) });
+    expect(unsafe.status).toBe(422);
+    expect(mocks.lingxingApply).toHaveBeenCalledTimes(1);
+  });
+  it('rejects unauthenticated and cross-origin Lingxing requests before source queries', async () => {
+    const server = app(), id = randomUUID(), input = { operationId: randomUUID(), expectedVersion: 1 };
+    mocks.session.mockResolvedValueOnce(null);
+    expect((await server.request(`/api/v1/documents/${id}/lingxing-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })).status).toBe(401);
+    expect((await server.request(`/api/v1/documents/${id}/lingxing-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://other.invalid' }, body: JSON.stringify(input) })).status).toBe(403);
+    expect(mocks.lingxingPreview).not.toHaveBeenCalled();
+  });
+  it('requires current active admin before any service access', async () => { mocks.session.mockResolvedValueOnce(null); expect((await app().request('/api/v1/documents')).status).toBe(401); mocks.session.mockResolvedValueOnce({ user: { id: 'old', role: 'admin', banned: true } }); expect((await app().request('/api/v1/documents')).status).toBe(403); expect(mocks.list).not.toHaveBeenCalled(); });
+  it('queries candidates and the active list without requiring a worker', async () => { expect((await app().request('/api/v1/documents/candidates?weekStartDate=2026-10-19')).status).toBe(200); expect(mocks.candidates).toHaveBeenCalledWith('admin', { weekStartDate: '2026-10-19' }); const response = await app().request('/api/v1/documents'); expect(response.headers.get('Cache-Control')).toBe('no-store'); expect(mocks.list).toHaveBeenCalledWith('admin', { status: 'active', page: 1, pageSize: 20 }); expect(mocks.boss).not.toHaveBeenCalled(); });
+  it('parses combined list filters before service access and rejects invalid filters', async () => {
+    const server = app();
+    expect((await server.request('/api/v1/documents?q=%20FBA_alpha%25%20&weekStartDate=2026-10-19&status=stale&page=2&pageSize=10')).status).toBe(200);
+    expect(mocks.list).toHaveBeenLastCalledWith('admin', { q: 'FBA_alpha%', weekStartDate: '2026-10-19', status: 'stale', page: 2, pageSize: 10 });
+    for (const query of ['status=unknown', 'weekStartDate=2026-02-30', 'page=0', 'pageSize=101', `q=${'x'.repeat(201)}`]) {
+      expect((await server.request(`/api/v1/documents?${query}`)).status).toBe(422);
+    }
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+  });
+  it('keeps document deletion on the authenticated versioned cancel operation', async () => {
+    const id = randomUUID(), input = { operationId: randomUUID(), expectedVersion: 3, reason: '删除测试单据' }, server = app();
+    mocks.cancel.mockResolvedValue({ documentId: id, document: { status: 'cancelled', version: 4 }, replayed: false });
+    const response = await server.request(`/api/v1/documents/${id}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+    expect(response.status).toBe(200);
+    expect(mocks.cancel).toHaveBeenCalledWith(id, 'admin', input);
+    expect((await response.json()).document.status).toBe('cancelled');
+    expect((await server.request(`/api/v1/documents/${id}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://untrusted.invalid' }, body: JSON.stringify(input) })).status).toBe(403);
+    expect(mocks.cancel).toHaveBeenCalledTimes(1);
+  });
+  it('rejects duplicate scope, invalid week and cross-origin writes before persistence', async () => { const id = randomUUID(), input = { operationId: randomUUID(), title: 'Invoice', weekStartDate: '2026-10-19', demandIds: [id, id] }, server = app(); expect((await server.request('/api/v1/documents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })).status).toBe(422); expect((await server.request('/api/v1/documents/candidates?weekStartDate=2026-02-30')).status).toBe(422); expect((await server.request('/api/v1/documents', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://untrusted.invalid' }, body: JSON.stringify({ ...input, demandIds: [id] }) })).status).toBe(403); expect(mocks.create).not.toHaveBeenCalled(); });
+  it('does not queue formal generation while worker is unavailable', async () => { const response = await app().request(`/api/v1/documents/${randomUUID()}/exports`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: randomUUID(), expectedVersion: 1 }) }); expect(response.status).toBe(503); expect(mocks.requestExport).not.toHaveBeenCalled(); });
+  it('downloads only checked document export bytes and uses a safe disposition', async () => { const id = randomUUID(); mocks.readExport.mockResolvedValue({ file: { mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', originalName: '发票.xlsx' }, bytes: Buffer.from('verified') }); const response = await app().request(`/api/v1/document-exports/${id}/download`); expect(response.status).toBe(200); expect(mocks.readExport).toHaveBeenCalledWith(id, 'admin'); expect(response.headers.get('Content-Disposition')).toContain("filename*=UTF-8''"); expect(await response.text()).toBe('verified'); });
+});

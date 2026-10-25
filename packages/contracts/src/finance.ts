@@ -1,0 +1,12 @@
+import { z } from 'zod';
+const text = z.string().trim().max(2000).default('');
+const amount = z.string().trim().max(50).refine((s) => !s || /^-?(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(s), '金额须为十进制数字，最多六位小数');
+export const financeFeeTypeSchema = z.enum(['freight', 'customs', 'clearance', 'tax', 'materials', 'other']);
+export const financeLineSchema = z.object({ id: z.uuid(), description: text, type: financeFeeTypeSchema, nature: z.enum(['actual', 'estimate', 'refund', 'supplement']), amount, currency: z.string().trim().toUpperCase().max(3), boxIds: z.array(z.uuid()).max(5000), allocations: z.array(z.object({ fulfillmentId: z.uuid(), externalOrderNo: text, amount }).strict()).max(1000).default([]) }).strict();
+export const financeExternalResultSchema = z.object({ id: z.uuid(), fulfillmentId: z.uuid(), externalOrderNo: text, feeType: financeFeeTypeSchema, currency: z.string().trim().toUpperCase().max(3), beforeAmount: amount.nullable(), expectedAmount: amount, afterAmount: amount.nullable(), status: z.enum(['pending', 'updated', 'verified', 'unknown', 'failed']), evidenceFileIds: z.array(z.uuid()).max(100).default([]), recordedAt: z.iso.datetime(), note: text }).strict();
+export const financeDataSchema = z.object({ billNumber: text, provider: text, billFileId: z.uuid().nullable().default(null), statementDate: z.iso.date().nullable().default(null), lines: z.array(financeLineSchema).max(10000).default([]), externalResults: z.array(financeExternalResultSchema).max(10000).default([]), zeroCostConfirmed: z.boolean().default(false), zeroCostReason: text, zeroCostEvidenceFileIds: z.array(z.uuid()).max(100).default([]) }).strict();
+export type FinanceData = z.infer<typeof financeDataSchema>;
+export type FinanceLine = z.infer<typeof financeLineSchema>;
+export type FinanceExternalResult = z.infer<typeof financeExternalResultSchema>;
+export const archiveDataSchema = z.object({ groupId: z.uuid(), customsNotApplicable: z.boolean().default(false), filing9810NotApplicable: z.boolean().default(false), notApplicableReason: text, notApplicableEvidenceFileIds: z.array(z.uuid()).max(100).default([]), note: text }).strict();
+export type ArchiveData = z.infer<typeof archiveDataSchema>;

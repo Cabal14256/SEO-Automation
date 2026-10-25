@@ -1,0 +1,7 @@
+{
+  "postgresBin": "C:/Program Files/PostgreSQL/18/bin",
+  "postgresDataDir": "D:/SCM-Automation/.local/development/postgres",
+  "postgresPort": 55432,
+  "runtimeDir": "D:/SCM-Automation/.local/development/runtime",
+  "healthUrl": "http://127.0.0.1:3001/api/v1/health"
+}

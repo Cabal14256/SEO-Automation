@@ -1,0 +1,68 @@
+.document-box-adjustments { min-width: 0; scroll-margin-top: 16px; }
+.document-box-toolbar { display: flex; flex-direction: column; gap: 12px; margin: 18px 0; }
+.document-box-filters, .document-box-selection { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
+.document-box-filters > button { min-height: 36px; padding: 7px 12px; text-decoration: none; }
+.document-box-filters > button[aria-pressed="true"] { background: #edf3e1; color: var(--color-ink); }
+.document-box-selection { font-size: 13px; line-height: 1.6; }
+.document-box-selection > label, .document-box-overwrite, .document-box-identity label { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.document-box-selection > label, .document-box-overwrite { min-height: 44px; }
+.document-box-selection > button { min-height: 36px; padding: 6px 0; }
+.document-box-selection .table-selection-checkbox, .document-box-identity .table-selection-checkbox { flex-shrink: 0; margin: 0; }
+.document-box-batch { min-width: 0; margin: 18px 0 24px; padding: 16px 0; border: 0; border-block: 1px solid var(--color-line); }
+.document-box-batch legend { padding: 0 8px 0 0; color: var(--color-ink); font-size: 14px; font-weight: 600; }
+.document-box-batch > .mapping-help { margin: 0 0 16px; line-height: 1.7; }
+.document-box-batch-fields { display: grid; grid-template-columns: minmax(180px, 1.5fr) repeat(4, minmax(0, 1fr)); gap: 12px; }
+.document-box-batch-fields > .field { min-width: 0; }
+.document-box-batch-fields input, .document-box-table input { width: 100%; min-width: 0; font-variant-numeric: tabular-nums; }
+.document-box-table .field-input { min-height: 44px; padding: 9px 10px; border: 1px solid #858d7e; border-radius: 11px; background: #fff; color: var(--color-ink); font-size: 14px; }
+.document-box-table .field-input:disabled { background: #f5f5f0; color: var(--color-muted); }
+.document-box-batch-fields [aria-invalid="true"], .document-box-table [aria-invalid="true"] { border-color: #a32330; }
+.document-box-batch-fields .form-note { margin: 6px 0 0; font-size: 12px; }
+.document-box-batch-preview { margin: 14px 0; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.document-box-overwrite { margin-bottom: 14px; font-size: 13px; line-height: 1.6; }
+.document-box-overwrite > input { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--color-accent, #5a742b); }
+.document-box-batch > button { display: flex; max-width: 100%; white-space: normal; }
+.document-box-fba-group { min-width: 0; margin-top: 24px; }
+.document-box-fba-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 12px; }
+.document-box-fba-heading h4 { min-width: 0; margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.document-box-fba-heading > span { color: var(--color-muted); font-size: 12px; }
+.document-box-table-scroll { max-width: 100%; min-width: 0; overflow-x: auto; }
+.document-box-table { width: 100%; min-width: 880px; table-layout: fixed; border-collapse: collapse; text-align: left; }
+.document-box-table th, .document-box-table td { padding: 10px 8px; vertical-align: top; }
+.document-box-table thead th { border-block: 1px solid var(--color-line); background: #f5f7f1; color: var(--color-muted); font-size: 12px; font-weight: 500; }
+.document-box-table thead th:first-child { width: 155px; }
+.document-box-table thead th:nth-child(2) { width: 185px; }
+.document-box-table thead th:last-child { width: 140px; }
+.document-box-table .document-box-identity { font-size: 13px; font-weight: 400; overflow-wrap: anywhere; }
+.document-box-identity label { align-items: flex-start; min-height: 44px; padding-block: 12px 4px; line-height: 1.5; }
+.document-box-identity strong { min-width: 0; font-size: 13px; font-weight: 600; }
+.document-box-identity > span { display: block; margin-top: 3px; color: var(--color-muted); font-size: 12px; line-height: 1.6; }
+.document-box-table .document-box-identity input { width: 16px; }
+.document-box-value-help { margin: 6px 0 0; color: var(--color-muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.document-box-value-help.error-note { color: #a32330; }
+.document-box-row-actions > button { min-height: 44px; padding-inline: 4px; font-size: 12px; }
+.document-box-source-row > td { padding-top: 0; border-bottom: 1px solid var(--color-line); }
+.document-box-automatic { font-size: 12px; line-height: 1.7; }
+.document-box-automatic > summary { width: fit-content; max-width: 100%; cursor: pointer; color: var(--color-muted); overflow-wrap: anywhere; }
+.document-box-automatic > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
+.document-box-automatic > p { margin: 8px 0; max-width: 100%; color: var(--color-muted); overflow-wrap: anywhere; }
+.document-box-mobile-label { display: none; }
+@media (max-width: 1100px) {
+  .document-box-batch-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .document-box-batch-fields > .field:first-child { grid-column: 1 / -1; }
+}
+@media (max-width: 767px) {
+  .document-box-table, .document-box-table tbody { display: block; width: 100%; min-width: 0; }
+  .document-box-table thead { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .document-box-table .document-box-edit-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 16px 0 8px; }
+  .document-box-table .document-box-edit-row > th, .document-box-table .document-box-edit-row > td { display: block; min-width: 0; padding: 0; }
+  .document-box-identity, .document-box-value-po, .document-box-row-actions { grid-column: 1 / -1; }
+  .document-box-identity label { min-height: 44px; padding-block: 10px; }
+  .document-box-mobile-label { display: block; margin-bottom: 6px; color: var(--color-ink); font-size: 12px; font-weight: 600; }
+  .document-box-source-row, .document-box-source-row > td { display: block; width: 100%; min-width: 0; }
+  .document-box-source-row > td { padding: 0 0 16px; }
+  .document-box-value-help { font-size: 12px; }
+  .document-box-filters { gap: 6px; }
+  .document-box-filters > button { min-height: 44px; }
+  .document-box-automatic > summary { min-height: 44px; padding-block: 10px; }
+}

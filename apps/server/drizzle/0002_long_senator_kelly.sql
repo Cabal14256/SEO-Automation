@@ -1,0 +1,3 @@
+ALTER TABLE "seller_mapping" ADD COLUMN "source_file_id" uuid;--> statement-breakpoint
+ALTER TABLE "seller_mapping" ADD CONSTRAINT "seller_mapping_source_file_id_file_index_id_fk" FOREIGN KEY ("source_file_id") REFERENCES "public"."file_index"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+CREATE UNIQUE INDEX "seller_mapping_revision_version_idx" ON "seller_mapping_revision" USING btree ("seller_mapping_id","version");

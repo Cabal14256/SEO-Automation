@@ -1,0 +1,30 @@
+.batch-reports { min-width: 0; }
+.batch-report-heading h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; line-height: 1.5; }
+.batch-report-panel { margin-top: 0; }
+.batch-report-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; align-items: end; gap: 14px; }
+.batch-report-filters .field { min-width: 0; }
+.batch-report-filters .batch-report-search { grid-column: 1 / -1; }
+.batch-report-filter-actions { display: flex; align-items: center; gap: 8px; }
+.batch-report-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 20px; padding: 17px 0; border-block: 1px solid var(--color-line); }
+.batch-report-total { margin-left: auto; color: var(--color-muted); font-size: 13px; }
+.batch-report-panel > .table-scroll { max-height: 65dvh; margin-top: 14px; }
+.batch-report-panel .batch-table th { position: sticky; top: 0; z-index: 1; background: #f5f7f1; }
+.batch-report-panel .batch-table :is(td, th):first-child { position: sticky; left: 0; z-index: 2; min-width: 200px; max-width: 240px; background: #fff; box-shadow: 1px 0 0 var(--color-line); }
+.batch-report-panel .batch-table th:first-child { z-index: 3; background: #f5f7f1; }
+.batch-report-group-cell { display: flex; align-items: flex-start; }
+.batch-report-group-cell > div { min-width: 0; }
+.batch-report-group-cell .table-selection-checkbox { margin-top: 3px; }
+.batch-report-history-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.batch-report-history-heading p { margin: 0; }
+.batch-process-wizard .batch-report-heading h2 { font-size: 18px; }
+.batch-process-wizard .batch-report-panel { padding: 0; border: 0; border-radius: 0; }
+@media (max-width: 1100px) {
+  .batch-report-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .batch-report-filter-actions { grid-column: 1 / -1; }
+}
+@media (max-width: 767px) {
+  .batch-report-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .batch-report-filters .field:nth-child(4) { grid-column: 1 / -1; }
+  .batch-report-total { width: 100%; margin-left: 0; }
+  .batch-report-panel .batch-table :is(td, th):first-child { min-width: 140px; max-width: 160px; white-space: normal; }
+}

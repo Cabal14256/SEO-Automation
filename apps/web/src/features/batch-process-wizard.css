@@ -1,0 +1,12 @@
+.batch-process-wizard { min-width: 0; }
+.batch-process-wizard [hidden] { display: none !important; }
+.batch-process-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.batch-process-wizard .import-wizard-progress ol { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.batch-process-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.batch-process-wizard .batch-panel { margin-top: 24px; padding: 0; border: 0; border-radius: 0; }
+.batch-process-wizard .batch-panel + .batch-panel { padding-top: 22px; border-top: 1px solid var(--color-line); }
+.batch-process-wizard .batch-panel h2 { font-size: 18px; }
+@media (max-width: 767px) {
+  .batch-process-wizard .import-wizard-progress ol { grid-template-columns: repeat(4, minmax(148px, 1fr)); }
+  .batch-process-wizard .import-wizard-footer { flex-wrap: wrap; }
+}

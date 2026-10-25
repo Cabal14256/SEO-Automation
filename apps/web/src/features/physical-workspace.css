@@ -1,0 +1,4 @@
+.physical-workspace-toolbar h3 { margin: 0 8px 0 0; }
+.physical-workspace-group-cell { display: flex; align-items: flex-start; }
+.physical-workspace-group-cell > div { min-width: 0; }
+.physical-workspace-group-cell .table-selection-checkbox { margin-top: 3px; }

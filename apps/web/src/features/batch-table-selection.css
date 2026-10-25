@@ -1,0 +1,6 @@
+.table-selection-checkbox { width: 16px; height: 16px; margin: 0 10px 0 0; vertical-align: middle; flex-shrink: 0; accent-color: var(--color-accent, #5a742b); cursor: pointer; }
+.table-selection-checkbox:disabled { cursor: default; }
+.table-selection-checkbox:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
+.batch-table tr[aria-selected="true"] > td { background: #f1f6e7; }
+.batch-report-panel .batch-table tr[aria-selected="true"] > td:first-child,
+.batch-workspace-panel .batch-table tr[aria-selected="true"] > td:first-child { background: #f1f6e7; }

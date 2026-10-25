@@ -1,0 +1,21 @@
+name: Public source privacy
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+      - run: node --test scripts/privacy/*.test.mjs
+      - run: node --test scripts/shared/path-policy.test.mjs
+      - run: node scripts/privacy/check.mjs --history

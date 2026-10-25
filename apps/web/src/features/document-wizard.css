@@ -1,0 +1,56 @@
+.import-dialog:has(.document-wizard) { width: min(1360px, calc(100vw - 40px)); overflow: clip; }
+.document-wizard, .document-wizard-step { min-width: 0; }
+.document-wizard-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.document-wizard [hidden] { display: none !important; }
+.document-wizard .import-wizard-progress ol { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.document-new-wizard { min-width: 0; }
+.document-wizard .document-new-wizard .import-wizard-progress ol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.document-wizard .import-wizard-heading { align-items: flex-start; }
+.document-wizard .import-wizard-heading > div { min-width: 0; }
+.document-wizard .import-wizard-heading h3 { font-size: 22px; }
+.document-wizard .import-wizard-heading p { max-width: 75ch; overflow-wrap: anywhere; }
+.document-wizard .content-panel { margin: 0; padding: 0; border: 0; border-radius: 0; box-shadow: none; }
+.document-wizard .content-panel + .content-panel { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--color-line); }
+.document-wizard .document-summary { margin-bottom: 22px; }
+.document-wizard .document-summary > div:first-child { min-width: 0; }
+.document-wizard .document-summary h3 { overflow-wrap: anywhere; }
+.document-wizard .section-heading { flex-wrap: wrap; gap: 10px 16px; }
+.document-wizard .section-heading > span { min-width: 0; overflow-wrap: anywhere; }
+.document-wizard .table-scroll { max-width: 100%; }
+.document-wizard .document-footer-actions > button { max-width: 100%; white-space: normal; }
+.document-wizard .document-candidate-filters { margin-top: 18px; }
+.document-wizard .import-wizard-footer { flex-wrap: wrap; }
+.document-wizard .import-wizard-footer > div { min-width: 0; }
+.document-wizard .import-wizard-footer button { max-width: 100%; white-space: normal; }
+.document-details-progress { position: sticky; top: -22px; z-index: 5; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; padding: 12px 0; border-bottom: 1px solid var(--color-line); background: #fff; }
+.document-details-progress button { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; min-width: 0; min-height: 48px; padding: 10px 12px; border: 1px solid var(--color-line); border-radius: 8px; background: #f5f7f1; color: var(--color-ink); text-align: left; font-size: 13px; cursor: pointer; }
+.document-details-progress button span { color: #176741; font-size: 12px; }
+.document-details-progress button[data-incomplete="true"] span { color: #805500; }
+.document-details-progress button:hover:not(:disabled) { border-color: #7a941d; background: #f1facd; }
+.document-details-progress button:disabled { cursor: wait; opacity: .65; }
+.document-readiness-help { margin-bottom: 18px; }
+.document-details-section { min-width: 0; scroll-margin-top: 84px; }
+.document-details-section [data-document-field] { scroll-margin-top: 84px; }
+.document-address-section, .document-box-adjustments { scroll-margin-top: 84px; }
+
+@media (max-width: 767px) {
+  .import-dialog:has(.document-wizard) { width: calc(100vw - 16px); }
+  .document-wizard .import-wizard-progress ol { grid-template-columns: repeat(4, minmax(148px, 1fr)); }
+  .document-wizard .import-wizard-heading h3 { font-size: 20px; }
+  .document-wizard .content-panel + .content-panel { margin-top: 22px; padding-top: 20px; }
+  .document-wizard .section-heading > span { max-width: 100%; text-align: left; }
+  .document-wizard .document-summary > div:first-child { flex-basis: 100%; }
+  .document-wizard .document-selection-bar { gap: 10px; }
+  .document-wizard .document-footer-actions { align-items: stretch; }
+  .document-wizard .document-footer-actions > button { flex: 1 1 180px; }
+  .document-wizard .document-footer-actions > .mapping-help { flex-basis: 100%; }
+  .document-wizard .import-wizard-footer > div:last-child { flex: 1 1 100%; }
+  .document-details-progress { top: -18px; grid-template-columns: repeat(2, minmax(0, 1fr)); padding-block: 8px; }
+  .document-details-section, .document-details-section [data-document-field], .document-address-section, .document-box-adjustments { scroll-margin-top: 138px; }
+}
+
+@media (max-width: 390px) {
+  .document-wizard .import-wizard-footer > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); flex: 1 1 100%; }
+  .document-wizard .import-wizard-footer > div > button:last-child { grid-column: 1 / -1; }
+  .document-wizard .import-wizard-footer[data-stage="details"] > div > button:last-child { grid-column: auto; }
+}

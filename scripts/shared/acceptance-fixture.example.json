@@ -1,0 +1,15 @@
+{
+  "sourceFile": "./synthetic-source.xlsx",
+  "sourceSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "originalName": "synthetic-source.xlsx",
+  "counts": { "totalRows": 8, "validFbaRows": 6, "errorRows": 2, "sellerCandidates": 3 },
+  "sellerSelections": [
+    { "sourceShop": "DEMO-SOURCE-US", "sid": 910001, "name": "DEMO-SELLER-US", "country": "美国" }
+  ],
+  "preferredFbas": ["FBADEMO001"],
+  "lookupSourceDirs": ["./synthetic-probe/raw"],
+  "expectedRuntime": {
+    "active_admins": 2, "sellers": 3, "candidates": 3, "aliases": 0,
+    "imports": 1, "source_rows": 8, "demands": 0, "groups": 0, "confirmations": 0, "exports": 0
+  }
+}

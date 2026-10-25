@@ -1,0 +1,18 @@
+.lingxing-progress { min-width: 0; margin-block: 16px; }
+.online-lookup-panel > .lingxing-progress { flex: 1 1 100%; }
+.lingxing-progress-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; font-size: 13px; }
+.lingxing-progress-heading strong { min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.lingxing-progress-heading > span { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.lingxing-progress-track { height: 8px; overflow: hidden; border-radius: 4px; background: #e9ede3; }
+.lingxing-progress-fill { display: block; height: 100%; border-radius: inherit; background: #5a742b; transition: width 180ms ease-out; }
+.lingxing-progress-track[data-indeterminate="true"] .lingxing-progress-fill { animation: lingxing-progress-wait 1.5s ease-in-out infinite; }
+.lingxing-progress-description { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; margin: 8px 0 0; color: var(--color-muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.lingxing-progress-description > p { min-width: 0; margin: 0; }
+.lingxing-progress-description > span { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.lingxing-progress[data-status="failed"] .lingxing-progress-fill { background: #b32936; }
+.lingxing-progress[data-status="partial"] .lingxing-progress-fill { background: #93620c; }
+@keyframes lingxing-progress-wait { from { transform: translateX(-110%); } to { transform: translateX(390%); } }
+@media (prefers-reduced-motion: reduce) {
+  .lingxing-progress-fill { transition: none; }
+  .lingxing-progress-track[data-indeterminate="true"] .lingxing-progress-fill { animation: none; width: 35%; margin-inline: auto; }
+}

@@ -1,0 +1,26 @@
+.sidebar > .navigation { min-height: 0; overflow-y: auto; }
+.sidebar > .brand, .sidebar > .sidebar-foot { flex-shrink: 0; }
+.navigation-group-toggle { width: 100%; border: 0; background: transparent; text-align: left; }
+.navigation-group-toggle[data-active="true"] { font-weight: 600; }
+.navigation-group-chevron { margin-left: auto; transition: transform var(--motion-fast) var(--motion-ease); }
+.navigation-group-toggle[aria-expanded="true"] .navigation-group-chevron { transform: rotate(180deg); }
+.navigation-submenu { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 4px 20px; padding-left: 8px; border-left: 1px solid var(--color-line); }
+.navigation-submenu[hidden] { display: none; }
+.navigation-child-link { gap: 8px; min-height: 42px; padding: 9px 10px; font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { .navigation-group-chevron { transition: none; } }
+.sidebar-foot .navigation-settings { margin-bottom: 4px; }
+.navigation-settings-link { width: 100%; }
+.topbar .navigation-settings-mobile { display: none; }
+.topbar .navigation-settings-active { border-color: #b4bda4; color: var(--color-ink); background: #edf5d8; }
+.topbar .navigation-settings-active:hover { background: #e5f3c2; }
+
+@media (max-width: 767px) {
+  .topbar .navigation-settings-mobile { display: inline-flex; }
+  .topbar .account-controls { gap: 8px; }
+  .topbar .account-name { max-width: 150px; }
+}
+
+@media (max-width: 390px) {
+  .topbar .account-controls { gap: 6px; }
+  .topbar .account-name { max-width: 64px; }
+}

@@ -1,0 +1,14 @@
+{
+  "startDate": "2026-10-01",
+  "endDate": "2026-11-01",
+  "pageSize": 100,
+  "maxPages": 10,
+  "timeoutMs": 30000,
+  "shipments": [
+    {
+      "sid": 123456,
+      "shipmentConfirmationId": "FBAREPLACE001",
+      "sampleType": "STA 多箱混装，请替换为真实样本"
+    }
+  ]
+}

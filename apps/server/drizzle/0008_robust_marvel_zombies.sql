@@ -1,0 +1,11 @@
+ALTER TABLE "batch_sync_retry_operation" ADD COLUMN "request_hash" text NOT NULL;--> statement-breakpoint
+ALTER TABLE "batch_sync_item" ADD CONSTRAINT "batch_sync_item_demand_id_demand_id_fk" FOREIGN KEY ("demand_id") REFERENCES "public"."demand"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "batch_sync_run" ADD CONSTRAINT "batch_sync_run_sub_batch_id_sub_batch_id_fk" FOREIGN KEY ("sub_batch_id") REFERENCES "public"."sub_batch"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "batch_sync_run_group_idx" ON "batch_sync_run" USING btree ("sub_batch_id","created_at");--> statement-breakpoint
+CREATE INDEX "batch_sync_snapshot_checkpoint_idx" ON "batch_sync_snapshot" USING btree ("item_id","operation","page","created_at");--> statement-breakpoint
+ALTER TABLE "batch_sync_item" ADD CONSTRAINT "batch_sync_item_status_check" CHECK ("batch_sync_item"."status" IN ('queued','running','completed','failed'));--> statement-breakpoint
+ALTER TABLE "batch_sync_item" ADD CONSTRAINT "batch_sync_item_identity_check" CHECK ("batch_sync_item"."sid">0 AND "batch_sync_item"."demand_version">0 AND "batch_sync_item"."fba" ~ '^FBA[A-Z0-9]+$' AND "batch_sync_item"."attempts">=0 AND "batch_sync_item"."request_count">=0);--> statement-breakpoint
+ALTER TABLE "batch_sync_run" ADD CONSTRAINT "batch_sync_run_status_check" CHECK ("batch_sync_run"."status" IN ('queued','running','completed','partial','failed'));--> statement-breakpoint
+ALTER TABLE "batch_sync_run" ADD CONSTRAINT "batch_sync_run_budget_check" CHECK ("batch_sync_run"."request_budget" BETWEEN 1 AND 1000 AND "batch_sync_run"."requests_used" BETWEEN 0 AND "batch_sync_run"."request_budget" AND "batch_sync_run"."max_pages" BETWEEN 1 AND 100 AND "batch_sync_run"."group_version">0);--> statement-breakpoint
+ALTER TABLE "batch_sync_run" ADD CONSTRAINT "batch_sync_run_range_check" CHECK ("batch_sync_run"."start_date"<"batch_sync_run"."end_date");--> statement-breakpoint
+ALTER TABLE "batch_sync_snapshot" ADD CONSTRAINT "batch_sync_snapshot_attempt_check" CHECK ("batch_sync_snapshot"."page">=0 AND "batch_sync_snapshot"."attempt">0 AND "batch_sync_snapshot"."successful" IN (0,1));
