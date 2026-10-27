@@ -141,7 +141,10 @@ test('directory junctions cannot expose private files outside the repository', (
   assert(inside(repo, join(repo, 'linked'))); await rm(join(repo, 'linked'), { recursive: true });
   await symlink(outside, join(repo, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
   const findings = await scanFiles(repo, await candidates(repo));
-  assert.equal(findings.at(0).rule, 'linked-source-outside-repository');
+  // Git reports the new symlink itself on Linux; Windows junctions instead expose
+  // the tracked child. Both must block export before any output is created.
+  assert(findings.some((finding) => ['linked', 'linked/source.ts'].includes(finding.path)
+    && ['nonregular-file', 'linked-source-outside-repository'].includes(finding.rule)));
   const report = await exportPublic({ repo, out: join(root, 'public') });
   assert.equal(report.result, 'failed'); assert.equal(report.created, false);
 }));
