@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -145,6 +145,12 @@ test('directory junctions cannot expose private files outside the repository', (
   // the tracked child. Both must block export before any output is created.
   assert(findings.some((finding) => ['linked', 'linked/source.ts'].includes(finding.path)
     && ['nonregular-file', 'linked-source-outside-repository'].includes(finding.rule)));
-  const report = await exportPublic({ repo, out: join(root, 'public') });
-  assert.equal(report.result, 'failed'); assert.equal(report.created, false);
+  const out = join(root, 'public');
+  await exportPublic({ repo, out }).then((report) => {
+    assert.equal(report.result, 'failed'); assert.equal(report.created, false);
+  }, (error) => {
+    // Linux Git can refuse check-ignore on the tracked child beyond a symlink.
+    assert(error instanceof Error); assert.equal(error.message, 'Git operation failed (128)');
+  });
+  await assert.rejects(lstat(out), { code: 'ENOENT' });
 }));
