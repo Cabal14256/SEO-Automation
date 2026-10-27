@@ -84,8 +84,9 @@ async function run() {
     await book.xlsx.load(exported.bytes as unknown as Parameters<typeof book.xlsx.load>[0]);
     const sheet = book.worksheets[0]!; const headers = sheet.getRow(1).values as string[];
     const statusColumn = headers.indexOf('流程状态'); assert(statusColumn > 0);
-    assert.equal(sheet.rowCount, afterExport.rows.length + 1);
-    for (const [index, row] of afterExport.rows.entries()) assert.equal(sheet.getCell(index + 2, statusColumn).value, row.status);
+    const productRows: ExcelJS.Row[] = []; sheet.eachRow((row, index) => { if (index > 1) productRows.push(row); });
+    assert.equal(productRows.length, afterExport.rows.length);
+    for (const [index, row] of afterExport.rows.entries()) assert.equal(productRows[index]!.getCell(statusColumn).value, row.status);
     checks.push('first-published-xlsx-status-matches-frozen-page-and-persisted-projection-without-early-freeze');
 
     const failureId = await request(groupIds[2]!); const blockedPath = resolve(tmpdir(), `scm-export-storage-failure-${runId}`); const oldDataDir = process.env.DATA_DIR;

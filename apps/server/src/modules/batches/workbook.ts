@@ -1,10 +1,11 @@
 import ExcelJS from 'exceljs';
 import { randomUUID } from 'node:crypto';
 import type { ShipmentData, ShipmentReport, ShipmentReportRow } from '@scm/contracts';
+import { reportTicketKey } from '@scm/contracts';
 import { validateImportArchive } from '../imports/zip-preflight.js';
-import { sortReportBoxes, sortReportRows } from './report-order.js';
+import { sortReportBoxes, sortReportRows, summarizeReportTicketCodes } from './report-order.js';
 
-export const REPORT_TEMPLATE_VERSION = 'shipment-record-v5';
+export const REPORT_TEMPLATE_VERSION = 'shipment-record-v6';
 export const INTAKE_HEADERS = {
   products: ['sid', 'FBA', 'MSKU', 'FNSKU', 'SKU', '品名', '申报量'],
   boxes: ['sid', 'FBA', '箱关联键', 'localBoxId', '箱名', 'MSKU', 'FNSKU', 'SKU', '箱内数量', '重量', '重量单位', '长', '宽', '高', '尺寸单位'],
@@ -40,21 +41,27 @@ function addProductSheet(book: ExcelJS.Workbook, name: string, rows: ShipmentRep
     ...Array.from({ length: maxBoxes }, (_, i) => `箱${i + 1}`), '内部编码', hasTickets ? '本票商品合计' : '子批次商品合计', '流程状态', '实际发货日期', ...(monthly ? [] : [batchLabel]), '业务日期', '发货月份 / 次数', '本月商品数量', '数据版本'];
   styleSheet(sheet, headers);
   sheet.columns.forEach((column, index) => { const h = headers[index]!; column.width = ['品名', '内部编码', '数据版本', '发货票号'].includes(h) ? 32 : ['MSKU', 'FNSKU', 'SKU', 'FBA货件号', '店铺', '打包批次'].includes(h) ? 26 : h.startsWith('箱') ? 9 : h === '发货月份 / 次数' ? 26 : 17; });
-  const displayed = new Set<string>();
+  const displayed = new Set<string>(), displayedTickets = new Set<string>();
+  let previousTicket: string | undefined;
   for (const item of rows) {
-    const key = JSON.stringify([item.ticketId ?? item.groupId, item.sid, item.msku, item.fnsku, item.sku]);
+    const ticket = reportTicketKey(item);
+    if (previousTicket !== undefined && previousTicket !== ticket) addRow(sheet, []);
+    previousTicket = ticket;
+    const firstTicket = !displayedTickets.has(ticket); displayedTickets.add(ticket);
+    const key = JSON.stringify([ticket, item.sid, item.msku, item.fnsku, item.sku]);
     const first = !displayed.has(key); displayed.add(key);
-    const quantities = Array.from({ length: maxBoxes }, (_, index) => item.boxes.find((box) => (box.displayBoxOrder ?? box.boxOrder) === index + 1)?.quantity ?? null);
+    const quantities = Array.from({ length: maxBoxes }, (_, index) => item.boxes.find((box) => box.boxOrder === index + 1)?.quantity ?? null);
     addRow(sheet, [...(monthly ? [item.ticketNumber ?? item.groupName] : []), item.shop, item.channel, item.country, item.destinationFc, item.fba, item.msku, item.fnsku, item.productName, item.sku, item.quantity,
-      ...quantities, item.codes.join('、'), first ? item.groupQuantity : null, item.status, date(item.actualShipDate), ...(monthly ? [] : [item.ticketNumber ?? item.groupName]), date(item.businessDate), item.shippingMonth ? `${item.shippingMonth} 第 ${item.shippingRunSequence ?? '待编号'} 次` : '历史批次 / 未关联发货次', first ? item.monthQuantity : null, item.dataRevisionId]);
+      ...quantities, firstTicket ? item.ticketCodeRange ?? '' : null, first ? item.groupQuantity : null, item.status, date(item.actualShipDate), ...(monthly ? [] : [item.ticketNumber ?? item.groupName]), date(item.businessDate), item.shippingMonth ? `${item.shippingMonth} 第 ${item.shippingRunSequence ?? '待编号'} 次` : '历史批次 / 未关联发货次', first ? item.monthQuantity : null, item.dataRevisionId]);
   }
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: sheet.rowCount, column: headers.length } };
   return sheet;
 }
 export async function createReportWorkbook(projection: ShipmentReport, options: { month?: string | null; exportId?: string } = {}) {
-  projection = { ...projection, rows: sortReportRows(projection.rows), boxes: sortReportBoxes(projection.boxes) };
+  projection = { ...projection, rows: sortReportRows(summarizeReportTicketCodes(projection.rows, projection.boxes)), boxes: sortReportBoxes(projection.boxes) };
   const book = new ExcelJS.Workbook(); book.creator = 'SCM'; book.created = new Date(projection.generatedAt); book.modified = book.created;
-  const maxBoxes = projection.rows.reduce((maximum, row) => row.boxes.reduce((last, box) => Math.max(last, box.displayBoxOrder ?? box.boxOrder), maximum),
-    projection.boxes.reduce((maximum, box) => Math.max(maximum, box.displayBoxOrder ?? box.boxOrder), Math.max(10, projection.maxBoxes)));
+  const maxBoxes = projection.rows.reduce((maximum, row) => row.boxes.reduce((last, box) => Math.max(last, box.boxOrder), maximum),
+    projection.boxes.reduce((maximum, box) => Math.max(maximum, box.boxOrder), 5));
   if (maxBoxes > 16_000) throw new Error('单票箱数超过 XLSX 列数上限，请改用逐箱明细导出。');
   addProductSheet(book, projection.shippingRunDate ? `${projection.shippingRunDate.replaceAll('-', '')}第${projection.shippingRunSequence}次发货` : options.month ? `${options.month}月汇总` : '发货汇总', projection.rows, maxBoxes, true);
   for (const [region, name] of [['US', '美国批次'], ['EU', '欧洲批次'], ['other', '其他国家批次']] as const) {
@@ -64,15 +71,17 @@ export async function createReportWorkbook(projection: ShipmentReport, options: 
   const detail = book.addWorksheet('逐箱明细');
   styleSheet(detail, [projection.shippingRunId ? '发货票号' : '打包批次', 'sid', 'FBA货件号', '内部箱ID', '平台箱ID', '平台箱名', '货件内箱序', '内部编码', 'MSKU', 'FNSKU', 'SKU', '箱内数量', '重量', '重量单位', '长', '宽', '高', '尺寸单位', '确认版本', '发货表箱列']);
   detail.columns.forEach((c, i) => { c.width = [3, 4, 18].includes(i) ? 38 : i === 2 || [0, 8, 9, 10].includes(i) ? 26 : 17; });
-  for (const box of projection.boxes) for (const item of box.items) addRow(detail, [box.ticketNumber ?? box.groupName, box.sid.toString(), box.fba, box.boxId, box.boxExternalId, box.boxName, box.boxOrder, box.code, item.msku, item.fnsku, item.sku, item.quantity, box.weight, box.weightUnit, box.length, box.width, box.height, box.lengthUnit, box.confirmationId, box.displayBoxOrder ?? box.boxOrder]);
+  for (const box of projection.boxes) for (const item of box.items) addRow(detail, [box.ticketNumber ?? box.groupName, box.sid.toString(), box.fba, box.boxId, box.boxExternalId, box.boxName, box.boxOrder, box.code, item.msku, item.fnsku, item.sku, item.quantity, box.weight, box.weightUnit, box.length, box.width, box.height, box.lengthUnit, box.confirmationId, box.boxOrder]);
   const versions = book.addWorksheet('版本说明');
   styleSheet(versions, ['项目', '值'], [24, 95]);
   addRow(versions, ['导出编号', options.exportId ?? '预览']); addRow(versions, ['模板版本', REPORT_TEMPLATE_VERSION]);
   addRow(versions, ['生成时间（上海）', new Date(projection.generatedAt).toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' })]);
   addRow(versions, ['归月口径', projection.shippingRunId ? '本次发货按编号日期归月；仅含本次票成员，货件首次业务日期独立保留' : '按发货次编号日期归月；首次导入业务日期独立保留，未关联历史批次不推算月份和次数']);
   addRow(versions, ['数量口径', '详情申报量逐商品与装箱合计一致；子批次商品合计仅首条展示']);
-  addRow(versions, ['箱列口径', '按已分配内部箱码的数字序号展示数量，例如 G7、G8 对应箱7、箱8；缺号保留空列，货件内箱序独立保留在逐箱明细']);
-  addRow(versions, ['商品行顺序', 'FBA 按最小内部编码排列，字母前缀按 A…Z、AA、AB…，同前缀按数字升序；每个 FBA 内按首个有正数量的展示箱列排列，同首箱保留来源顺序，无正数量行置后']);
+  addRow(versions, ['箱列口径', '每个 FBA 按货件内箱序从箱1开始，至少保留5个箱列，超过5箱动态扩列；实际内部箱码在逐箱明细保留']);
+  addRow(versions, ['商品行顺序', '业务票保持连续并按来源票序排列；同票 FBA 按实际箱数升序，同箱数按输入顺序；按整票商品总数量降序建立统一商品顺序，同数量按 SKU 排序，票内所有 FBA 复用此顺序；同 SKU 的不同平台商品身份独立保留']);
+  addRow(versions, ['整票编码范围', '每票首行展示完整编码范围，连续码压缩为 A1-A10，缺号分段保留；范围不替代逐箱真实编码']);
+  addRow(versions, ['票间分隔', '商品表相邻两票之间保留一整行空白，同票内多个 FBA 连续展示；空白行不计入商品行数或数量']);
   addRow(versions, ['流程状态', '制表确认/导出/打印状态；不表示实物核验或实际发货完成']);
   if (projection.shippingRunId) {
     addRow(versions, ['发货次', `${projection.shippingRunDate} / 本月第 ${projection.shippingRunSequence} 次`]);
@@ -82,7 +91,14 @@ export async function createReportWorkbook(projection: ShipmentReport, options: 
   for (const ref of projection.confirmations) addRow(versions, ['子批次确认', `${ref.groupId} / 组版本 ${ref.groupVersion} / 确认 ${ref.confirmationId}`]);
   const bytes = Buffer.from(await book.xlsx.writeBuffer());
   const verify = new ExcelJS.Workbook(); await verify.xlsx.load(bytes as unknown as Parameters<typeof verify.xlsx.load>[0]);
-  if (verify.worksheets[0]?.rowCount !== projection.rows.length + 1 || verify.getWorksheet('逐箱明细')?.rowCount !== projection.boxes.reduce((n, box) => n + box.items.length, 1)) throw new Error('生成文件回读核对失败。');
+  const productSheets = verify.worksheets.filter((sheet) => !['逐箱明细', '版本说明'].includes(sheet.name));
+  for (const sheet of productSheets) {
+    const rows = sheet === verify.worksheets[0] ? projection.rows : projection.rows.filter((row) => reportRegion(row.country) === (sheet.name === '美国批次' ? 'US' : sheet.name === '欧洲批次' ? 'EU' : 'other'));
+    const separators = rows.reduce((count, row, index) => count + (index > 0 && reportTicketKey(rows[index - 1]!) !== reportTicketKey(row) ? 1 : 0), 0);
+    let populated = 0; sheet.eachRow(() => { populated++; });
+    if (sheet.rowCount !== rows.length + separators + 1 || populated !== rows.length + 1) throw new Error('生成文件商品行或票间空行回读核对失败。');
+  }
+  if (verify.getWorksheet('逐箱明细')?.rowCount !== projection.boxes.reduce((n, box) => n + box.items.length, 1)) throw new Error('生成文件回读核对失败。');
   return bytes;
 }
 

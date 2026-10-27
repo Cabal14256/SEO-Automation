@@ -1,4 +1,4 @@
-import { demoTaskInputSchema } from '@scm/contracts';
+import { demoTaskInputSchema, isWorkflowUnderMaintenance, workflowMaintenanceMessage } from '@scm/contracts';
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { Link, Navigate, useLocation, useNavigate, useSearch } from '@tanstack/react-router';
 import {
@@ -179,7 +179,9 @@ function Navigation({ compact = false, onNavigate, onExpand }: { compact?: boole
           ? <IconButton className={`nav-link navigation-group-toggle${shippingActive ? ' nav-link-active' : ''}`} icon={Package} label="发货管理" data-active={shippingActive} aria-expanded={false} aria-controls={submenuId} onClick={toggleGroup} />
           : <button ref={groupButton} type="button" className="nav-link navigation-group-toggle" data-active={shippingActive} aria-expanded={expanded} aria-controls={submenuId} onClick={toggleGroup}><Package size={19} aria-hidden="true" /><span>发货管理</span><ChevronDown className="navigation-group-chevron" size={16} aria-hidden="true" /></button>}
         <nav id={submenuId} className="navigation-submenu" aria-label="发货管理子导航" hidden={compact || !expanded}>
-          {shippingItems.map(({ view: itemView, label, icon: Icon }) => <Link key={itemView} to="/shipping" search={{ view: itemView }} activeProps={{}} className={`nav-link navigation-child-link${shippingActive && view === itemView ? ' nav-link-active' : ''}`} aria-current={shippingActive && view === itemView ? 'page' : undefined} onClick={onNavigate}><Icon size={16} aria-hidden="true" /><span>{label}</span></Link>)}
+          {shippingItems.map(({ view: itemView, label, icon: Icon }) => isWorkflowUnderMaintenance(itemView === 'archives' ? 'archive' : itemView)
+            ? <button key={itemView} type="button" disabled className="nav-link navigation-child-link nav-link-disabled navigation-maintenance" aria-label={`${label}${workflowMaintenanceMessage}`}><Icon size={16} aria-hidden="true" /><span className="navigation-maintenance-label"><span>{label}</span><small>{workflowMaintenanceMessage}</small></span></button>
+            : <Link key={itemView} to="/shipping" search={{ view: itemView }} activeProps={{}} className={`nav-link navigation-child-link${shippingActive && view === itemView ? ' nav-link-active' : ''}`} aria-current={shippingActive && view === itemView ? 'page' : undefined} onClick={onNavigate}><Icon size={16} aria-hidden="true" /><span>{label}</span></Link>)}
         </nav>
       </div>
       {compact ? <IconLink to="/finance" icon={ReceiptText} label="费用对账" className={`nav-link${pathname === '/finance' ? ' nav-link-active' : ''}`} aria-current={pathname === '/finance' ? 'page' : undefined} activeProps={{}} onClick={onNavigate} /> : <Link to="/finance" className={`nav-link${pathname === '/finance' ? ' nav-link-active' : ''}`} aria-current={pathname === '/finance' ? 'page' : undefined} activeProps={{}} onClick={onNavigate}><ReceiptText size={19} aria-hidden="true" /><span>费用对账</span></Link>}

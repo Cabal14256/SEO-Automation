@@ -85,6 +85,7 @@ docs/
 | --- | --- |
 | [运行维护](operations/runbook.md) | 首次配置、业务操作、进程管理与备份恢复；旧阶段操作已注明边界 |
 | [试用部署](deployment/trial.md) | Windows 试用环境、服务与隔离恢复 |
+| [VPS 与 1Panel 部署](deployment/vps-1panel.md) | 现行 1Panel Node.js 与 PostgreSQL 容器、离线发布、HTTPS、升级与备份恢复 |
 | [正式部署计划](deployment/formal-deployment-plan.md) | 目标设备与业务验收条件，属于部署计划 |
 | [开发机领星代理](deployment/lingxing-dev-proxy.md) | 特定 Windows／Ubuntu 环境的出口配置与排查 |
 

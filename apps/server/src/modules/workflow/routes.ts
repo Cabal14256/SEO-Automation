@@ -15,6 +15,7 @@ import { attachWorkflowFile, readWorkflowFile } from './files.js';
 import { getWorkflowDetail, listWorkflowRecords, listWorkflowSources, writeWorkflow } from './service.js';
 import { getWorkflowExport, readWorkflowExport, requestWorkflowExport } from './exports.js';
 import type { WorkflowPolicy } from './policy.js';
+import { requireWorkflowAvailable } from './maintenance.js';
 
 type Variables = { actorId: string };
 const uuid = (value: unknown) => z.uuid().parse(value);
@@ -38,6 +39,7 @@ export function workflowRouter() {
 }
 export function createWorkflowRoutes(policy: WorkflowPolicy, getBoss: () => PgBoss | null) {
   const routes = workflowRouter();
+  routes.use('*', async (_c, next) => { requireWorkflowAvailable(policy.kind); await next(); });
   if (policy.kind === 'finance') {
     routes.get('/import-template', async () => { const artifact = await financeImportTemplate(); return new Response(new Uint8Array(artifact.bytes), { headers: { 'Content-Type': artifact.mimeType, 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(artifact.name)}`, 'X-Content-Type-Options': 'nosniff' } }); });
     routes.post('/:id/import-preview', async (c) => {

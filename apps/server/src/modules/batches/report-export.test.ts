@@ -31,7 +31,8 @@ function fixture() {
   const run = { run: { id: runId, version: 4, status: 'ready', numberingDate: '2026-10-23', month: '2026-10', sequence: 2 },
     tickets: [{ id: ticketId, number: '20261023-2-US-1', sourceTicketIndex: 1, members: [member] }], groupIds: [groupId] };
   const projection = { shippingRunId: runId, shippingRunVersion: 4, shippingRunDate: '2026-10-23', shippingRunSequence: 2,
-    rows: [{ demandId, groupId, ticketId, ticketNumber: '20261023-2-US-1', sourceTicketIndex: 1, inputOrder: 1, status: '已确认' }], boxes: [] } as unknown as ShipmentReport;
+    rows: [{ demandId, groupId, ticketId, ticketNumber: '20261023-2-US-1', sourceTicketIndex: 1, inputOrder: 1, status: '已确认',
+      sid: 11, msku: 'M', fnsku: 'FN', sku: 'SKU', quantity: 1 }], boxes: [] } as unknown as ShipmentReport;
   const record = { id: randomUUID(), status: 'queued', groupIds: [groupId], references: [{ groupId, groupVersion: 2, confirmationId }], projection,
     createdBy: 'admin', month: null, region: 'all', fileId: null, rowCount: 1 };
   const group = { id: groupId, batchId, version: 2 };
@@ -58,7 +59,8 @@ function boxColumnFixture(status = 'queued', legacyRow = false) {
     delete record.projection.shippingRunId;
     for (const row of record.projection.rows) delete row.demandId;
   }
-  const bundle = { ...data.bundle, codes: [
+  const bundle = { ...data.bundle, confirmation: { ...data.bundle.confirmation, snapshot: { shipments: [{ demandId,
+    revision: { data: { boxes: [{ id: firstBoxId, order: 1 }, { id: secondBoxId, order: 2 }] } } }] } }, codes: [
     { id: randomUUID(), groupId: group.id, demandId, boxId: firstBoxId, code: 'G7', prefix: 'G', sequence: 7, valid: true },
     { id: randomUUID(), groupId: group.id, demandId, boxId: secondBoxId, code: 'G8', prefix: 'G', sequence: 8, valid: true },
   ] };
@@ -129,12 +131,12 @@ describe('queued report box-column compatibility', () => {
     const before = structuredClone(data.record.projection), createWorkbook = vi.fn().mockResolvedValue(Buffer.from('xlsx'));
     await executeReportExport(data.record.id, { createWorkbook });
     const rendered = createWorkbook.mock.calls[0]![0] as ShipmentReport;
-    expect(rendered.maxBoxes).toBe(8);
+    expect(rendered.maxBoxes).toBe(2);
     expect(rendered.rows.map((row) => [row.id, row.quantity, row.boxes.map((box) => [box.boxId, box.boxOrder, box.code, box.quantity, box.displayBoxOrder])])).toEqual([
-      ['source-z-first', 31, [[before.rows[0]!.boxes[0]!.boxId, 1, 'G7', 11, 7], [before.rows[0]!.boxes[1]!.boxId, 2, 'G8', 20, 8]]],
-      ['source-a-second', 7, [[before.rows[1]!.boxes[0]!.boxId, 2, 'G8', 7, 8]]],
+      ['source-z-first', 31, [[before.rows[0]!.boxes[0]!.boxId, 1, 'G7', 11, 1], [before.rows[0]!.boxes[1]!.boxId, 2, 'G8', 20, 2]]],
+      ['source-a-second', 7, [[before.rows[1]!.boxes[0]!.boxId, 2, 'G8', 7, 2]]],
     ]);
-    expect(rendered.boxes.map((box) => [box.boxOrder, box.displayBoxOrder, box.items])).toEqual([[1, 7, before.boxes[0]!.items], [2, 8, before.boxes[1]!.items]]);
+    expect(rendered.boxes.map((box) => [box.boxOrder, box.displayBoxOrder, box.items])).toEqual([[1, 1, before.boxes[0]!.items], [2, 2, before.boxes[1]!.items]]);
     expect(rendered.rows.map((row) => [row.demandId, row.ticketId, row.inputOrder])).toEqual(before.rows.map((row) => [row.demandId, row.ticketId, row.inputOrder]));
     expect(data.record.projection).toEqual(before);
     expect(state.updates.at(-1)).toMatchObject({ status: 'completed', projection: rendered });
@@ -146,7 +148,7 @@ describe('queued report box-column compatibility', () => {
     const before = structuredClone(data.record.projection), createWorkbook = vi.fn().mockResolvedValue(Buffer.from('xlsx'));
     await executeReportExport(data.record.id, { createWorkbook });
     const rendered = createWorkbook.mock.calls[0]![0] as ShipmentReport;
-    expect(rendered.rows.map((row) => row.boxes.map((box) => box.displayBoxOrder))).toEqual([[7, 8], [8]]);
+    expect(rendered.rows.map((row) => row.boxes.map((box) => box.displayBoxOrder))).toEqual([[1, 2], [2]]);
     expect(rendered.rows.every((row) => !Object.hasOwn(row, 'demandId'))).toBe(true);
     expect(rendered.shippingRunId).toBeUndefined(); expect(state.ready).not.toHaveBeenCalled();
     expect(data.record.projection).toEqual(before); expect(state.updates.at(-1)).toMatchObject({ status: 'completed' });
@@ -168,14 +170,38 @@ describe('queued report box-column compatibility', () => {
     expect(state.inserts).toEqual([]); expect(record.projection).toEqual(before); expect(state.updates.at(-1)).toMatchObject({ status: 'stale' });
   });
 
-  it.each(['row', 'box'])('rejects an existing %s display position that differs from its valid allocation', async (location) => {
+  it.each(['row', 'box'])('rejects an existing %s display position unrelated to local or legacy allocation order', async (location) => {
     const { record, bundle, group, run } = boxColumnFixture();
-    if (location === 'row') record.projection.rows[0]!.boxes[0]!.displayBoxOrder = 1;
-    else record.projection.boxes[0]!.displayBoxOrder = 1;
+    if (location === 'row') record.projection.rows[0]!.boxes[0]!.displayBoxOrder = 5;
+    else record.projection.boxes[0]!.displayBoxOrder = 5;
     state.reads.push([record], [group], [], [group], [record]); state.ready.mockResolvedValue(run); state.confirmed.mockResolvedValue(bundle);
     const createWorkbook = vi.fn();
     await expect(executeReportExport(record.id, { createWorkbook })).rejects.toMatchObject({ code: 'REPORT_BOX_COLUMNS_STALE', status: 409 });
     expect(createWorkbook).not.toHaveBeenCalled(); expect(state.freeze).not.toHaveBeenCalled(); expect(state.store).not.toHaveBeenCalled();
+  });
+
+  it('converts legacy allocation columns to local columns without extending to the old maximum', async () => {
+    const data = boxColumnFixture();
+    data.record.projection.maxBoxes = 80;
+    for (const row of data.record.projection.rows) for (const box of row.boxes) box.displayBoxOrder = box.boxOrder + 6;
+    for (const box of data.record.projection.boxes) box.displayBoxOrder = box.boxOrder + 6;
+    allowPublication(data);
+    const createWorkbook = vi.fn().mockResolvedValue(Buffer.from('xlsx'));
+    await executeReportExport(data.record.id, { createWorkbook });
+    expect(createWorkbook.mock.calls[0]![0]).toMatchObject({ maxBoxes: 2, rows: [
+      { ticketCodeRange: 'G7-G8', boxes: [{ displayBoxOrder: 1 }, { displayBoxOrder: 2 }] },
+      { ticketCodeRange: 'G7-G8', boxes: [{ displayBoxOrder: 2 }] },
+    ] });
+  });
+
+  it.each(['row', 'box'])('rejects a changed %s local order against its accepted shipment snapshot', async (location) => {
+    const { record, bundle, group, run } = boxColumnFixture();
+    if (location === 'row') record.projection.rows[0]!.boxes[0]!.boxOrder = 2;
+    else record.projection.boxes[0]!.boxOrder = 2;
+    state.reads.push([record], [group], [], [group], [record]); state.ready.mockResolvedValue(run); state.confirmed.mockResolvedValue(bundle);
+    const createWorkbook = vi.fn();
+    await expect(executeReportExport(record.id, { createWorkbook })).rejects.toMatchObject({ code: 'REPORT_BOX_COLUMNS_STALE', status: 409 });
+    expect(createWorkbook).not.toHaveBeenCalled(); expect(state.freeze).not.toHaveBeenCalled();
   });
 
   it('refuses publication when allocation sequences change after rendering, without storing a completed projection or file index', async () => {

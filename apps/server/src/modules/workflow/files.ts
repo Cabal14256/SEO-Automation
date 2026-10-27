@@ -7,8 +7,11 @@ import { publishReportFile } from '../batches/report-service.js';
 import { checkedFileBytes } from '../imports/service.js';
 import { lockedWorkflow, workflowOperation } from './service.js';
 import { workflowAttachments, workflowExports, workflowRecords } from './schema.js';
+import { requireWorkflowAvailable } from './maintenance.js';
 
 export async function attachWorkflowFile(actorId: string, input: { recordId: string; operationId: string; purpose: string; bytes: Buffer; name: string; mimeType: string }) {
+  // Check before staging bytes or replaying an earlier attachment operation.
+  await db.transaction((tx) => lockedWorkflow(tx, input.recordId, actorId));
   if (!input.bytes.length || input.bytes.length > 10 * 1024 * 1024) throw new BatchError('INVALID_FILE_SIZE', 422, '附件必须为非空且不超过10 MiB。');
   if (!/\.(?:pdf|png|jpe?g|xlsx?|docx|zip|txt|csv)$/i.test(input.name)) throw new BatchError('INVALID_FILE_TYPE', 422, '请上传PDF、图片、表格、Word、ZIP或文本资料。');
   const pdf = input.bytes.subarray(0, 5).toString('ascii') === '%PDF-', png = input.bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])), jpeg = input.bytes[0] === 255 && input.bytes[1] === 216 && input.bytes[2] === 255;
@@ -35,9 +38,15 @@ export async function readWorkflowFile(id: string, actorId: string) {
   return db.transaction(async (tx) => {
     await requireBatchActor(tx, actorId);
     const [attachment] = await tx.select().from(workflowAttachments).where(eq(workflowAttachments.fileId, id));
-    const [source] = await tx.select({ id: workflowRecords.id }).from(workflowRecords).where(sql`${workflowRecords.source}->>'fileId' = ${id}`).limit(1);
-    const [exported] = await tx.select({ id: workflowExports.id }).from(workflowExports).where(eq(workflowExports.fileId, id)).limit(1);
-    if (!attachment && !source && !exported) throw new BatchError('NOT_FOUND', 404, '附件没有可访问的业务关联。');
+    const sources = await tx.select({ kind: workflowRecords.kind }).from(workflowRecords).where(sql`${workflowRecords.source}->>'fileId' = ${id}`);
+    const [exported] = await tx.select({ recordId: workflowExports.recordId }).from(workflowExports).where(eq(workflowExports.fileId, id)).limit(1);
+    if (attachment) await lockedWorkflow(tx, attachment.recordId, actorId);
+    else if (exported) await lockedWorkflow(tx, exported.recordId, actorId);
+    else if (sources.length) {
+      // One reviewed source document may also be used by the active finance module.
+      // Keep that shared source readable while closing resources exclusive to maintenance modules.
+      if (!sources.some((source) => source.kind === 'finance')) requireWorkflowAvailable(sources[0]!.kind);
+    } else throw new BatchError('NOT_FOUND', 404, '附件没有可访问的业务关联。');
     const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, id));
     if (!file) throw new BatchError('FILE_UNAVAILABLE', 503, '附件索引缺失。');
     return { file, bytes: await checkedFileBytes(file) };

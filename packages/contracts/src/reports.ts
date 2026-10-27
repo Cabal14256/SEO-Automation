@@ -13,7 +13,7 @@ export const reportRowSchema = z.object({
   weekStartDate: z.string(), weekEndDate: z.string(), businessDate: z.string(), sid: z.number().int().positive(),
   shop: z.string(), country: z.string(), channel: z.string(), destinationFc: z.string().nullable(), fba: z.string(),
   msku: z.string(), fnsku: z.string(), sku: z.string(), productName: z.string(), quantity: z.number().int().nonnegative(),
-  boxes: z.array(reportBoxQuantitySchema), codes: z.array(z.string()), groupQuantity: z.number().int().nonnegative(),
+  boxes: z.array(reportBoxQuantitySchema), codes: z.array(z.string()), ticketCodeRange: z.string().optional(), groupQuantity: z.number().int().nonnegative(),
   monthQuantity: z.number().int().nonnegative(), status: z.string(), actualShipDate: z.string().nullable(),
   sourceObservedAt: z.string(), dataRevisionId: z.uuid(),
 });

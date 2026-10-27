@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Check, CircleAlert, Download, FileSpreadsheet, LoaderCircle, RefreshCw } from 'lucide-react';
-import { correctShippingRunInputSchema, type CorrectShippingRunInput, type CreateShippingRunInput, type ImportAccepted, type ImportDraftContent, type OnlineImportRow, type ShippingRun, type SourceImport } from '@scm/contracts';
+import { correctShippingRunInputSchema, reportTicketKey, type CorrectShippingRunInput, type CreateShippingRunInput, type ImportAccepted, type ImportDraftContent, type OnlineImportRow, type ShippingRun, type SourceImport } from '@scm/contracts';
 import { api, ApiError } from '../api';
 import { Button, IconButton } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -14,6 +14,7 @@ import { OnlineImport } from './online-import';
 import { emptyOnlineRow } from './online-import-grid';
 import { UploadPanel, ParseControls, isBusy } from './import-source';
 import { shanghaiToday } from '../components/ui/date-utils';
+import { getReportTicketCodeRanges, getShippingBoxColumns } from './shipping-table-parts';
 import './shipping-runs.css';
 
 type ShippingDraft = NonNullable<ImportDraftContent['shipping']>;
@@ -113,7 +114,8 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
   if (detail.isError) return <QueryError error={detail.error} retry={() => void detail.refetch()} />;
   if (!run || !detail.data) return null;
   const runDetail = detail.data;
-  const boxes = Array.from({ length: Math.max(10, report.data?.maxBoxes ?? 0) }, (_, index) => index + 1);
+  const boxes = getShippingBoxColumns(report.data?.maxBoxes, report.data?.boxes);
+  const ticketRanges = getReportTicketCodeRanges(report.data);
   const inProgress = Boolean(running(run));
   const stopped = run.status === 'draft' || run.status === 'needs_review' || run.status === 'failed';
   // An unconfirmed source is expected while the automatic job is building or
@@ -173,11 +175,11 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
     <div className="shipping-run-actions"><div className="import-selection-actions"><Button type="button" aria-pressed={view === 'products'} onClick={() => setView('products')}>商品与箱数量</Button><Button type="button" aria-pressed={view === 'boxes'} onClick={() => setView('boxes')}>逐箱明细</Button></div><Button type="button" className="shipping-run-generate" variant="primary" icon={FileSpreadsheet} disabled={!ready || action.busy} onClick={generate}>生成本次发货 XLSX</Button></div>
     {!run.sequence ? <p className="mapping-help">完成货件资料和分票校验后，系统会自动分配票号并同步商品、箱数据。</p> : report.isPending ? <p className="list-state" role="status">正在读取本次发货表…</p> : report.isError ? <QueryError error={report.error} retry={() => void report.refetch()} /> : report.data && <>
       {report.data.rows.length === 0 ? <p className="mapping-help">商品与箱数据整理完成后会在这里显示。</p> : view === 'products' ? <>
-        <BatchTable label="本次发货商品表" headers={['完整票号', '店铺 / 国家 / 渠道', 'FBA / 目的仓', 'MSKU / FNSKU', '品名 / SKU', '商品数量', ...boxes.map((order) => `箱 ${order}`), '内部箱码', '本票商品合计']}>
-          {report.data.rows.map((row) => <tr key={row.id}><td><strong>{row.ticketNumber}</strong></td><td>{row.shop}<small className="mapping-subtext">{row.country} · {row.channel}</small></td><td>{row.fba}<small className="mapping-subtext">{row.destinationFc || '—'}</small></td><td>{row.msku}<small className="mapping-subtext">{row.fnsku}</small></td><td>{row.productName}<small className="mapping-subtext">{row.sku}</small></td><td className="demand-number">{row.quantity}</td>{boxes.map((order) => <td className="demand-number" key={order}>{row.boxes.find((box) => (box.displayBoxOrder ?? box.boxOrder) === order)?.quantity ?? '—'}</td>)}<td>{row.codes.join('、')}</td><td className="demand-number">{row.groupQuantity}</td></tr>)}
+        <BatchTable label="本次发货商品表" headers={['完整票号', '店铺 / 国家 / 渠道', 'FBA / 目的仓', 'MSKU / FNSKU', '品名 / SKU', '商品数量', ...boxes.map((order) => `箱 ${order}`), '整票编码范围', '本票商品合计']}>
+          {report.data.rows.map((row, index, rows) => <tr key={row.id}><td><strong>{row.ticketNumber}</strong></td><td>{row.shop}<small className="mapping-subtext">{row.country} · {row.channel}</small></td><td>{row.fba}<small className="mapping-subtext">{row.destinationFc || '—'}</small></td><td>{row.msku}<small className="mapping-subtext">{row.fnsku}</small></td><td>{row.productName}<small className="mapping-subtext">{row.sku}</small></td><td className="demand-number">{row.quantity}</td>{boxes.map((order) => <td className="demand-number" key={order}>{row.boxes.find((box) => box.boxOrder === order)?.quantity ?? '—'}</td>)}<td>{index === 0 || reportTicketKey(rows[index - 1]!) !== reportTicketKey(row) ? ticketRanges.get(reportTicketKey(row)) || '待编码' : ''}</td><td className="demand-number">{row.groupQuantity}</td></tr>)}
         </BatchTable><BatchPagination page={page} pageSize={50} total={report.data.total} change={setPage} />
       </> : <BatchTable label="本次发货逐箱表" headers={['完整票号 / FBA', '箱列 / 内部箱码', '商品', '箱内数量', '登记重量', '登记尺寸']}>
-        {report.data.boxes.flatMap((box) => box.items.map((item, index) => <tr key={`${box.boxId}-${index}`}><td><strong>{box.ticketNumber}</strong><small className="mapping-subtext">{box.fba}</small></td><td>箱 {box.displayBoxOrder ?? box.boxOrder} · {box.code}{box.displayBoxOrder !== undefined && box.displayBoxOrder !== box.boxOrder && <small className="mapping-subtext">货件内箱 {box.boxOrder}</small>}</td><td>{item.msku}<small className="mapping-subtext">{item.fnsku} / {item.sku}</small></td><td>{item.quantity}</td><td>{box.weight === null ? '缺失' : `${box.weight} ${box.weightUnit || ''}`}</td><td>{box.length ?? '—'} × {box.width ?? '—'} × {box.height ?? '—'} {box.lengthUnit || ''}</td></tr>))}
+        {report.data.boxes.flatMap((box) => box.items.map((item, index) => <tr key={`${box.boxId}-${index}`}><td><strong>{box.ticketNumber}</strong><small className="mapping-subtext">{box.fba}</small></td><td>箱 {box.boxOrder} · {box.code}</td><td>{item.msku}<small className="mapping-subtext">{item.fnsku} / {item.sku}</small></td><td>{item.quantity}</td><td>{box.weight === null ? '缺失' : `${box.weight} ${box.weightUnit || ''}`}</td><td>{box.length ?? '—'} × {box.width ?? '—'} × {box.height ?? '—'} {box.lengthUnit || ''}</td></tr>))}
       </BatchTable>}
     </>}
     <details className="shipping-run-export-history"><summary>本次发货导出记录</summary>

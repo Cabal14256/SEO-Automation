@@ -19,7 +19,7 @@
 | 发货整理 | 按月管理发货次与票号，支持自动整理、人工分组及完整 FBA 货件关联 |
 | 数据与制表 | 领星只读查询、商品与逐箱核对、箱序与箱码、发货表 XLSX 导出 |
 | 发票与单据 | 版本化资料和模板、后台出单任务、集中补齐、单票及整批合并 XLSX、文件复核与更正 |
-| 后续流程 | 本地单据与分配核对、物流交接、报关与 9810 记录、费用分摊及批次归档 |
+| 后续流程 | 费用分摊保留；领星单据与分配、物流与交接、报关与 9810、批次归档暂时关闭，显示“（待维护）” |
 | 维护与追溯 | 管理员认证、独立 Worker、操作审计、不可变文件、数据库迁移及备份恢复工具 |
 
 领星业务数据保持**只读**。外部建单、库存分配、发货确认及费用回填等动作由业务人员在相应系统执行，本项目登记结果与核对凭据。当前发票直接采用领星／M2 逐箱快照，允许本票修订箱规；旧 M3 实物箱确认仅保留历史兼容。具体规则见[业务规则](docs/business/rules.md)与[发票箱规](docs/business/invoice-box-data.md)。
@@ -106,7 +106,7 @@ corepack pnpm privacy:history
 | 了解实现范围和待验事项 | [当前实现状态](docs/development/implementation-status.md) |
 | 理解业务字段、数量口径及制单规则 | [业务规则](docs/business/rules.md)、[字段映射](docs/business/field-mapping.md) |
 | 阅读接口与数据设计 | [API 导航](docs/README.md#接口契约)、[数据模型](docs/architecture/data-model.md) |
-| 配置、运行、部署和恢复 | [运行维护](docs/operations/runbook.md)、[试用部署](docs/deployment/trial.md) |
+| 配置、运行、部署和恢复 | [运行维护](docs/operations/runbook.md)、[试用部署](docs/deployment/trial.md)、[VPS 与 1Panel](docs/deployment/vps-1panel.md) |
 | 准备 GitHub 展示与上传 | [隐私说明](docs/publishing/privacy.md)、[发布步骤](docs/publishing/github-publishing.md) |
 
 ## 私有资料与 Git 边界

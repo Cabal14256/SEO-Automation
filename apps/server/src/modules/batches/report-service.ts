@@ -4,6 +4,7 @@ import { relative, resolve, isAbsolute } from 'node:path';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { fromDrizzle, type PgBoss } from 'pg-boss';
 import type { ReportExportInput, ReportExportRecord, ReportReference, ShipmentReport, ShipmentReportBox, ShipmentReportRow } from '@scm/contracts';
+import { reportTicketKey } from '@scm/contracts';
 import { db, pool } from '../../db/client.js';
 import { fileIndex, operationAudit, user } from '../../db/schema.js';
 import { readConfig } from '../../config.js';
@@ -14,7 +15,7 @@ import { subBatches, weeklyBatches } from './schema.js';
 import { BatchError, freezeGroupForExport, getConfirmedGroup, getConfirmedGroupInTx, lockBatchRunScopesInTx, type BatchTx } from './service.js';
 import { createReportWorkbook, reportRegion } from './workbook.js';
 import { productKey } from './validation.js';
-import { sortReportBoxes, sortReportRows } from './report-order.js';
+import { sortReportBoxes, sortReportRows, summarizeReportTicketCodes } from './report-order.js';
 import { getReadyShippingRunInTx, getShippingRunReportScopeInTx } from '../shipping-runs/service.js';
 import { shippingRuns, shippingTicketMembers, shippingTickets } from '../shipping-runs/schema.js';
 
@@ -25,11 +26,11 @@ export type ShippingReportScope = {
   allowIncomplete?: boolean;
   members: Array<{ demandId: string; groupId: string; ticketId: string; ticketNumber: string; sourceTicketIndex: number; inputOrder: number }>;
 };
-type Confirmed = Awaited<ReturnType<typeof getConfirmedGroup>> & { shippingDetails?: Record<string,{runId:string;month:string;sequence:number|null;ticketNumber:string|null}> };
+type Confirmed = Awaited<ReturnType<typeof getConfirmedGroup>> & { shippingDetails?: Record<string,{runId:string;month:string;sequence:number|null;ticketNumber:string|null;ticketId?:string;sourceTicketIndex?:number;inputOrder?:number}> };
 async function withShippingDetails(tx:BatchTx,groups:Confirmed[]):Promise<Confirmed[]> {
   if(!groups.length)return groups;
   const members=await tx.select({member:shippingTicketMembers,run:shippingRuns,ticket:shippingTickets}).from(shippingTicketMembers).innerJoin(shippingRuns,eq(shippingRuns.id,shippingTicketMembers.runId)).innerJoin(shippingTickets,eq(shippingTickets.id,shippingTicketMembers.ticketId)).where(inArray(shippingTicketMembers.groupId,groups.map((bundle)=>bundle.group.id)));
-  return groups.map((bundle)=>({...bundle,shippingDetails:Object.fromEntries(members.filter(({member})=>member.groupId===bundle.group.id&&member.demandId).map(({member,run,ticket})=>[member.demandId!,{runId:run.id,month:run.month,sequence:run.sequence,ticketNumber:ticket.number}]))}));
+  return groups.map((bundle)=>({...bundle,shippingDetails:Object.fromEntries(members.filter(({member})=>member.groupId===bundle.group.id&&member.demandId).map(({member,run,ticket})=>[member.demandId!,{runId:run.id,month:run.month,sequence:run.sequence,ticketNumber:ticket.number,ticketId:ticket.id,sourceTicketIndex:ticket.sourceTicketIndex,inputOrder:member.inputOrder}]))}));
 }
 const integer = (value: string | null | undefined) => { if (value === null || value === undefined || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new BatchError('INVALID_QUANTITY', 422, '数量无法安全写入 XLSX，请核对商品数据。'); return Number(value); };
 const measure = (value: string | null | undefined) => value === null || value === undefined || value === '' ? null : Number.isFinite(Number(value)) ? Number(value) : null;
@@ -37,6 +38,7 @@ const safeSum = (left: number, right: number) => { const sum = left + right; if 
 export function projectConfirmedGroups(groups: Confirmed[], filter: ReportFilter = {}, scope?: ShippingReportScope): ShipmentReport {
   if (scope) return projectShippingRunGroups(groups, filter, scope);
   const rows: ShipmentReportRow[] = []; const boxes: ShipmentReportBox[] = []; const confirmations: ReportReference[] = [];
+  const ticketQuantities = new Map<string, number>(), ticketMonthQuantities = new Map<string, number>();
   for (const bundle of groups) {
     const { group, confirmation, codes } = bundle;
     const members = confirmation.snapshot.members;
@@ -60,6 +62,13 @@ export function projectConfirmedGroups(groups: Confirmed[], filter: ReportFilter
         const key = `${member.snapshot.sid}:${productKey(item)}`; const value = integer(item.quantity);
         quantities.set(key, safeSum(quantities.get(key) ?? 0, value));
         if (!filter.month || monthOf(member)===filter.month) monthQuantities.set(key, safeSum(monthQuantities.get(key) ?? 0, value));
+        const details = bundle.shippingDetails?.[member.id];
+        if (details?.ticketId || details?.ticketNumber) {
+          const ticket = reportTicketKey({ shippingRunId: details.runId, ticketId: details.ticketId, ticketNumber: details.ticketNumber ?? undefined, groupId: group.id });
+          const ticketKey = JSON.stringify([ticket, member.snapshot.sid, productKey(item)]);
+          ticketQuantities.set(ticketKey, safeSum(ticketQuantities.get(ticketKey) ?? 0, value));
+          if (!filter.month || monthOf(member) === filter.month) ticketMonthQuantities.set(ticketKey, safeSum(ticketMonthQuantities.get(ticketKey) ?? 0, value));
+        }
       }
     }
     let included = false;
@@ -73,27 +82,26 @@ export function projectConfirmedGroups(groups: Confirmed[], filter: ReportFilter
         const code = codes.find((c) => c.valid && c.groupId === group.id && c.demandId === member.id && c.boxId === box.id);
         if (!code) throw new BatchError('CODES_REQUIRED', 409, '确认箱缺少有效编码，请先分配编码。');
         boxes.push({ groupId: group.id, groupName: group.name, confirmationId: confirmation.id, demandId: member.id, sid: member.snapshot.sid, fba: member.snapshot.fba, boxId: box.id,
-          boxOrder: index + 1, displayBoxOrder: code.sequence, code: code.code, boxName: box.name, boxExternalId: box.externalBoxId, localBoxId: box.localBoxId,
+          boxOrder: index + 1, displayBoxOrder: index + 1, code: code.code, boxName: box.name, boxExternalId: box.externalBoxId, localBoxId: box.localBoxId,
+          ...(bundle.shippingDetails?.[member.id] ? { shippingRunId: bundle.shippingDetails[member.id]!.runId, ticketId: bundle.shippingDetails[member.id]!.ticketId,
+            ticketNumber: bundle.shippingDetails[member.id]!.ticketNumber ?? undefined, sourceTicketIndex: bundle.shippingDetails[member.id]!.sourceTicketIndex, inputOrder: bundle.shippingDetails[member.id]!.inputOrder } : {}),
           weight: measure(box.weight), weightUnit: box.weightUnit ?? null, length: measure(box.length), width: measure(box.width), height: measure(box.height), lengthUnit: box.dimensionUnit ?? null,
           items: box.items.map((item) => ({ msku: item.msku, fnsku: item.fnsku, sku: item.sku, quantity: integer(item.quantity) })) });
       }
       const shipmentRows: ShipmentReportRow[] = [];
       for (const item of data.items) {
         const key = `${member.snapshot.sid}:${productKey(item)}`;
-        const distribution = sortedBoxes.flatMap((box, index) => { const entry = box.items.find((p) => productKey(p) === productKey(item)); if (!entry) return []; const code = codes.find((c) => c.valid && c.groupId === group.id && c.boxId === box.id && c.demandId === member.id)!; return [{ boxId: box.id, boxOrder: index + 1, displayBoxOrder: code.sequence, code: code.code, quantity: integer(entry.quantity) }]; });
+        const distribution = sortedBoxes.flatMap((box, index) => { const entry = box.items.find((p) => productKey(p) === productKey(item)); if (!entry) return []; const code = codes.find((c) => c.valid && c.groupId === group.id && c.boxId === box.id && c.demandId === member.id)!; return [{ boxId: box.id, boxOrder: index + 1, displayBoxOrder: index + 1, code: code.code, quantity: integer(entry.quantity) }]; });
         shipmentRows.push({ id: `${shipment.revision.id}:${productKey(item)}`, demandId: member.id, groupId: group.id, groupName: group.name, confirmationId: confirmation.id,
           weekStartDate: member.weekStartDate, weekEndDate: member.weekEndDate, businessDate: member.businessDate, sid: member.snapshot.sid,
-          ...(bundle.shippingDetails?.[member.id]?{shippingRunId:bundle.shippingDetails[member.id]!.runId,shippingMonth:bundle.shippingDetails[member.id]!.month,shippingRunSequence:bundle.shippingDetails[member.id]!.sequence??undefined,ticketNumber:bundle.shippingDetails[member.id]!.ticketNumber??undefined}:{}),
+          ...(bundle.shippingDetails?.[member.id]?{shippingRunId:bundle.shippingDetails[member.id]!.runId,shippingMonth:bundle.shippingDetails[member.id]!.month,shippingRunSequence:bundle.shippingDetails[member.id]!.sequence??undefined,ticketNumber:bundle.shippingDetails[member.id]!.ticketNumber??undefined,
+            ticketId:bundle.shippingDetails[member.id]!.ticketId,sourceTicketIndex:bundle.shippingDetails[member.id]!.sourceTicketIndex,inputOrder:bundle.shippingDetails[member.id]!.inputOrder}:{}),
           shop: member.snapshot.shop, country: member.snapshot.country, channel: member.snapshot.channel ?? '', destinationFc: member.snapshot.destinationFc, fba: member.snapshot.fba,
           msku: item.msku, fnsku: item.fnsku, sku: item.sku, productName: item.name ?? '', quantity: integer(item.quantity), boxes: distribution, codes: distribution.map((b) => b.code),
           groupQuantity: quantities.get(key) ?? 0, monthQuantity: monthQuantities.get(key) ?? 0, status: group.frozenAt ? '已冻结' : '已确认', actualShipDate: group.actualShipDate,
           sourceObservedAt: data.observedAt, dataRevisionId: shipment.revision.id });
       }
-      // Keep FBA blocks and accepted quantities intact; only order their product
-      // rows by the first occupied box. Equal keys retain the source item order.
-      rows.push(...shipmentRows.map((row, index) => ({ row, index,
-        firstBox: row.boxes.reduce((first, box) => box.quantity > 0 ? Math.min(first, box.displayBoxOrder ?? box.boxOrder) : first, Infinity),
-      })).sort((left, right) => left.firstBox - right.firstBox || left.index - right.index).map(({ row }) => row));
+      rows.push(...shipmentRows);
     }
     if (included) confirmations.push({ groupId: group.id, groupVersion: group.version, confirmationId: confirmation.id });
   }
@@ -106,10 +114,16 @@ export function projectConfirmedGroups(groups: Confirmed[], filter: ReportFilter
     matchingGroups = new Set(rows.filter((row) => matches([row.groupName, row.fba, row.shop, row.productName, row.msku, row.fnsku, row.sku, ...row.codes])).map((row) => row.groupId));
     for (const box of boxes) if (matches([box.groupName, box.fba, box.code, ...box.items.flatMap((item) => [item.msku, item.fnsku, item.sku])])) matchingGroups.add(box.groupId);
   }
-  const matchingRows = sortReportRows(matchingGroups ? rows.filter((row) => matchingGroups.has(row.groupId)) : rows);
+  const summarizedRows = summarizeReportTicketCodes(rows.map((row) => {
+    if (!row.ticketId && !row.ticketNumber) return row;
+    const key = JSON.stringify([reportTicketKey(row), row.sid, productKey(row)]);
+    return { ...row, groupQuantity: ticketQuantities.get(key) ?? row.groupQuantity, monthQuantity: ticketMonthQuantities.get(key) ?? 0 };
+  }), boxes);
+  const orderedRows = sortReportRows(summarizedRows);
+  const matchingRows = matchingGroups ? orderedRows.filter((row) => matchingGroups.has(row.groupId)) : orderedRows;
   const matchingBoxes = sortReportBoxes(matchingGroups ? boxes.filter((box) => matchingGroups.has(box.groupId)) : boxes);
   const matchingConfirmations = matchingGroups ? confirmations.filter((ref) => matchingGroups.has(ref.groupId)) : confirmations;
-  const maxBoxes = matchingBoxes.reduce((max, box) => Math.max(max, box.displayBoxOrder ?? box.boxOrder), 0); const page = filter.page ?? 1; const pageSize = filter.pageSize ?? 50;
+  const maxBoxes = matchingBoxes.reduce((max, box) => Math.max(max, box.boxOrder), 0); const page = filter.page ?? 1; const pageSize = filter.pageSize ?? 50;
   return { rows: matchingRows.slice((page - 1) * pageSize, page * pageSize), boxes: matchingBoxes, total: matchingRows.length, page, pageSize, maxBoxes, confirmations: matchingConfirmations, blocked: [], generatedAt: new Date().toISOString() };
 }
 function projectShippingRunGroups(groups: Confirmed[], filter: ReportFilter, scope: ShippingReportScope): ShipmentReport {
@@ -129,8 +143,8 @@ function projectShippingRunGroups(groups: Confirmed[], filter: ReportFilter, sco
     const member = byDemand.get(demandId)!;
     return { shippingRunId: scope.shippingRunId, shippingMonth:scope.month, shippingRunSequence:scope.sequence??undefined,ticketId: member.ticketId, ticketNumber: member.ticketNumber, sourceTicketIndex: member.sourceTicketIndex, inputOrder: member.inputOrder };
   };
-  const rows = complete.rows.map((row) => ({ ...row, ...ticketFields(row.demandId!) }));
   const boxes = complete.boxes.map((box) => ({ ...box, ...ticketFields(box.demandId) }));
+  const rows = summarizeReportTicketCodes(complete.rows.map((row) => ({ ...row, ...ticketFields(row.demandId!) })), boxes);
   const totals = new Map<string, number>();
   const quantityKey = (row: ShipmentReportRow) => JSON.stringify([row.ticketId, row.sid, productKey(row)]);
   for (const row of rows) totals.set(quantityKey(row), safeSum(totals.get(quantityKey(row)) ?? 0, row.quantity));
@@ -155,7 +169,7 @@ function projectShippingRunGroups(groups: Confirmed[], filter: ReportFilter, sco
   const page = filter.page ?? 1, pageSize = filter.pageSize ?? 50;
   return { ...complete, shippingRunId: scope.shippingRunId, shippingRunVersion: scope.version, shippingRunDate: scope.numberingDate, ...(scope.sequence ? { shippingRunSequence: scope.sequence } : {}),
     rows: matchingRows.slice((page - 1) * pageSize, page * pageSize), boxes: matchingBoxes, total: matchingRows.length, page, pageSize,
-    maxBoxes: matchingBoxes.reduce((maximum, box) => Math.max(maximum, box.displayBoxOrder ?? box.boxOrder), 0), confirmations: complete.confirmations.filter((ref) => matchingGroupIds.has(ref.groupId)) };
+    maxBoxes: matchingBoxes.reduce((maximum, box) => Math.max(maximum, box.boxOrder), 0), confirmations: complete.confirmations.filter((ref) => matchingGroupIds.has(ref.groupId)) };
 }
 function reportScope(bundle: Awaited<ReturnType<typeof getReadyShippingRunInTx>>): ShippingReportScope {
   return { shippingRunId: bundle.run.id, version: bundle.run.version, numberingDate: bundle.run.numberingDate, month: bundle.run.month, sequence: bundle.run.sequence,
@@ -289,34 +303,44 @@ export async function executeReportExport(id: string, dependencies: { createWork
 }
 function reportWithBoxColumns(projection: ShipmentReport, groups: Confirmed[]): ShipmentReport {
   const allocations = new Map<string, Confirmed['codes']>();
+  const localOrders = new Map<string, { demandId: string; order: number }>();
+  for (const bundle of groups) for (const shipment of bundle.confirmation.snapshot?.shipments ?? []) {
+    const ordered = [...shipment.revision.data.boxes].sort((left, right) => (left.order ?? 0) - (right.order ?? 0));
+    for (const [index, box] of ordered.entries()) localOrders.set(JSON.stringify([bundle.group.id, box.id]), { demandId: shipment.demandId, order: index + 1 });
+  }
   for (const bundle of groups) for (const code of bundle.codes ?? []) {
     if (!code.valid) continue;
     const key = JSON.stringify([bundle.group.id, code.boxId]);
     allocations.set(key, [...(allocations.get(key) ?? []), code]);
   }
-  const column = <T extends { boxId: string; code: string; displayBoxOrder?: number }>(groupId: string, box: T, demandId?: string) => {
-    const matches = allocations.get(JSON.stringify([groupId, box.boxId])) ?? [];
+  const column = <T extends { boxId: string; code: string; boxOrder: number; displayBoxOrder?: number }>(groupId: string, box: T, demandId?: string) => {
+    const key = JSON.stringify([groupId, box.boxId]), matches = allocations.get(key) ?? [], local = localOrders.get(key);
     const code = matches[0];
     if (matches.length !== 1 || !code || code.groupId !== groupId || code.code !== box.code || (demandId !== undefined && code.demandId !== demandId)
-      || !Number.isSafeInteger(code.sequence) || code.sequence < 1 || (box.displayBoxOrder !== undefined && box.displayBoxOrder !== code.sequence)) {
+      || !Number.isSafeInteger(code.sequence) || code.sequence < 1 || !local || local.demandId !== code.demandId || local.order !== box.boxOrder
+      || (box.displayBoxOrder !== undefined && box.displayBoxOrder !== box.boxOrder && box.displayBoxOrder !== code.sequence)) {
       throw new BatchError('REPORT_BOX_COLUMNS_STALE', 409, '发货表箱列与当前有效箱码不一致，请重新预览并生成文件。');
     }
-    return { ...box, displayBoxOrder: code.sequence };
+    return { ...box, displayBoxOrder: box.boxOrder };
   };
   // Older queued exports keep their accepted member and product snapshots.
-  // Enrich display coordinates and apply the current output order only.
+  // Accept legacy allocation coordinates, then render current per-FBA columns.
   const rows = projection.rows.map((row) => ({ ...row, boxes: (row.boxes ?? []).map((box) => column(row.groupId, box, row.demandId)) }));
   const boxes = projection.boxes.map((box) => ({ ...box, displayBoxOrder: column(box.groupId, box, box.demandId).displayBoxOrder }));
   const maxBoxes = rows.reduce((maximum, row) => row.boxes.reduce((max, box) => Math.max(max, box.displayBoxOrder), maximum),
-    boxes.reduce((maximum, box) => Math.max(maximum, box.displayBoxOrder), projection.maxBoxes ?? 0));
-  return { ...projection, rows: sortReportRows(rows), boxes: sortReportBoxes(boxes), maxBoxes };
+    boxes.reduce((maximum, box) => Math.max(maximum, box.displayBoxOrder), 0));
+  return { ...projection, rows: sortReportRows(summarizeReportTicketCodes(rows, boxes)), boxes: sortReportBoxes(boxes), maxBoxes };
+}
+function allocationFingerprint(groups: Confirmed[]): string {
+  return JSON.stringify(groups.flatMap((bundle) => (bundle.codes ?? []).filter((code) => code.valid)
+    .map((code) => JSON.stringify([bundle.group.id, code.groupId, code.demandId, code.boxId, code.code, code.prefix, code.sequence]))).sort());
 }
 async function executeLockedReportExport(id: string, dependencies: { createWorkbook?: typeof createReportWorkbook }) {
   const [record] = await db.select().from(batchExports).where(eq(batchExports.id, id));
   if (!record || record.status === 'completed' || record.status === 'stale') return;
   await db.update(batchExports).set({ status: 'running', error: null }).where(eq(batchExports.id, id));
   try {
-    const renderProjection = await db.transaction(async (tx) => {
+    const rendering = await db.transaction(async (tx) => {
       if (record.projection.shippingRunId) {
         const run = await getReadyShippingRunInTx(tx, record.projection.shippingRunId, record.projection.shippingRunVersion, record.createdBy);
         if (!sameIds(run.groupIds, record.groupIds)) throw new BatchError('SHIPPING_RUN_SCOPE_MISMATCH', 409, '导出期间发货次来源范围已变化。');
@@ -327,8 +351,9 @@ async function executeLockedReportExport(id: string, dependencies: { createWorkb
       for (const groupId of [...record.groupIds].sort()) current.push(await getConfirmedGroupInTx(tx, groupId, record.createdBy));
       const references = current.map((b) => ({ groupId: b.group.id, groupVersion: b.group.version, confirmationId: b.confirmation.id }));
       if (!sameReferences(references, record.references)) throw new BatchError('VERSION_CONFLICT', 409, '导出期间确认版本已变化。');
-      return reportWithBoxColumns(record.projection, current);
+      return { projection: reportWithBoxColumns(record.projection, current), allocations: allocationFingerprint(current) };
     });
+    const renderProjection = rendering.projection;
     // Publication freezes these groups in the same transaction as the file
     // index. Render that resulting state without freezing before bytes exist.
     // Keep queued/failed projections and all historical completed files intact.
@@ -355,6 +380,7 @@ async function executeLockedReportExport(id: string, dependencies: { createWorkb
           publicationGroups.push(confirmed);
         }
         reportWithBoxColumns(publishedProjection, publicationGroups);
+        if (allocationFingerprint(publicationGroups) !== rendering.allocations) throw new BatchError('REPORT_BOX_COLUMNS_STALE', 409, '生成文件期间箱码映射已变化，请重新预览并生成文件。');
         if(record.projection.shippingRunId)await tx.update(shippingRuns).set({membershipFrozenAt:sql`COALESCE(${shippingRuns.membershipFrozenAt},now())`}).where(eq(shippingRuns.id,record.projection.shippingRunId));
         await tx.insert(fileIndex).values(file);
         await tx.update(batchExports).set({ status: 'completed', projection: publishedProjection, fileId: file.id, error: null, completedAt: new Date() }).where(eq(batchExports.id, id));

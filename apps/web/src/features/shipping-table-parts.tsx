@@ -1,3 +1,5 @@
+import { formatReportCodeRanges, reportTicketKey, type ShipmentReport } from '@scm/contracts';
+
 type ShippingShopCellProps = {
   shop: string;
   sid?: number;
@@ -30,15 +32,33 @@ type ShippingBoxQuantityCellsProps = {
 
 export function ShippingBoxQuantityCells({ columns, boxes }: ShippingBoxQuantityCellsProps) {
   return <>{columns.map((order) => {
-    const box = boxes.find((entry) => (entry.displayBoxOrder ?? entry.boxOrder) === order);
+    const box = boxes.find((entry) => entry.boxOrder === order);
     return <td key={order} className="demand-number" title={box?.orderConfirmed === false ? '展示列序号，箱序待确认' : undefined}>{box ? box.quantity ?? '待核对' : '—'}{box?.orderConfirmed === false && <small className="mapping-subtext">{box.sourceLabel ? `${box.sourceLabel} · 箱序待确认` : '箱序待确认'}</small>}</td>;
   })}</>;
 }
 
-export function ShippingCodesCell({ codes }: { codes: string[] }) {
-  return <td>{codes.join('、') || '待编码'}</td>;
+export function ShippingCodesCell({ codes, range }: { codes?: string[]; range?: string }) {
+  return <td>{range !== undefined ? range : codes?.join('、') || '待编码'}</td>;
 }
 
-export function getShippingBoxColumns(maxBoxes: number | undefined) {
-  return Array.from({ length: Math.max(10, maxBoxes ?? 0) }, (_, index) => index + 1);
+export function getShippingBoxColumns(maxBoxes: number | undefined, boxes?: ReadonlyArray<{ boxOrder: number }>) {
+  const maximum = boxes === undefined ? maxBoxes ?? 0 : boxes.reduce((maximum, box) => Math.max(maximum, box.boxOrder), 0);
+  return Array.from({ length: Math.max(5, maximum) }, (_, index) => index + 1);
+}
+
+export function getReportTicketCodeRanges(report: Pick<ShipmentReport, 'rows' | 'boxes'> | undefined): Map<string, string> {
+  const codes = new Map<string, string[]>();
+  for (const row of report?.rows ?? []) {
+    const key = reportTicketKey(row);
+    const ticketCodes = codes.get(key) ?? [];
+    ticketCodes.push(...row.codes); codes.set(key, ticketCodes);
+  }
+  for (const box of report?.boxes ?? []) {
+    const key = reportTicketKey(box);
+    const ticketCodes = codes.get(key) ?? [];
+    ticketCodes.push(box.code); codes.set(key, ticketCodes);
+  }
+  const ranges = new Map([...codes].map(([key, values]) => [key, formatReportCodeRanges(values)]));
+  for (const row of report?.rows ?? []) if (row.ticketCodeRange !== undefined) ranges.set(reportTicketKey(row), row.ticketCodeRange);
+  return ranges;
 }

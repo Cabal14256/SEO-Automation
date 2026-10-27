@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Navigate, useBlocker, useSearch } from '@tanstack/react-router';
 import { CircleAlert, CircleCheck, Download, Eye, FileCheck, History, Plus, RefreshCw, Save, Search, Upload } from 'lucide-react';
-import { archiveDataSchema, customsDataSchema, documentCountryCode, financeDataSchema, fulfillmentDataSchema, logisticsDataSchema, workflowBoxes, type ArchiveData, type CustomsData, type FinanceData, type FulfillmentData, type LogisticsData, type WorkflowContext, type WorkflowDetail, type WorkflowKind, type WorkflowRecord, type WorkflowSource, type WorkflowWrite } from '@scm/contracts';
+import { archiveDataSchema, customsDataSchema, documentCountryCode, financeDataSchema, fulfillmentDataSchema, isWorkflowUnderMaintenance, logisticsDataSchema, workflowBoxes, workflowMaintenanceMessage, type ArchiveData, type CustomsData, type FinanceData, type FulfillmentData, type LogisticsData, type WorkflowContext, type WorkflowDetail, type WorkflowKind, type WorkflowRecord, type WorkflowSource, type WorkflowWrite } from '@scm/contracts';
 import { api, ApiError } from '../api';
 import { AppShell, StatePage } from '../pages';
 import { Button, IconButton } from '../components/ui/button';
@@ -70,6 +70,15 @@ export function FinanceRoute() {
 }
 
 export function WorkflowWorkspace({ kind, active = true }: { kind: WorkflowKind; active?: boolean }) {
+  if (isWorkflowUnderMaintenance(kind)) return <section className="content-panel workflow-workspace" aria-label={`${labels[kind].title}${workflowMaintenanceMessage}`}>
+    <div className="section-heading panel-heading"><h2>{labels[kind].title}{workflowMaintenanceMessage}</h2></div>
+    <p className="workflow-boundary" role="status">该功能尚未完成，暂时关闭。</p>
+    <Link className="secondary-button" to="/shipping" search={{ view: 'demands' }}>返回发货工作台</Link>
+  </section>;
+  return <ActiveWorkflowWorkspace kind={kind} active={active} />;
+}
+
+function ActiveWorkflowWorkspace({ kind, active }: { kind: WorkflowKind; active: boolean }) {
   const search = useSearch({ strict: false });
   const [query, setQuery] = useState(''), [status, setStatus] = useState(''), [filters, setFilters] = useState({ q: '', status: '', page: 1 });
   const [selected, setSelected] = useState<string | null>(typeof search.recordId === 'string' ? search.recordId : null), [creating, setCreating] = useState(false);

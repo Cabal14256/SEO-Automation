@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 import { scrollDocumentFieldIntoView } from './document-details-navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useBlocker, useSearch } from '@tanstack/react-router';
@@ -608,10 +610,9 @@ function useProductIdentities(data: DocumentRevisionData) {
       identities.set(key, { sid: identity[0], msku: item.msku, fnsku: item.fnsku, sku: item.sku, fbas: [...new Set([...(current?.fbas ?? []), member.demand.snapshot.fba])] });
     }
     void Promise.all([...identities.entries()].map(async ([key, identity]) => {
-      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
-      const hash = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+      const hash = bytesToHex(sha256(new TextEncoder().encode(key)));
       return { ...identity, prefix: `product.${hash}.` };
-    })).then((result) => { if (!cancelled) { setProducts(result); setKeyError(''); setProductsLoading(false); } }).catch(() => { if (!cancelled) { setKeyError('当前浏览器环境无法建立商品调整标识，请通过 HTTPS 或本机地址打开系统后重试。公共申报资料仍可维护。'); setProductsLoading(false); } });
+    })).then((result) => { if (!cancelled) { setProducts(result); setKeyError(''); setProductsLoading(false); } }).catch(() => { if (!cancelled) { setKeyError('商品调整标识生成失败，请刷新页面后重试。'); setProductsLoading(false); } });
     return () => { cancelled = true; };
   }, [data]);
   return { products, keyError, productsLoading };

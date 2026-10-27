@@ -10,6 +10,7 @@ import { documents, documentExports, documentReviews } from '../documents/schema
 import { checkedFileBytes, ImportError } from '../imports/service.js';
 import { workflowAttachments, workflowClaims, workflowExports, workflowRecords, workflowRevisions } from './schema.js';
 import type { WorkflowPolicy } from './policy.js';
+import { requireWorkflowAvailable } from './maintenance.js';
 
 export const workflowDigest = documentDigest;
 export const serializeWorkflow = (row: typeof workflowRecords.$inferSelect): WorkflowRecord => ({ ...row, kind: row.kind as WorkflowKind, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
@@ -60,6 +61,7 @@ export async function lockedWorkflow(tx: BatchTx, id: string, actorId: string, e
   await requireBatchActor(tx, actorId);
   const [row] = await tx.select().from(workflowRecords).where(eq(workflowRecords.id, id)).for('update');
   if (!row) throw new BatchError('NOT_FOUND', 404, '业务记录不存在。');
+  requireWorkflowAvailable(row.kind);
   if (expectedVersion !== undefined && expectedVersion !== row.version) throw new BatchError('VERSION_CONFLICT', 409, '记录已变化，请保留输入并重新读取。', { currentVersion: row.version });
   return serializeWorkflow(row);
 }

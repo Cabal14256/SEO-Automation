@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ReportReference } from '@scm/contracts';
+import { reportTicketKey, type ReportReference } from '@scm/contracts';
 import { Download, FileSpreadsheet, Filter, History, LoaderCircle, RefreshCw, RotateCcw } from 'lucide-react';
 import { ApiError } from '../api';
 import { Button, IconButton } from '../components/ui/button';
@@ -11,7 +11,7 @@ import { SelectField } from '../components/ui/select';
 import { batchApi } from './batch-api';
 import { BatchPagination, BatchTable, downloadBlob, QueryError, TableSelectionCheckbox, timestamp, useBatchAction } from './batch-shared';
 import { ImportDialog } from './import-dialog';
-import { getShippingBoxColumns, ShippingBoxQuantityCells, ShippingCodesCell, ShippingProductCells, ShippingShopCell } from './shipping-table-parts';
+import { getReportTicketCodeRanges, getShippingBoxColumns, ShippingBoxQuantityCells, ShippingCodesCell, ShippingProductCells, ShippingShopCell } from './shipping-table-parts';
 import './batch-reports.css';
 
 const statusLabels: Record<string, string> = { draft: '待确认', confirmed: '已确认', frozen: '已冻结', superseded: '已替代', queued: '排队中', running: '生成中', completed: '已生成', failed: '失败', stale: '版本已过期' };
@@ -44,7 +44,8 @@ export function BatchReports({ weeklyBatchId, subBatchId, active = true, workspa
   const visibleReferences = visibleGroupIds.flatMap((groupId) => { const ref = availableReferences.get(groupId); return ref ? [ref] : []; });
   const isSelected = (groupId: string) => selection.scope === scope && selection.references.has(groupId);
   const selectedVisibleCount = visibleReferences.filter((ref) => isSelected(ref.groupId)).length;
-  const boxColumns = getShippingBoxColumns(report.data?.maxBoxes);
+  const boxColumns = getShippingBoxColumns(report.data?.maxBoxes, report.data?.boxes);
+  const ticketRanges = getReportTicketCodeRanges(report.data);
   const filtersChanged = workspaceFilters ? workspaceFiltersPending : draftMonth !== month || draftRegion !== region || draftQuery.trim() !== query;
   const selectionDisabled = action.busy || report.isFetching || report.isPending || report.isError || filtersChanged;
   const canExport = !selectionDisabled && refs.length > 0 && refs.every((ref) => sameReference(ref, availableReferences.get(ref.groupId)));
@@ -121,10 +122,10 @@ export function BatchReports({ weeklyBatchId, subBatchId, active = true, workspa
         {report.data.blocked.length > 0 && <details className="batch-details"><summary>另有 {report.data.blocked.length} 个子批次未满足成品表条件</summary><ul className="import-issues">{report.data.blocked.map((item) => <li key={item.groupId}><strong>{item.name}</strong>：{item.message}（{item.code}）</li>)}</ul></details>}
         {report.data.total === 0 ? <p className="list-state">{query ? '未找到匹配的子批次，请调整搜索词或筛选条件。' : '此范围还没有可展示的已确认商品数据。请先同步或补录、核对数量、确认箱序并分配编码。'}</p> : <>
           <p className="mapping-help">共 {report.data.total} 条商品 · 此筛选范围 {report.data.boxes.length} 箱 · 数据生成于 {timestamp(report.data.generatedAt)}</p>
-          {view === 'products' ? <BatchTable label="商品及逐箱数量" headers={[selectionHeader('批次 / 发货次'), '店铺 / 国家 / 渠道', '目的 FC / FBA', 'MSKU / FNSKU', '品名 / SKU', '详情申报量', ...boxColumns.map((box) => `箱 ${box}`), '内部编码', '子批次商品总量', '本月商品量', '首次业务日期', '实际发货日期 / 状态', '数据来源 / 确认版本']}>
-            {report.data.rows.map((row) => <tr key={row.id} aria-selected={isSelected(row.groupId)}><td>{groupCell(row.groupId, row.groupName, row.ticketNumber || '历史批次／未关联发货次')}</td><ShippingShopCell {...row} /><td>{row.destinationFc || '—'}<small className="mapping-subtext">{row.fba}</small></td><ShippingProductCells {...row} /><td>{row.quantity}</td><ShippingBoxQuantityCells columns={boxColumns} boxes={row.boxes} /><ShippingCodesCell codes={row.codes} /><td>{row.groupQuantity}</td><td>{row.monthQuantity}</td><td>{row.businessDate}</td><td>{row.actualShipDate || '未登记'}<small className="mapping-subtext">{statusLabels[row.status] ?? row.status}</small></td><td>{timestamp(row.sourceObservedAt)}<small className="mapping-subtext">{row.dataRevisionId}</small><small className="mapping-subtext">{row.confirmationId}</small></td></tr>)}
+          {view === 'products' ? <BatchTable label="商品及逐箱数量" headers={[selectionHeader('批次 / 发货次'), '店铺 / 国家 / 渠道', '目的 FC / FBA', 'MSKU / FNSKU', '品名 / SKU', '详情申报量', ...boxColumns.map((box) => `箱 ${box}`), '整票编码范围', '子批次商品总量', '本月商品量', '首次业务日期', '实际发货日期 / 状态', '数据来源 / 确认版本']}>
+            {report.data.rows.map((row, index, rows) => <tr key={row.id} aria-selected={isSelected(row.groupId)}><td>{groupCell(row.groupId, row.groupName, row.ticketNumber || '历史批次／未关联发货次')}</td><ShippingShopCell {...row} /><td>{row.destinationFc || '—'}<small className="mapping-subtext">{row.fba}</small></td><ShippingProductCells {...row} /><td>{row.quantity}</td><ShippingBoxQuantityCells columns={boxColumns} boxes={row.boxes} /><ShippingCodesCell range={index === 0 || reportTicketKey(rows[index - 1]!) !== reportTicketKey(row) ? ticketRanges.get(reportTicketKey(row)) || '待编码' : ''} /><td>{row.groupQuantity}</td><td>{row.monthQuantity}</td><td>{row.businessDate}</td><td>{row.actualShipDate || '未登记'}<small className="mapping-subtext">{statusLabels[row.status] ?? row.status}</small></td><td>{timestamp(row.sourceObservedAt)}<small className="mapping-subtext">{row.dataRevisionId}</small><small className="mapping-subtext">{row.confirmationId}</small></td></tr>)}
           </BatchTable> : <BatchTable label="逐箱长表" headers={[selectionHeader('子批次 / FBA'), '箱序 / 内部编码', '平台箱标识', '商品身份', '箱内数量', '登记重量', '登记尺寸']}>
-            {report.data.boxes.flatMap((box) => box.items.map((item, index) => <tr key={`${box.boxId}-${index}`} aria-selected={isSelected(box.groupId)}><td>{groupCell(box.groupId, box.groupName, `${box.fba} · sid ${box.sid}`)}</td><td>第 {box.displayBoxOrder ?? box.boxOrder} 箱 · {box.code || '待编码'}{box.displayBoxOrder !== undefined && box.displayBoxOrder !== box.boxOrder && <small className="mapping-subtext">货件内箱 {box.boxOrder}</small>}</td><td>{box.boxName || '无箱名'}<small className="mapping-subtext">外部ID {box.boxExternalId || '—'} · localBoxId {box.localBoxId || '—'}</small></td><td>{item.msku}<small className="mapping-subtext">{item.fnsku} / {item.sku}</small></td><td>{item.quantity}</td><td>{box.weight === null ? '缺失' : `${box.weight} ${box.weightUnit || '单位缺失'}`}</td><td>{box.length === null || box.width === null || box.height === null ? '缺失' : `${box.length} × ${box.width} × ${box.height} ${box.lengthUnit || '单位缺失'}`}</td></tr>))}
+            {report.data.boxes.flatMap((box) => box.items.map((item, index) => <tr key={`${box.boxId}-${index}`} aria-selected={isSelected(box.groupId)}><td>{groupCell(box.groupId, box.groupName, `${box.fba} · sid ${box.sid}`)}</td><td>第 {box.boxOrder} 箱 · {box.code || '待编码'}</td><td>{box.boxName || '无箱名'}<small className="mapping-subtext">外部ID {box.boxExternalId || '—'} · localBoxId {box.localBoxId || '—'}</small></td><td>{item.msku}<small className="mapping-subtext">{item.fnsku} / {item.sku}</small></td><td>{item.quantity}</td><td>{box.weight === null ? '缺失' : `${box.weight} ${box.weightUnit || '单位缺失'}`}</td><td>{box.length === null || box.width === null || box.height === null ? '缺失' : `${box.length} × ${box.width} × ${box.height} ${box.lengthUnit || '单位缺失'}`}</td></tr>))}
           </BatchTable>}
           {view === 'products' && <BatchPagination page={page} pageSize={50} total={report.data.total} change={setPage} />}
         </>}

@@ -37,6 +37,20 @@ describe('shipment report search', () => {
     expect(project([group],{month:'2026-09'}).rows).toHaveLength(0);
     expect(project([group]).rows).toHaveLength(2);
   });
+  it('keeps a monthly business ticket and its product subtotal together across internal groups', () => {
+    const one = fixture(), two = fixture(), shippingRunId = randomUUID(), ticketId = randomUUID();
+    two.codes = two.codes.map((code, index) => ({ ...code, prefix: 'B', code: `B${index + 1}` }));
+    one.codes = one.codes.map((code, index) => ({ ...code, prefix: 'A', code: `A${index + 1}` }));
+    for (const [inputOrder, group] of [two, one].entries()) group.shippingDetails = { [group.members[0]!.id]: {
+      runId: shippingRunId, month: '2026-10', sequence: 3, ticketId, ticketNumber: '20261024-3-US-1', sourceTicketIndex: 0, inputOrder,
+    } };
+    const first = project([one, two], { month: '2026-10', pageSize: 1 });
+    expect(first.rows[0]).toMatchObject({ ticketId, demandId: two.members[0]!.id, inputOrder: 0, groupQuantity: 4, monthQuantity: 4, ticketCodeRange: 'A1-A2、B1-B2' });
+    expect(first.boxes.every((box) => box.ticketId === ticketId && box.ticketNumber === '20261024-3-US-1')).toBe(true);
+    const complete = project([one, two], { month: '2026-10', pageSize: 100 });
+    expect(complete.rows.map((row) => row.groupId)).toEqual([two.group.id, two.group.id, one.group.id, one.group.id]);
+    expect(complete.rows.every((row) => row.groupQuantity === 4 && row.monthQuantity === 4)).toBe(true);
+  });
   it.each(['alpha 批次', 'fba-alpha', 'north', 'widget', 'msku-alpha-0', 'fnsku-beta-0', 'sku-gamma-0', 'code-delta-2'])('finds %s case-insensitively and retains the complete matching sub-batch', (q) => {
     const group = fixture();
     const result = project([group], { q: `  ${q.toUpperCase()}  ` });
@@ -95,12 +109,12 @@ describe('shipment product box ordering', () => {
     return group;
   }
 
-  it('orders sparse and mixed-box products by their first positive box without changing accepted data', () => {
+  it('orders sparse and mixed-box products by descending quantity without changing accepted data', () => {
     const distributions: Array<Array<[number, number]>> = [[[6, 2]], [[4, 3]], [[1, 4], [2, 5], [6, 6]], [[5, 7]], [[3, 8]]];
     const group = distributedFixture(distributions), before = structuredClone(group);
     const result = project([group]);
     const data = group.confirmation.snapshot.shipments[0]!.revision.data;
-    expect(result.rows.map((row) => row.sku)).toEqual([2, 4, 1, 3, 0].map((index) => data.items[index]!.sku));
+    expect(result.rows.map((row) => row.sku)).toEqual([2, 4, 3, 1, 0].map((index) => data.items[index]!.sku));
     expect(result).toMatchObject({ total: 5, maxBoxes: 6 });
     for (const [index, item] of data.items.entries()) {
       const row = result.rows.find((entry) => entry.sku === item.sku)!;
@@ -114,17 +128,17 @@ describe('shipment product box ordering', () => {
     expect(group).toEqual(before);
   });
 
-  it('preserves original item order for the same first box even with different later occupied boxes', () => {
+  it('uses product quantity rather than the first occupied box for row order', () => {
     const group = distributedFixture([[[4, 1]], [[1, 1], [6, 2]], [[1, 2], [2, 3]], [[2, 4]]]);
     const result = project([group]);
-    expect(result.rows.map((row) => row.sku)).toEqual([1, 2, 3, 0].map((index) => `SKU-Gamma-${index}`));
+    expect(result.rows.map((row) => row.sku)).toEqual([2, 3, 1, 0].map((index) => `SKU-Gamma-${index}`));
   });
 
   it('ignores zero quantities in the sort key and retains empty or all-zero products at the end', () => {
     const group = distributedFixture([[[1, 0], [5, 3]], [[3, 2]], [[1, 0]], []]);
     const result = project([group]);
-    expect(result.rows.map((row) => row.sku)).toEqual([1, 0, 2, 3].map((index) => `SKU-Gamma-${index}`));
-    expect(result.rows[1]!.boxes.map((box) => [box.boxOrder, box.quantity])).toEqual([[1, 0], [5, 3]]);
+    expect(result.rows.map((row) => row.sku)).toEqual([0, 1, 2, 3].map((index) => `SKU-Gamma-${index}`));
+    expect(result.rows[0]!.boxes.map((box) => [box.boxOrder, box.quantity])).toEqual([[1, 0], [5, 3]]);
     expect(result.rows[2]).toMatchObject({ quantity: 0, boxes: [expect.objectContaining({ boxOrder: 1, quantity: 0 })] });
     expect(result.rows[3]).toMatchObject({ quantity: 0, boxes: [], codes: [] });
   });
@@ -132,8 +146,8 @@ describe('shipment product box ordering', () => {
   it('sorts before pagination and keeps real box columns beyond ten', () => {
     const group = distributedFixture([[[12, 1]], [[2, 2]], [[11, 3]], [[1, 4]]]);
     const first = project([group], { pageSize: 2 }), second = project([group], { pageSize: 2, page: 2 });
-    expect(first.rows.map((row) => row.sku)).toEqual(['SKU-Gamma-3', 'SKU-Gamma-1']);
-    expect(second.rows.map((row) => row.sku)).toEqual(['SKU-Gamma-2', 'SKU-Gamma-0']);
+    expect(first.rows.map((row) => row.sku)).toEqual(['SKU-Gamma-3', 'SKU-Gamma-2']);
+    expect(second.rows.map((row) => row.sku)).toEqual(['SKU-Gamma-1', 'SKU-Gamma-0']);
     expect(first.maxBoxes).toBe(12); expect(second.maxBoxes).toBe(12);
     expect(second.rows[1]!.boxes).toEqual([expect.objectContaining({ boxOrder: 12, quantity: 1 })]);
     expect(second.boxes).toEqual(first.boxes); expect(second.confirmations).toEqual(first.confirmations);
@@ -150,15 +164,15 @@ describe('shipment product box ordering', () => {
     group.codes.push(...addition.codes.map((code) => ({ ...code, groupId: group.group.id })));
     const before = structuredClone(group), result = project([group]);
     expect(result.rows.map((row) => [row.fba, row.sku, row.boxes[0]!.boxOrder])).toEqual([
-      ['FBA-Alpha-111', 'SKU-Gamma-1', 1], ['FBA-Alpha-111', 'SKU-Gamma-2', 2], ['FBA-Alpha-111', 'SKU-Gamma-0', 3],
-      ['FBASECOND', 'SKU-Gamma-0', 1], ['FBASECOND', 'SKU-Gamma-1', 2],
+      ['FBASECOND', 'SKU-Gamma-1', 2], ['FBASECOND', 'SKU-Gamma-0', 1],
+      ['FBA-Alpha-111', 'SKU-Gamma-1', 1], ['FBA-Alpha-111', 'SKU-Gamma-0', 3], ['FBA-Alpha-111', 'SKU-Gamma-2', 2],
     ]);
-    expect(result.rows.filter((row) => row.sku === 'SKU-Gamma-0').map((row) => row.quantity)).toEqual([1, 4]);
+    expect(result.rows.filter((row) => row.sku === 'SKU-Gamma-0').map((row) => row.quantity)).toEqual([4, 1]);
     expect(result.rows.filter((row) => row.sku === 'SKU-Gamma-0').map((row) => row.groupQuantity)).toEqual([5, 5]);
     expect(group).toEqual(before);
   });
 
-  it('retains ticket member input order across internal groups while sorting each FBA before scope pagination', () => {
+  it('retains ticket member input order across internal groups with one ticket-wide product order before pagination', () => {
     const one = distributedFixture([[[3, 1]], [[1, 2]], [[2, 3]]]), two = distributedFixture([[[2, 4]], [[1, 5]]]);
     const ticketId = randomUUID(), source = [one, two], before = structuredClone(source);
     const scope: ShippingReportScope = { shippingRunId: randomUUID(), version: 3, numberingDate: '2026-10-23', month: '2026-10', sequence: 2,
@@ -170,7 +184,7 @@ describe('shipment product box ordering', () => {
     ]);
     expect(result.total).toBe(5); expect(result.confirmations).toHaveLength(2);
     const complete = projectConfirmedGroups(source, { pageSize: 100 }, scope);
-    expect(complete.rows.map((row) => row.sku)).toEqual(['SKU-Gamma-1', 'SKU-Gamma-0', 'SKU-Gamma-1', 'SKU-Gamma-2', 'SKU-Gamma-0']);
+    expect(complete.rows.map((row) => row.sku)).toEqual(['SKU-Gamma-1', 'SKU-Gamma-0', 'SKU-Gamma-1', 'SKU-Gamma-0', 'SKU-Gamma-2']);
     expect(complete.rows.filter((row) => row.sku === 'SKU-Gamma-0').map((row) => row.groupQuantity)).toEqual([5, 5]);
     assertShippingRunProjection(scope, complete);
     expect(source).toEqual(before);
@@ -184,27 +198,56 @@ describe('allocation-backed report box columns', () => {
     group.codes = group.codes.map((code, index) => ({ ...code, prefix, sequence: sequences[index]!, code: `${prefix}${sequences[index]}` }));
     return group;
   }
-  function appendMember(target: Confirmed, sequences: number[], fba: string) {
-    const source = codedFixture(sequences), member = source.confirmation.snapshot.members[0]!;
+  function appendMember(target: Confirmed, sequences: number[], fba: string, products = 2) {
+    const source = codedFixture(sequences, target.group.prefix ?? 'G', products), member = source.confirmation.snapshot.members[0]!;
     member.snapshot.fba = fba; source.confirmation.snapshot.shipments[0]!.revision.data.fba = fba;
     target.confirmation.snapshot.members.push(member); target.confirmation.snapshot.shipments.push(...source.confirmation.snapshot.shipments);
     target.group.demandIds.push(member.id); target.codes.push(...source.codes.map((code) => ({ ...code, groupId: target.group.id })));
     return member;
   }
 
-  it('uses each FBA allocation sequence as the display column while keeping its local box order and quantities', () => {
+  it('projects five fictional shipments as local box columns and one complete ten-box ticket', () => {
+    const group = codedFixture([1, 2], 'A', 6), initial = group.members[0]!;
+    initial.snapshot.fba = 'FBAREF-DELTA'; group.shipments[0]!.revision.data.fba = initial.snapshot.fba;
+    const members = [initial, appendMember(group, [3], 'FBAREF-ALPHA', 6), appendMember(group, [4, 5], 'FBAREF-BRAVO', 6),
+      appendMember(group, [6, 7, 8], 'FBAREF-ECHO', 6), appendMember(group, [9, 10], 'FBAREF-CHARLIE', 6)];
+    for (const [index, member] of members.entries()) member.snapshot.destinationFc = `DEMO-${index + 1}`;
+    const perBox = [['Demo-Paper', 9], ['Demo-Cable', 17], ['Demo-Adapter', 17], ['Demo-Stand', 29], ['Demo-Case', 83], ['Demo-Cap', 11]] as const;
+    for (const shipment of group.shipments) {
+      const data = shipment.revision.data;
+      data.items = perBox.map(([name, quantity]) => ({ msku: name, fnsku: `FN-${name}`, sku: name, name, quantity: String(quantity * data.boxes.length) }));
+      for (const box of data.boxes) box.items = perBox.map(([name, quantity]) => ({ msku: name, fnsku: `FN-${name}`, sku: name, quantity: String(quantity) }));
+    }
+    const inputOrder = new Map(['FBAREF-CHARLIE', 'FBAREF-ECHO', 'FBAREF-BRAVO', 'FBAREF-DELTA', 'FBAREF-ALPHA'].map((fba, index) => [fba, index]));
+    const ticketId = randomUUID(), scope: ShippingReportScope = { shippingRunId: randomUUID(), version: 1, numberingDate: '2026-10-27', month: '2026-10', sequence: 1,
+      members: members.map((member) => ({ demandId: member.id, groupId: group.group.id, ticketId, ticketNumber: '20261027-1-US-4', sourceTicketIndex: 3, inputOrder: inputOrder.get(member.snapshot.fba)! })) };
+    const before = structuredClone(group), page = projectConfirmedGroups([group], { pageSize: 7 }, scope), complete = projectConfirmedGroups([group], { pageSize: 100 }, scope);
+    expect(page).toMatchObject({ total: 30, maxBoxes: 3 });
+    expect(page.rows.every((row) => row.ticketCodeRange === 'A1-A10')).toBe(true);
+    expect(complete.rows.filter((_, index) => index % 6 === 0).map((row) => row.fba)).toEqual(['FBAREF-ALPHA', 'FBAREF-CHARLIE', 'FBAREF-BRAVO', 'FBAREF-DELTA', 'FBAREF-ECHO']);
+    expect(complete.rows.slice(0, 6).map((row) => row.sku)).toEqual(['Demo-Case', 'Demo-Stand', 'Demo-Adapter', 'Demo-Cable', 'Demo-Cap', 'Demo-Paper']);
+    expect(complete.rows.slice(0, 6).map((row) => row.groupQuantity)).toEqual([830, 290, 170, 170, 110, 90]);
+    expect(complete.rows.filter((row) => row.sku === 'Demo-Case').map((row) => row.boxes.map((box) => [box.displayBoxOrder, box.quantity]))).toEqual([
+      [[1, 83]], [[1, 83], [2, 83]], [[1, 83], [2, 83]], [[1, 83], [2, 83]], [[1, 83], [2, 83], [3, 83]],
+    ]);
+    expect(new Set(complete.boxes.map((box) => box.boxId)).size).toBe(10);
+    expect(complete.rows.reduce((sum, row) => sum + row.quantity, 0)).toBe(1660);
+    assertShippingRunProjection(scope, complete); expect(group).toEqual(before);
+  });
+
+  it('restarts display columns for each FBA while keeping all actual allocated codes and quantities', () => {
     const group = codedFixture([1, 2]);
     const members = [group.members[0]!, appendMember(group, [7, 8], 'FBAG007'), appendMember(group, [9, 10], 'FBAG009'), appendMember(group, [11, 12], 'FBAG011')];
     const before = structuredClone(group), report = project([group]);
-    expect(report).toMatchObject({ total: 8, maxBoxes: 12 }); expect(report.boxes).toHaveLength(8);
+    expect(report).toMatchObject({ total: 8, maxBoxes: 2 }); expect(report.boxes).toHaveLength(8);
     for (const [index, member] of members.entries()) {
       const sequences = [[1, 2], [7, 8], [9, 10], [11, 12]][index]!;
       const rows = report.rows.filter((row) => row.demandId === member.id), boxes = report.boxes.filter((box) => box.demandId === member.id);
       expect(rows).toHaveLength(2);
-      expect(boxes.map((box) => [box.boxOrder, box.displayBoxOrder, box.code])).toEqual(sequences.map((sequence, order) => [order + 1, sequence, `G${sequence}`]));
+      expect(boxes.map((box) => [box.boxOrder, box.displayBoxOrder, box.code])).toEqual(sequences.map((sequence, order) => [order + 1, order + 1, `G${sequence}`]));
       for (const row of rows) {
         expect(row.quantity).toBe(2);
-        expect(row.boxes.map((box) => [box.boxOrder, box.displayBoxOrder, box.quantity])).toEqual(sequences.map((sequence, order) => [order + 1, sequence, 1]));
+        expect(row.boxes.map((box) => [box.boxOrder, box.displayBoxOrder, box.quantity])).toEqual(sequences.map((_, order) => [order + 1, order + 1, 1]));
         expect(row.boxes.map((box) => box.boxId)).toEqual(boxes.map((box) => box.boxId));
       }
     }
@@ -221,20 +264,21 @@ describe('allocation-backed report box columns', () => {
       { ...current, id: randomUUID(), groupId: randomUUID(), sequence: 91, code: 'G91' },
     );
     const report = project([group]);
-    expect(report.maxBoxes).toBe(8);
-    expect(report.boxes.find((box) => box.code === 'original-box-code')).toMatchObject({ boxOrder: 1, displayBoxOrder: 7, code: 'original-box-code' });
-    expect(report.rows[0]!.boxes[0]).toMatchObject({ boxOrder: 1, displayBoxOrder: 7, code: 'original-box-code', quantity: 1 });
+    expect(report.maxBoxes).toBe(2);
+    expect(report.boxes.find((box) => box.code === 'original-box-code')).toMatchObject({ boxOrder: 1, displayBoxOrder: 1, code: 'original-box-code' });
+    expect(report.rows[0]!.boxes[0]).toMatchObject({ boxOrder: 1, displayBoxOrder: 1, code: 'original-box-code', quantity: 1 });
     expect(report.rows[0]!.codes).toEqual(['G8', 'original-box-code']);
   });
 
-  it('preserves allocation gaps and appended numbers instead of compacting them into local box columns', () => {
+  it('preserves allocation gaps in the summary while compacting only display columns into local box order', () => {
     const group = codedFixture([1, 6, 12]);
     group.codes.unshift({ ...group.codes[0]!, id: randomUUID(), boxId: randomUUID(), sequence: 4, code: 'G4', valid: false });
     const report = project([group]);
-    expect(report.maxBoxes).toBe(12);
-    expect(report.boxes.map((box) => [box.boxOrder, box.displayBoxOrder])).toEqual([[1, 1], [2, 6], [3, 12]]);
-    expect(report.rows[0]!.boxes.map((box) => box.displayBoxOrder)).toEqual([1, 6, 12]);
+    expect(report.maxBoxes).toBe(3);
+    expect(report.boxes.map((box) => [box.boxOrder, box.displayBoxOrder])).toEqual([[1, 1], [2, 2], [3, 3]]);
+    expect(report.rows[0]!.boxes.map((box) => box.displayBoxOrder)).toEqual([1, 2, 3]);
     expect(report.rows[0]!.codes).toEqual(['G1', 'G6', 'G12']);
+    expect(report.rows[0]!.ticketCodeRange).toBe('G1、G6、G12');
   });
 
   it('keeps the real display columns for selected ticket members while excluding other FBA boxes and maxima', () => {
@@ -243,11 +287,11 @@ describe('allocation-backed report box columns', () => {
     const scope: ShippingReportScope = { shippingRunId: randomUUID(), version: 3, numberingDate: '2026-10-23', month: '2026-10', sequence: 2,
       members: [{ demandId: selected.id, groupId: group.group.id, ticketId: randomUUID(), ticketNumber: '20261023-2-US-1', sourceTicketIndex: 1, inputOrder: 1 }] };
     const report = projectConfirmedGroups([group], {}, scope);
-    expect(report).toMatchObject({ total: 2, maxBoxes: 8 });
+    expect(report).toMatchObject({ total: 2, maxBoxes: 2 });
     expect(report.boxes.map((box) => [box.fba, box.boxOrder, box.displayBoxOrder, box.code])).toEqual([
-      ['FBASELECTED', 1, 7, 'G7'], ['FBASELECTED', 2, 8, 'G8'],
+      ['FBASELECTED', 1, 1, 'G7'], ['FBASELECTED', 2, 2, 'G8'],
     ]);
-    expect(report.rows.every((row) => row.fba === 'FBASELECTED' && row.groupQuantity === 2 && row.boxes.map((box) => box.displayBoxOrder).join() === '7,8')).toBe(true);
+    expect(report.rows.every((row) => row.fba === 'FBASELECTED' && row.groupQuantity === 2 && row.boxes.map((box) => box.displayBoxOrder).join() === '1,2' && row.ticketCodeRange === 'G7-G8')).toBe(true);
     assertShippingRunProjection(scope, report);
   });
 
@@ -258,13 +302,13 @@ describe('allocation-backed report box columns', () => {
       members: [one, two].map((group, index) => ({ demandId: group.members[0]!.id, groupId: group.group.id, ticketId,
         ticketNumber: '20261023-2-US-1', sourceTicketIndex: 1, inputOrder: index === 0 ? 2 : 1 })) };
     for (const report of [project([one, two]), projectConfirmedGroups([one, two], {}, scope)]) {
-      expect(report.maxBoxes).toBe(8); expect(report.boxes).toHaveLength(4);
+      expect(report.maxBoxes).toBe(2); expect(report.boxes).toHaveLength(4);
       expect(report.rows).toHaveLength(4);
       expect(new Set(report.boxes.map((box) => box.boxId)).size).toBe(4);
-      expect(report.boxes.filter((box) => box.displayBoxOrder === 7).map((box) => box.code).sort()).toEqual(['G7', 'H7']);
+      expect(report.boxes.filter((box) => box.displayBoxOrder === 1).map((box) => box.code).sort()).toEqual(['G7', 'H7']);
     }
     const report = projectConfirmedGroups([one, two], {}, scope);
-    expect(report.rows.map((row) => row.groupId)).toEqual([one.group.id, one.group.id, two.group.id, two.group.id]);
+    expect(report.rows.map((row) => row.groupId)).toEqual([two.group.id, two.group.id, one.group.id, one.group.id]);
   });
 
   it('sorts complete FBA blocks by allocated code before pagination, including multi-letter prefixes and ticket input in reverse order', () => {
@@ -276,15 +320,15 @@ describe('allocation-backed report box columns', () => {
     const before = structuredClone(groups);
     for (const reportScope of [undefined, scope]) {
       const pages = Array.from({ length: 6 }, (_, index) => projectConfirmedGroups(groups, { page: index + 1, pageSize: 2 }, reportScope));
-      expect(pages.flatMap((page) => page.rows.map((row) => row.groupId))).toEqual(expected.flatMap((group) => [group.group.id, group.group.id]));
+      expect(pages.flatMap((page) => page.rows.map((row) => row.groupId))).toEqual((reportScope ? groups : expected).flatMap((group) => [group.group.id, group.group.id]));
       expect(pages[0]!.boxes.map((box) => box.code)).toEqual(['A2', 'A10', 'B1', 'Z1', 'AA1', 'AB1']);
-      expect(pages.every((page) => page.total === 12 && page.maxBoxes === 10 && page.confirmations.length === 6)).toBe(true);
+      expect(pages.every((page) => page.total === 12 && page.maxBoxes === 1 && page.confirmations.length === 6)).toBe(true);
       expect(pages[5]!.boxes).toEqual(pages[0]!.boxes);
       const complete = projectConfirmedGroups(groups, { pageSize: 100 }, reportScope);
       if (reportScope) assertShippingRunProjection(reportScope, complete);
       for (const row of complete.rows) {
         expect(row.quantity).toBe(1);
-        expect(row.boxes).toEqual([expect.objectContaining({ boxOrder: 1, displayBoxOrder: Number(row.codes[0]!.match(/\d+$/)![0]), quantity: 1 })]);
+        expect(row.boxes).toEqual([expect.objectContaining({ boxOrder: 1, displayBoxOrder: 1, quantity: 1 })]);
       }
     }
     expect(groups).toEqual(before);
@@ -293,8 +337,8 @@ describe('allocation-backed report box columns', () => {
   it('sorts code lists and box detail naturally without changing local box coordinates or quantities', () => {
     const group = codedFixture([10, 2, 1]), before = structuredClone(group), report = project([group]);
     expect(report.rows[0]!.codes).toEqual(['G1', 'G2', 'G10']);
-    expect(report.boxes.map((box) => [box.code, box.boxOrder, box.displayBoxOrder])).toEqual([['G1', 3, 1], ['G2', 2, 2], ['G10', 1, 10]]);
-    expect(report.rows[0]!.boxes.map((box) => [box.code, box.boxOrder, box.displayBoxOrder, box.quantity])).toEqual([['G10', 1, 10, 1], ['G2', 2, 2, 1], ['G1', 3, 1, 1]]);
+    expect(report.boxes.map((box) => [box.code, box.boxOrder, box.displayBoxOrder])).toEqual([['G1', 3, 3], ['G2', 2, 2], ['G10', 1, 1]]);
+    expect(report.rows[0]!.boxes.map((box) => [box.code, box.boxOrder, box.displayBoxOrder, box.quantity])).toEqual([['G10', 1, 1, 1], ['G2', 2, 2, 1], ['G1', 3, 3, 1]]);
     expect(group).toEqual(before);
   });
 
@@ -305,10 +349,10 @@ describe('allocation-backed report box columns', () => {
     const entries: Array<Array<[number, number]>> = [[[0, 1], [3, 4]], [[1, 2], [3, 0], [4, 0]], [[2, 3]]];
     for (const [index, box] of data.boxes.entries()) box.items = entries[index]!.map(([product, quantity]) => ({ ...data.items[product]!, quantity: String(quantity) }));
     const before = structuredClone(group), report = project([group]);
-    expect(report.rows.map((row) => row.sku)).toEqual([1, 2, 0, 3, 4].map((index) => `SKU-Gamma-${index}`));
-    expect(report.rows[0]!.boxes[0]).toMatchObject({ boxOrder: 2, displayBoxOrder: 7, quantity: 2 });
-    expect(report.rows[3]!.boxes.map((box) => [box.boxOrder, box.displayBoxOrder, box.quantity])).toEqual([[1, 10, 4], [2, 7, 0]]);
-    expect(report.rows[4]).toMatchObject({ quantity: 0, boxes: [expect.objectContaining({ boxOrder: 2, displayBoxOrder: 7, quantity: 0 })] });
+    expect(report.rows.map((row) => row.sku)).toEqual([3, 2, 1, 0, 4].map((index) => `SKU-Gamma-${index}`));
+    expect(report.rows[0]!.boxes.map((box) => [box.boxOrder, box.displayBoxOrder, box.quantity])).toEqual([[1, 1, 4], [2, 2, 0]]);
+    expect(report.rows[2]!.boxes[0]).toMatchObject({ boxOrder: 2, displayBoxOrder: 2, quantity: 2 });
+    expect(report.rows[4]).toMatchObject({ quantity: 0, boxes: [expect.objectContaining({ boxOrder: 2, displayBoxOrder: 2, quantity: 0 })] });
     expect(group).toEqual(before);
   });
 
@@ -330,6 +374,40 @@ describe('shipping-run ticket projection', () => {
     shippingRunId: randomUUID(), version: 3, numberingDate: '2026-10-23', month: '2026-10', sequence: 2,
     members: entries.map(({ group, ticketId, sourceTicketIndex, inputOrder }) => ({ demandId: group.members[0]!.id, groupId: group.group.id,
       ticketId, ticketNumber: `20261023-2-US-${sourceTicketIndex + 1}`, sourceTicketIndex, inputOrder })),
+  });
+  it('uses complete-ticket product totals consistently across FBA proportions, pagination and group searches', () => {
+    const first = fixture({ name: 'Target shipment', products: 3, boxCount: 1 }), second = fixture({ name: 'Other shipment', products: 3, boxCount: 1 });
+    for (const [index, group] of [first, second].entries()) {
+      group.members[0]!.snapshot.fba = `FBA-TICKET-PROPORTION-${index}`;
+      const data = group.shipments[0]!.revision.data;
+      data.fba = group.members[0]!.snapshot.fba;
+      const quantities = index === 0 ? [100, 20, 40] : [10, 80, 60];
+      data.items = data.items.map((item, product) => ({ ...item, quantity: String(quantities[product]!) }));
+      data.boxes[0]!.items = data.items.map((item) => ({ ...item }));
+    }
+    const ticketId = randomUUID(), scope = scopeFor([
+      { group: first, ticketId, sourceTicketIndex: 0, inputOrder: 0 },
+      { group: second, ticketId, sourceTicketIndex: 0, inputOrder: 1 },
+    ]);
+    const before = structuredClone([first, second]);
+    const complete = projectConfirmedGroups([second, first], { pageSize: 100 }, scope);
+    const order = ['SKU-Gamma-0', 'SKU-Gamma-1', 'SKU-Gamma-2'];
+    expect(complete.rows.map((row) => row.sku)).toEqual([...order, ...order]);
+    expect(complete.rows.map((row) => row.quantity)).toEqual([100, 20, 40, 10, 80, 60]);
+    expect(complete.rows.map((row) => row.groupQuantity)).toEqual([110, 100, 100, 110, 100, 100]);
+    const pageOne = projectConfirmedGroups([first, second], { pageSize: 4 }, scope);
+    const pageTwo = projectConfirmedGroups([first, second], { pageSize: 4, page: 2 }, scope);
+    expect([...pageOne.rows, ...pageTwo.rows]).toEqual(complete.rows);
+    for (const group of [first, second]) group.shippingDetails = { [group.members[0]!.id]: {
+      runId: scope.shippingRunId, month: scope.month, sequence: scope.sequence, ticketId,
+      ticketNumber: scope.members[0]!.ticketNumber, sourceTicketIndex: 0, inputOrder: group === first ? 0 : 1,
+    } };
+    const searched = projectConfirmedGroups([first, second], { q: 'Target shipment', pageSize: 100 });
+    expect(searched.rows.map((row) => row.sku)).toEqual(order);
+    expect(searched.rows.map((row) => row.groupQuantity)).toEqual([110, 100, 100]);
+    for (const [index, group] of [first, second].entries()) {
+      expect({ ...group, shippingDetails: undefined }).toEqual({ ...before[index], shippingDetails: undefined });
+    }
   });
   it('includes only explicit ticket members even when their old source group has other shipments', () => {
     const selected = fixture(), excluded = fixture({ products: 1, boxCount: 12 });

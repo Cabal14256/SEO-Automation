@@ -55,11 +55,14 @@ async function checkShippingChildren(navigation) {
   await expect(parent).toHaveAttribute('aria-expanded', 'true');
   const children = navigation.getByRole('navigation', { name: '发货管理子导航', exact: true });
   await expect(children).toBeVisible();
-  const shippingNavigation = [['发货工作台', 'demands'], ['发票与单据', 'documents'], ['领星单据与分配', 'fulfillment'], ['物流与交接', 'logistics'], ['报关与 9810', 'customs'], ['批次归档', 'archives']];
+  const shippingNavigation = [['发货工作台', 'demands'], ['发票与单据', 'documents']];
   await expect(children.getByRole('link')).toHaveCount(shippingNavigation.length);
   await expect(children.getByRole('link')).toHaveText(shippingNavigation.map(([label]) => label));
   for (const [label, view] of shippingNavigation) {
     await expect(children.getByRole('link', { name: label, exact: true })).toHaveAttribute('href', `/shipping?view=${view}`);
+  }
+  for (const label of ['领星单据与分配', '物流与交接', '报关与 9810', '批次归档']) {
+    await expect(children.getByRole('button', { name: `${label}（待维护）`, exact: true })).toBeDisabled();
   }
   await expect(children.locator('a[aria-current="page"]')).toHaveCount(0);
   await parent.click();
@@ -120,6 +123,8 @@ try {
     if (path === '/api/v1/auth/sign-out') { signedIn = false; return json({}); }
     if (path === '/api/v1/dashboard') return json({ tasks: { queued: 0, running: 1, completed: 0, failed: 0 }, health: { database: 'ok', worker: 'ok' } });
     if (path === '/api/v1/tasks' && request.method() === 'GET') { taskReads += 1; return json({ items: [task] }); }
+    if (path === '/api/v1/finance' && request.method() === 'GET') return json({ items: [], total: 0, page: 1, pageSize: 20 });
+    if (path === '/api/v1/workflow-sources' && request.method() === 'GET') return json({ items: [] });
     if (path === '/api/v1/seller-mappings/catalog-settings') {
       if (request.method() === 'GET') return json({ settings });
       const input = request.postDataJSON(); modeWrites.push(input); await hold('mode');
@@ -243,6 +248,27 @@ try {
   await page.keyboard.press('Escape');
   note('Reduced motion removes continuous status rotation and tooltip entrance motion');
   await page.emulateMedia({ reducedMotion: 'no-preference' });
+
+  for (const [view, label] of [['fulfillment', '领星单据与分配'], ['logistics', '物流与交接'], ['customs', '报关与 9810'], ['archives', '批次归档']]) {
+    await page.goto(`/shipping?view=${view}&recordId=00000000-0000-4000-8000-000000000001`);
+    await expect(page.getByRole('heading', { name: `${label}（待维护）`, exact: true })).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: '该功能尚未完成，暂时关闭。' })).toBeVisible();
+    await expect(page.locator('main').getByRole('button', { name: /新建|上传|保存|生成/ })).toHaveCount(0);
+    await expect(page.getByRole('link', { name: '返回发货工作台', exact: true })).toHaveAttribute('href', '/shipping?view=demands');
+  }
+  for (const width of [320, 390, 1024, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    if (width < 768) await page.getByRole('button', { name: '打开导航', exact: true }).click();
+    const navigation = width < 768 ? page.locator('#mobile-navigation') : page.locator('.sidebar');
+    await expect(navigation.getByRole('button', { name: '领星单据与分配（待维护）', exact: true })).toBeDisabled();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true, `Maintenance page overflow at ${width}px`);
+    await page.screenshot({ path: resolve(evidence, `maintenance-${width}.png`) });
+    if (width < 768) await page.getByRole('button', { name: '关闭导航', exact: true }).click();
+  }
+  await page.goto('/finance');
+  await expect(page.getByRole('heading', { name: '费用对账', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '新建费用账单', exact: true })).toBeEnabled();
+  note('Closed workflows show maintenance for old links without business requests; desktop/mobile menus are disabled and finance remains available');
 
   await footerSettings.click();
   await expect(page).toHaveURL(`${baseURL}/settings/seller-mappings`);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
@@ -38,8 +38,9 @@ function makeMember(index, count) {
   return { source: { weekStartDate: week, groupId, groupVersion: 1, m2ConfirmationId: m2, demandId, demandVersion: 1, shipmentRevisionId: shipmentId, physicalConfirmationId: null, m3Version: null, sourceFingerprint: null },
     demand, shipment, codes, physical: null, boxSource, sourceCandidates: { addresses: [{ source: 'listShipments', snapshotId: uid(), data: address }], products: [], issues: [] } };
 }
-function fixture() {
+function fixture({ unicodeIdentity = false } = {}) {
   const members = [makeMember(1, 2), makeMember(2, 1)];
+  if (unicodeIdentity) Object.assign(members[0].shipment.data.items[0], { msku: '商品-α😀', fnsku: '条码-中文', sku: '内部SKU-ß' });
   const references = members.map((member) => ({ category: 'product', profileId: uid(), version: 1, data: { sid: 101, ...member.shipment.data.items[0],
     englishName: 'Technical Product', chineseName: '技术商品', material: 'Glass', hsCode: '700719', use: 'Protect screen', brand: 'TECH', model: 'TEST', unit: 'piece', salesLink: 'https://example.invalid/product' } }));
   const profiles = references.map((reference, index) => ({ id: reference.profileId, category: 'product', key: 'DETAIL-PROFILE-' + index, version: 1, status: 'active', data: reference.data, createdBy: 'fixture', createdAt: now }));
@@ -65,8 +66,9 @@ function fixture() {
   return { complete, incomplete, unconfirmed, conflicted, records, profiles, template, attempts: [], accepted: [], modes: [], holdRevision: false, releaseRevision: null, detailFailures: 0,
     validateCalls: 0, exportCalls: 0, sourceSnapshot: JSON.stringify(complete.currentRevision.data.members), originalMembers: structuredClone(members) };
 }
-async function setup(state) {
+async function setup(state, { withoutSubtle = false } = {}) {
   const context = await browser.newContext({ baseURL, locale: 'zh-CN', timezoneId: 'Asia/Shanghai', viewport: { width: 1440, height: 1000 } });
+  if (withoutSubtle) await context.addInitScript(() => { Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: undefined }); });
   await context.route('**/*', async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
     if (url.origin !== baseURL) { externalRequests.push(method + ' ' + url.href); return route.abort('blockedbyclient'); }
@@ -149,6 +151,27 @@ try {
   viteProcess = spawn(process.execPath, [resolve(dirname(requireWeb.resolve('vite/package.json')), 'bin/vite.js'), '--host', '127.0.0.1', '--port', String(port), '--strictPort'], { cwd: resolve(root, 'apps/web'), stdio: 'ignore', windowsHide: true });
   await expect.poll(async () => { try { return (await fetch(baseURL)).status; } catch { return 0; } }, { timeout: 20_000 }).toBe(200);
   browser = await chromium.launch({ headless: true, channel: process.env.IMPORT_BROWSER_CHANNEL || 'chrome' });
+
+  for (const unicodeIdentity of [false, true]) {
+    step = 'http-without-webcrypto-keeps-' + (unicodeIdentity ? 'unicode' : 'ascii') + '-product-fields-and-manual-price-editable';
+    const plainHttp = fixture({ unicodeIdentity });
+    const data = plainHttp.complete.currentRevision.data;
+    data.productSourceFacts[0].salesPrice = null; data.productSourceFacts[0].unitPrice = null;
+    const identity = data.members[0].shipment.data.items[0], sid = data.members[0].demand.snapshot.sid;
+    const prefix = 'product.' + createHash('sha256').update(JSON.stringify([sid, identity.msku, identity.fnsku, identity.sku])).digest('hex') + '.';
+    const plainContext = await setup(plainHttp, { withoutSubtle: true }); await open(plainHttp.complete);
+    assert.equal(await page.evaluate(() => typeof globalThis.crypto.subtle), 'undefined');
+    await completion().getByRole('button', { name: /^商品申报/ }).click();
+    const product = wizard().locator('.document-product-adjustment').filter({ hasText: identity.msku }); await expect(product).toHaveCount(1);
+    if (await product.getAttribute('open') === null) await product.locator(':scope > summary').click();
+    const material = product.getByLabel('材质', { exact: true }); await expect(material).toBeEnabled(); await material.fill('HTTP fixture material');
+    const price = product.getByLabel('人工补充售价（USD）', { exact: true }); await expect(price).toBeEnabled(); await price.fill('19.99');
+    await product.getByLabel('售价补充依据', { exact: true }).fill('HTTP fixture price evidence');
+    await save().click(); await expect(save()).toBeDisabled(); assert.equal(plainHttp.accepted.length, 1);
+    assert.equal(plainHttp.accepted[0].fields[prefix + 'material'], 'HTTP fixture material');
+    assert.deepEqual(plainHttp.accepted[0].manualSalesPrices, [{ sid, msku: identity.msku, fnsku: identity.fnsku, sku: identity.sku, salesPrice: '19.99', reason: 'HTTP fixture price evidence' }]);
+    assert.equal(JSON.stringify(data.members), plainHttp.sourceSnapshot); noGeneration(plainHttp); await plainContext.close(); note();
+  }
 
   step = 'unchanged-next-enters-generation-without-saving-validating-or-exporting';
   const state = fixture(); let context = await setup(state); await open(state.complete);

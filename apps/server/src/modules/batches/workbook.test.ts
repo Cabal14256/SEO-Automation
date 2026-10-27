@@ -48,6 +48,36 @@ describe('shipment XLSX', () => {
     expect(book.getWorksheet('逐箱明细')!.getCell('A2').value).toBe(ticketNumber);
     expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain(`${shippingRunId} / 4`);
   });
+  it('exports one ticket-wide product order even when each FBA has different local quantity rankings', async () => {
+    const projection = report(), base = projection.rows[0]!, boxBase = projection.boxes[0]!;
+    const identity = { shippingRunId: randomUUID(), ticketId: randomUUID(), ticketNumber: '20261027-1-US-1', sourceTicketIndex: 0 };
+    const skus = ['SKU-Z', 'SKU-A', 'SKU-M'], totals = [110, 100, 100];
+    projection.rows = []; projection.boxes = [];
+    for (const [inputOrder, quantities] of [[100, 20, 40], [10, 80, 60]].entries()) {
+      const shipment = { ...identity, demandId: randomUUID(), fba: `FBA-QUANTITY-${inputOrder}`, inputOrder };
+      const box = { ...boxBase, ...shipment, boxId: randomUUID(), boxOrder: 1, displayBoxOrder: inputOrder + 1, code: `A${inputOrder + 1}`,
+        items: skus.map((sku, index) => ({ msku: `M-${sku}`, fnsku: `FN-${sku}`, sku, quantity: quantities[index]! })) };
+      projection.boxes.push(box);
+      for (const product of [...box.items].reverse()) {
+        const total = totals[skus.indexOf(product.sku)]!;
+        projection.rows.push({ ...base, ...shipment, ...product, id: randomUUID(), country: '美国', groupQuantity: total, monthQuantity: total,
+          codes: [box.code], boxes: [{ boxId: box.boxId, boxOrder: 1, displayBoxOrder: box.displayBoxOrder, code: box.code, quantity: product.quantity }] });
+      }
+    }
+    Object.assign(projection, { shippingRunId: identity.shippingRunId, shippingRunVersion: 1, shippingRunDate: '2026-10-27', shippingRunSequence: 1, total: 6, maxBoxes: 1 });
+    const before = structuredClone(projection), book = new ExcelJS.Workbook();
+    await book.xlsx.load(await createReportWorkbook(projection) as unknown as Parameters<typeof book.xlsx.load>[0]);
+    expect(projection).toEqual(before);
+    for (const sheet of [book.worksheets[0]!, book.getWorksheet('美国批次')!]) {
+      const headers = sheet.getRow(1).values as string[];
+      expect(sheet.rowCount).toBe(7);
+      const values = Array.from({ length: 6 }, (_, index) => ['FBA货件号', 'SKU', '发货数量', '箱1', '本票商品合计'].map((header) => sheet.getCell(index + 2, headers.indexOf(header)).value));
+      expect(values).toEqual([
+        ['FBA-QUANTITY-0', 'SKU-Z', 100, 100, 110], ['FBA-QUANTITY-0', 'SKU-A', 20, 20, 100], ['FBA-QUANTITY-0', 'SKU-M', 40, 40, 100],
+        ['FBA-QUANTITY-1', 'SKU-Z', 10, 10, null], ['FBA-QUANTITY-1', 'SKU-A', 80, 80, null], ['FBA-QUANTITY-1', 'SKU-M', 60, 60, null],
+      ]);
+    }
+  });
   it('preserves legacy per-FBA local box columns when display positions are absent, including F13 in box one', async () => {
     const projection = report(), base = projection.rows[0]!, boxBase = projection.boxes[0]!;
     const shippingRunId = randomUUID(), ticketId = randomUUID(), ticketNumber = '20261024-3-UK-1';
@@ -109,36 +139,30 @@ describe('shipment XLSX', () => {
       projection.boxes.push(...boxes);
     }
     Object.assign(projection, { shippingRunId, shippingRunVersion: 5, shippingRunDate: '2026-10-24', shippingRunSequence: 3, total: 25, maxBoxes: 12 });
-    const before = structuredClone(projection), expectedGrids = [...first, ...second].map(([, grid]) => grid);
+    const before = structuredClone(projection);
     const book = new ExcelJS.Workbook(); await book.xlsx.load(await createReportWorkbook(projection) as unknown as Parameters<typeof book.xlsx.load>[0]);
     expect(projection).toEqual(before);
     for (const sheet of [book.worksheets[0]!, book.getWorksheet('欧洲批次')!]) {
       expect(sheet.rowCount).toBe(projection.rows.length + 1);
       const headers = sheet.getRow(1).values as string[];
-      for (const [index, row] of projection.rows.entries()) {
-        const line = index + 2;
+      for (const row of projection.rows) {
+        const line = sheet.getColumn(headers.indexOf('FBA货件号')).values.findIndex((fba, index) => fba === row.fba && sheet.getCell(index, headers.indexOf('MSKU')).value === row.msku);
+        expect(line).toBeGreaterThan(1);
         expect(sheet.getCell(line, headers.indexOf('FBA货件号')).value).toBe(row.fba);
         expect(sheet.getCell(line, headers.indexOf('MSKU')).value).toBe(row.msku);
         expect(sheet.getCell(line, headers.indexOf('FNSKU')).value).toBe(row.fnsku);
         expect(sheet.getCell(line, headers.indexOf('SKU')).value).toBe(row.sku);
         expect(sheet.getCell(line, headers.indexOf('发货数量')).value).toBe(row.quantity);
-        expect(sheet.getCell(line, headers.indexOf('内部编码')).value).toBe(row.codes.join('、'));
-        expect(Array.from({ length: 12 }, (_, offset) => sheet.getCell(line, headers.indexOf(`箱${offset + 1}`)).value)).toEqual(expectedGrids[index]);
+        const spec = specifications.find((spec) => spec.fba === row.fba)!;
+        const expectedGrid = spec.products.find(([label]) => label === row.productName)![1];
+        expect(Array.from({ length: 12 }, (_, offset) => sheet.getCell(line, headers.indexOf(`箱${offset + 1}`)).value)).toEqual(expectedGrid);
       }
-      const firstPositiveColumns = Array.from({ length: projection.rows.length }, (_, index) => {
-        for (let order = 1; order <= 12; order++) if (Number(sheet.getCell(index + 2, headers.indexOf(`箱${order}`)).value) > 0) return order;
-        return null;
-      });
-      expect(firstPositiveColumns).toEqual([1, 2, 3, 3, 4, 5, 5, 6, 7, 8, 9, 10, 11, 12, null, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-      expect(sheet.getCell(2, headers.indexOf('内部编码')).value).toBe('F1、F2、F6');
-      expect(sheet.getCell(17, headers.indexOf('内部编码')).value).toBe('F13');
-      expect(sheet.getCell(17, headers.indexOf('箱1')).value).toBe(9);
-      expect(sheet.getCell(17, headers.indexOf('箱12')).value).toBeNull();
-      expect(sheet.getCell(15, headers.indexOf('箱12')).value).toBe(120);
-      expect(sheet.getCell(16, headers.indexOf('箱1')).value).toBe(0);
-      // The complete shared identity remains two distinct FBA rows.
-      expect([sheet.getCell(2, headers.indexOf('SKU')).value, sheet.getCell(17, headers.indexOf('SKU')).value]).toEqual(['S-shared', 'S-shared']);
-      expect(sheet.getCell(2, headers.indexOf('FBA货件号')).value).not.toBe(sheet.getCell(17, headers.indexOf('FBA货件号')).value);
+      expect(sheet.getCell(2, headers.indexOf('FBA货件号')).value).toBe('FBASTAIR002');
+      expect(sheet.getCell(2, headers.indexOf('内部编码')).value).toBe('F1-F22');
+      expect(sheet.getColumn(headers.indexOf('内部编码')).values.filter((value, index) => index > 1 && value !== null)).toEqual(['F1-F22']);
+      const sharedLines = sheet.getColumn(headers.indexOf('SKU')).values.flatMap((value, index) => value === 'S-shared' ? [index] : []);
+      expect(sharedLines).toHaveLength(2);
+      expect(sharedLines.map((line) => sheet.getCell(line, headers.indexOf('FBA货件号')).value).sort()).toEqual(['FBASTAIR001', 'FBASTAIR002']);
     }
     const detail = book.getWorksheet('逐箱明细')!, detailHeaders = detail.getRow(1).values as string[];
     const expectedDetails = projection.boxes.flatMap((box) => box.items.map((item) => [box.fba, box.boxId, box.boxOrder, box.code, item.msku, item.fnsku, item.sku, item.quantity]));
@@ -146,7 +170,7 @@ describe('shipment XLSX', () => {
     expect(actualDetails).toEqual(expectedDetails);
     expect(new Set(actualDetails.map((line) => line[1])).size).toBe(22);
   });
-  it('places quantities in allocation sequence columns across FBAs while retaining local box order in detail', async () => {
+  it('restarts each FBA at box one, ignores old allocation display positions and shows one complete ticket range', async () => {
     const projection = report(), base = projection.rows[0]!, boxBase = projection.boxes[0]!;
     const shippingRunId = randomUUID(), ticketId = randomUUID(), ticketNumber = '20261024-4-UK-1';
     const identity = { shippingRunId, ticketId, ticketNumber, sourceTicketIndex: 1 };
@@ -173,8 +197,8 @@ describe('shipment XLSX', () => {
         codes: example.codes, groupQuantity: total, monthQuantity: total });
       projection.boxes.push(...boxes);
     }
-    // A stale local-only maximum must not truncate G11/G12 display columns.
-    Object.assign(projection, { shippingRunId, shippingRunVersion: 1, shippingRunDate: '2026-10-24', shippingRunSequence: 4, maxBoxes: 2, total: examples.length,
+    // A stale global maximum must not add empty allocation columns.
+    Object.assign(projection, { shippingRunId, shippingRunVersion: 1, shippingRunDate: '2026-10-24', shippingRunSequence: 4, maxBoxes: 12, total: examples.length,
       confirmations: groups.map((groupId, index) => ({ groupId, groupVersion: 2, confirmationId: confirmations[index]! })) });
     const before = structuredClone(projection);
     const book = new ExcelJS.Workbook(); await book.xlsx.load(await createReportWorkbook(projection) as unknown as Parameters<typeof book.xlsx.load>[0]);
@@ -182,29 +206,27 @@ describe('shipment XLSX', () => {
     for (const sheet of [book.worksheets[0]!, book.getWorksheet('欧洲批次')!]) {
       const headers = sheet.getRow(1).values as string[];
       expect(sheet.rowCount).toBe(examples.length + 1);
-      expect(headers.filter((header) => /^箱\d+$/.test(header))).toEqual(Array.from({ length: 12 }, (_, index) => `箱${index + 1}`));
+      expect(headers.filter((header) => /^箱\d+$/.test(header))).toEqual(['箱1', '箱2', '箱3', '箱4', '箱5']);
       for (const [index, example] of examples.entries()) {
-        const expected = Array.from({ length: 12 }, (_, offset) => { const position = example.columns.indexOf(offset + 1); return position === -1 ? null : example.quantities[position]; });
-        expect(Array.from({ length: 12 }, (_, offset) => sheet.getCell(index + 2, headers.indexOf(`箱${offset + 1}`)).value)).toEqual(expected);
+        const expected = [...example.quantities, null, null, null];
+        expect(Array.from({ length: 5 }, (_, offset) => sheet.getCell(index + 2, headers.indexOf(`箱${offset + 1}`)).value)).toEqual(expected);
         expect(sheet.getCell(index + 2, headers.indexOf('FBA货件号')).value).toBe(example.fba);
         expect(sheet.getCell(index + 2, headers.indexOf('SKU')).value).toBe('S-SHARED');
-        expect(sheet.getCell(index + 2, headers.indexOf('内部编码')).value).toBe(example.codes.join('、'));
+        expect(sheet.getCell(index + 2, headers.indexOf('内部编码')).value).toBe(index === 0 ? 'G1-G2、G7-G12、H1-H2' : null);
         expect(sheet.getCell(index + 2, headers.indexOf('发货数量')).value).toBe(example.quantities.reduce((sum, quantity) => sum + quantity, 0));
         expect(sheet.getCell(index + 2, headers.indexOf('本票商品合计')).value).toBe(index === 0 ? total : null);
       }
-      expect(sheet.getCell(3, headers.indexOf('箱1')).value).toBeNull();
-      expect(sheet.getCell(3, headers.indexOf('箱2')).value).toBeNull();
-      expect(sheet.getCell(3, headers.indexOf('箱7')).value).toBe(70);
-      expect(sheet.getCell(3, headers.indexOf('箱8')).value).toBe(80);
+      expect(sheet.getCell(3, headers.indexOf('箱1')).value).toBe(70);
+      expect(sheet.getCell(3, headers.indexOf('箱2')).value).toBe(80);
       expect(sheet.getCell(6, headers.indexOf('箱1')).value).toBe(1);
       expect(sheet.getCell(6, headers.indexOf('箱2')).value).toBe(2);
     }
     const detail = book.getWorksheet('逐箱明细')!, headers = detail.getRow(1).values as string[];
     const actual = Array.from({ length: detail.rowCount - 1 }, (_, index) => ['FBA货件号', '内部编码', '货件内箱序', '箱内数量', '发货表箱列'].map((header) => detail.getCell(index + 2, headers.indexOf(header)).value));
-    expect(actual).toEqual(examples.flatMap((example) => example.codes.map((code, index) => [example.fba, code, index + 1, example.quantities[index], example.columns[index]])));
-    expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain('shipment-record-v5');
+    expect(actual).toEqual(examples.flatMap((example) => example.codes.map((code, index) => [example.fba, code, index + 1, example.quantities[index], index + 1])));
+    expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain('shipment-record-v6');
   });
-  it('sorts complete FBA blocks, code lists and box details by allocation order without moving quantities', async () => {
+  it('sorts FBA blocks by box count and input order while retaining real box codes and product totals', async () => {
     const projection = report(), base = projection.rows[0]!, boxBase = projection.boxes[0]!;
     const shippingRunId = randomUUID(), ticketId = randomUUID(), ticketNumber = '20261025-1-UK-1';
     const identity = { shippingRunId, ticketId, ticketNumber, sourceTicketIndex: 0 };
@@ -239,21 +261,21 @@ describe('shipment XLSX', () => {
     const before = structuredClone(projection), book = new ExcelJS.Workbook();
     await book.xlsx.load(await createReportWorkbook(projection) as unknown as Parameters<typeof book.xlsx.load>[0]);
     expect(projection).toEqual(before);
-    const expected = ['FBACODE-A2', 'FBACODE-A2', 'FBACODE-A10', 'FBACODE-B1', 'FBACODE-Z1', 'FBACODE-AA1', 'FBACODE-AB2'];
+    const expected = ['FBACODE-AB2', 'FBACODE-A10', 'FBACODE-AA1', 'FBACODE-B1', 'FBACODE-Z1', 'FBACODE-A2', 'FBACODE-A2'];
     for (const sheet of [book.worksheets[0]!, book.getWorksheet('欧洲批次')!]) {
       const headers = sheet.getRow(1).values as string[];
       expect(Array.from({ length: expected.length }, (_, index) => sheet.getCell(index + 2, headers.indexOf('FBA货件号')).value)).toEqual(expected);
-      expect(sheet.getCell(2, headers.indexOf('内部编码')).value).toBe('A2、A12');
-      expect(sheet.getCell(3, headers.indexOf('内部编码')).value).toBe('A3');
-      expect(sheet.getCell(2, headers.indexOf('箱2')).value).toBe(2);
-      expect(sheet.getCell(2, headers.indexOf('箱12')).value).toBe(12);
-      expect(sheet.getCell(2, headers.indexOf('箱1')).value).toBeNull();
-      expect(sheet.getCell(3, headers.indexOf('箱3')).value).toBe(3);
-      expect(sheet.getCell(4, headers.indexOf('箱10')).value).toBe(10);
+      expect(sheet.getCell(2, headers.indexOf('内部编码')).value).toBe('A2-A3、A10、A12、B1、Z1、AA1、AB2');
+      expect(sheet.getCell(3, headers.indexOf('内部编码')).value).toBeNull();
+      expect(sheet.getCell(2, headers.indexOf('箱1')).value).toBe(2);
+      expect(sheet.getCell(3, headers.indexOf('箱1')).value).toBe(10);
+      expect(sheet.getCell(7, headers.indexOf('箱1')).value).toBe(12);
+      expect(sheet.getCell(7, headers.indexOf('箱2')).value).toBe(2);
+      expect(sheet.getCell(8, headers.indexOf('箱3')).value).toBe(3);
       expect(sheet.getCell(2, headers.indexOf('本票商品合计')).value).toBe(sharedTotal);
       expect(sheet.getCell(2, headers.indexOf('本月商品数量')).value).toBe(sharedTotal);
-      expect(sheet.getCell(3, headers.indexOf('本票商品合计')).value).toBe(3);
-      expect(Array.from({ length: expected.length - 2 }, (_, index) => sheet.getCell(index + 4, headers.indexOf('本票商品合计')).value)).toEqual([null, null, null, null, null]);
+      expect(sheet.getCell(8, headers.indexOf('本票商品合计')).value).toBe(3);
+      expect(Array.from({ length: expected.length - 2 }, (_, index) => sheet.getCell(index + 3, headers.indexOf('本票商品合计')).value)).toEqual([null, null, null, null, null]);
     }
     const detail = book.getWorksheet('逐箱明细')!, headers = detail.getRow(1).values as string[];
     expect(Array.from({ length: detail.rowCount - 1 }, (_, index) => detail.getCell(index + 2, headers.indexOf('内部编码')).value))
@@ -263,7 +285,49 @@ describe('shipment XLSX', () => {
     expect(detail.getCell(2, headers.indexOf('货件内箱序')).value).toBe(2);
     expect(detail.getCell(2, headers.indexOf('发货表箱列')).value).toBe(2);
     expect(detail.getCell(5, headers.indexOf('货件内箱序')).value).toBe(1);
-    expect(detail.getCell(5, headers.indexOf('发货表箱列')).value).toBe(12);
+    expect(detail.getCell(5, headers.indexOf('发货表箱列')).value).toBe(1);
+  });
+  it('inserts one blank row between business tickets, including cross-group tickets and region-filtered sheets', async () => {
+    const projection = report(), base = projection.rows[0]!, boxBase = projection.boxes[0]!, shippingRunId = randomUUID();
+    const tickets = [randomUUID(), randomUUID(), randomUUID()];
+    projection.rows = []; projection.boxes = [];
+    const specs = [
+      { ticket: 0, inputOrder: 0, fba: 'FBA-A-FIRST', country: '英国', codes: ['A1'] },
+      { ticket: 2, inputOrder: 0, fba: 'FBA-C', country: '英国', codes: ['C1', 'C3'] },
+      { ticket: 1, inputOrder: 0, fba: 'FBA-B', country: '美国', codes: ['B1'] },
+      { ticket: 0, inputOrder: 1, fba: 'FBA-A-SECOND', country: '英国', codes: ['A2'] },
+    ];
+    for (const spec of specs) {
+      const groupId = randomUUID(), demandId = randomUUID();
+      const identity = { shippingRunId, ticketId: tickets[spec.ticket]!, ticketNumber: `20261027-1-${spec.ticket + 1}`, sourceTicketIndex: spec.ticket, inputOrder: spec.inputOrder, groupId, demandId, fba: spec.fba };
+      const boxes = spec.codes.map((code, index) => ({ ...boxBase, ...identity, boxId: randomUUID(), boxOrder: index + 1, displayBoxOrder: Number(code.slice(1)), code,
+        items: [{ msku: '00001', fnsku: 'X001', sku: '001', quantity: 2 }] }));
+      projection.boxes.push(...boxes);
+      projection.rows.push({ ...base, ...identity, id: randomUUID(), country: spec.country, quantity: boxes.length * 2,
+        groupQuantity: spec.ticket === 0 ? 4 : boxes.length * 2, monthQuantity: spec.ticket === 0 ? 4 : boxes.length * 2,
+        codes: spec.codes, boxes: boxes.map((box) => ({ boxId: box.boxId, boxOrder: box.boxOrder, displayBoxOrder: box.displayBoxOrder, code: box.code, quantity: 2 })) });
+    }
+    Object.assign(projection, { shippingRunId, shippingRunVersion: 1, shippingRunDate: '2026-10-27', shippingRunSequence: 1, total: 4, maxBoxes: 10 });
+    const before = structuredClone(projection), book = new ExcelJS.Workbook();
+    await book.xlsx.load(await createReportWorkbook(projection) as unknown as Parameters<typeof book.xlsx.load>[0]);
+    expect(projection).toEqual(before);
+    const checkSheet = (sheet: ExcelJS.Worksheet, expected: Array<string | null>, ranges: Array<string | null>) => {
+      const headers = sheet.getRow(1).values as string[];
+      expect(sheet.rowCount).toBe(expected.length + 1);
+      expect(expected.map((_, index) => sheet.getCell(index + 2, headers.indexOf('FBA货件号')).value)).toEqual(expected);
+      expect(expected.map((_, index) => sheet.getCell(index + 2, headers.indexOf('内部编码')).value)).toEqual(ranges);
+      for (const [index, fba] of expected.entries()) if (fba === null) {
+        expect(sheet.getRow(index + 2).hasValues).toBe(false);
+        for (let column = 1; column <= headers.length - 1; column++) expect(sheet.getCell(index + 2, column).value).toBeNull();
+      }
+      expect(sheet.autoFilter).toBe(`A1:${sheet.getColumn(headers.length - 1).letter}${sheet.rowCount}`);
+    };
+    checkSheet(book.worksheets[0]!, ['FBA-A-FIRST', 'FBA-A-SECOND', null, 'FBA-B', null, 'FBA-C'], ['A1-A2', null, null, 'B1', null, 'C1、C3']);
+    checkSheet(book.getWorksheet('欧洲批次')!, ['FBA-A-FIRST', 'FBA-A-SECOND', null, 'FBA-C'], ['A1-A2', null, null, 'C1、C3']);
+    checkSheet(book.getWorksheet('美国批次')!, ['FBA-B'], ['B1']);
+    const detail = book.getWorksheet('逐箱明细')!;
+    expect(detail.rowCount).toBe(6);
+    expect(Array.from({ length: detail.rowCount - 1 }, (_, index) => detail.getRow(index + 2).hasValues)).toEqual([true, true, true, true, true]);
   });
   it('imports two-sheet evidence without losing zero or leading zeros', async () => {
     const template = await createIntakeTemplate(); const book = new ExcelJS.Workbook(); await book.xlsx.load(template as unknown as Parameters<typeof book.xlsx.load>[0]);

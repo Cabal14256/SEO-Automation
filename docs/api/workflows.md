@@ -2,6 +2,8 @@
 
 路径以 `/api/v1` 开始，仅有效管理员可访问。错误采用 `{error:{code,message,details?}}`；修改检查 Origin，下载核验 SHA-256。
 
+自 2026-10-26 起，`fulfillment/logistics/customs/archives` 暂时关闭；有效管理员访问返回 HTTP `503`，错误码 `FEATURE_UNDER_MAINTENANCE`，提示包含“（待维护）”。对应记录的共享附件与导出入口同样受维护限制。`finance` 继续提供原有功能。以下契约保留供维护及恢复开放时参考。
+
 ## 记录接口
 
 `fulfillment/logistics/customs/finance/archives` 分别对应五类本地记录。

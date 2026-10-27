@@ -57,8 +57,8 @@ function fixture(needsReview = false, correction = false) {
       weekStartDate: '2026-10-19', weekEndDate: '2026-10-25', businessDate: numberingDate, sid: index < 2 ? 101 : 202,
       shop: index < 2 ? '技术美国店' : '技术英国店', country: index < 2 ? '美国' : '英国', channel: '海派', destinationFc: index < 2 ? 'ONT8' : 'BHX4', fba,
       msku: `MSKU-${index + 1}`, fnsku: `FNSKU-${index + 1}`, sku: `SKU-${index + 1}`, productName: `技术商品 ${index + 1}`, quantity: boxCount * 2,
-      boxes: Array.from({ length: boxCount }, (_, box) => ({ boxId: id(), boxOrder: box + 1, code: `${String.fromCharCode(65 + index)}-${box + 1}`, quantity: 2 })),
-      codes: Array.from({ length: boxCount }, (_, box) => `${String.fromCharCode(65 + index)}-${box + 1}`), groupQuantity: index < 2 ? 28 : 2,
+      boxes: Array.from({ length: boxCount }, (_, box) => ({ boxId: id(), boxOrder: box + 1, displayBoxOrder: box + 1, code: `${String.fromCharCode(65 + index)}${box + 1}`, quantity: 2 })),
+      codes: Array.from({ length: boxCount }, (_, box) => `${String.fromCharCode(65 + index)}${box + 1}`), groupQuantity: index < 2 ? 28 : 2,
       monthQuantity: 30, status: 'confirmed', actualShipDate: null, sourceObservedAt: now, dataRevisionId: id() };
   });
   const boxes = rows.flatMap((row) => row.boxes.map((box) => ({ ...row, ...box, boxName: '技术箱', boxExternalId: null, localBoxId: null,
@@ -66,7 +66,9 @@ function fixture(needsReview = false, correction = false) {
   state.report = () => {
     const blocked = state.blocked ?? (state.needsReview ? [{ groupId: groupIds[0], name: '技术底层组 1', code: 'BOX_ORDER_UNCONFIRMED', message: '箱序尚未确认' }] : []);
     const omitted = new Set(state.partialPreview ? blocked.map((item) => item.groupId) : []);
-    const visibleRows = rows.filter((row) => !omitted.has(row.groupId)), visibleBoxes = boxes.filter((box) => !omitted.has(box.groupId));
+    const visibleRows = rows.filter((row) => !omitted.has(row.groupId))
+      .sort((left, right) => left.sourceTicketIndex - right.sourceTicketIndex || left.boxes.length - right.boxes.length || left.inputOrder - right.inputOrder);
+    const visibleBoxes = boxes.filter((box) => !omitted.has(box.groupId));
     return contracts.reportResponseSchema.parse({ shippingRunId: runId, shippingRunVersion: state.controlledVersion ?? 3, shippingRunDate: numberingDate, shippingRunSequence: 3,
       rows: visibleRows, boxes: visibleBoxes, confirmations: references.filter((ref) => !omitted.has(ref.groupId)), total: visibleRows.length, page: 1, pageSize: 50,
       maxBoxes: visibleBoxes.reduce((maximum, box) => Math.max(maximum, box.boxOrder), 0), generatedAt: now, blocked });
@@ -103,8 +105,12 @@ function allocationColumnFixture() {
   const state = fixture();
   Object.assign(state, { created: true, controlledStatus: 'ready', currentStatus: 'ready' });
   const original = state.report();
+  // Retain old global display metadata to exercise compatibility: the product
+  // grid and its width must use local boxOrder even for G7 through G12.
   const quantities = [15, 11, 9], displayColumns = [[7, 8], [9, 10], [11, 12]];
-  const rows = original.rows.map((row, index) => {
+  const rows = state.fbas.map((fba, index) => {
+    const row = original.rows.find((row) => row.fba === fba);
+    assert(row, 'every fixture FBA must retain its accepted product');
     const boxes = displayColumns[index].map((displayBoxOrder, localIndex) => ({
       boxId: row.boxes[localIndex]?.boxId ?? id(), boxOrder: localIndex + 1, displayBoxOrder, code: `G${displayBoxOrder}`, quantity: quantities[index],
     }));
@@ -256,13 +262,17 @@ async function automaticChecks(state) {
   await expect.poll(() => state.deliveredStatuses.includes('ready'), { timeout: 15000 }).toBe(true);
   assert(state.deliveredStatuses.includes('queued')); assert.equal(state.createBodies.length, 1); note();
 
-  step = 'whole-run-product-table-keeps-ticket-numbers-input-order-and-twelve-box-columns';
+  step = 'whole-run-product-table-keeps-tickets-contiguous-orders-by-box-count-and-retains-twelve-local-columns';
   await expect(productTable()).toContainText('20261023-3-US-1'); await expect(productTable()).toContainText('20261023-3-UK-1');
   await expect(productTable().getByRole('columnheader', { name: '箱 12', exact: true })).toHaveCount(1);
   await expect(productTable().locator('tbody tr')).toHaveCount(3);
   const textRows = await productTable().locator('tbody tr').allTextContents();
-  state.fbas.forEach((fba, index) => assert(textRows[index].includes(fba), 'product rows retain original FBA order'));
-  await expect(productTable().locator('tbody tr').first()).toContainText('A-12');
+  [state.fbas[1], state.fbas[0], state.fbas[2]].forEach((fba, index) => assert(textRows[index].includes(fba), 'FBA rows stay inside their ticket and sort by actual box count'));
+  const ticketRangeColumn = (await productTable().getByRole('columnheader').allTextContents()).indexOf('整票编码范围');
+  assert(ticketRangeColumn >= 0);
+  await expect(productTable().locator('tbody tr').nth(0).getByRole('cell').nth(ticketRangeColumn)).toHaveText('A1-A12、B1-B2');
+  await expect(productTable().locator('tbody tr').nth(1).getByRole('cell').nth(ticketRangeColumn)).toHaveText('');
+  await expect(productTable().locator('tbody tr').nth(2).getByRole('cell').nth(ticketRangeColumn)).toHaveText('C1');
   await expect(generate()).toBeEnabled();
   await productTable().scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(evidence, 'ready-products-1440.png') });
@@ -291,7 +301,7 @@ async function automaticChecks(state) {
   assert.equal(state.createBodies.length, 1, 'history recovery must not create another run');
   await recovered.getByRole('button', { name: '逐箱明细', exact: true }).click();
   const boxTable = recovered.getByRole('region', { name: '本次发货逐箱表，可横向滚动', exact: true });
-  await expect(boxTable.locator('tbody tr')).toHaveCount(15); await expect(boxTable).toContainText('箱 12 · A-12');
+  await expect(boxTable.locator('tbody tr')).toHaveCount(15); await expect(boxTable).toContainText('箱 12 · A12');
   await boxTable.scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(evidence, 'recovered-boxes-1440.png') }); note();
 }
@@ -437,33 +447,34 @@ async function correctionChecks(state) {
 }
 
 async function allocationColumnChecks(state) {
-  step = 'allocated-box-codes-align-with-columns-seven-through-twelve-and-retain-local-box-orders';
+  step = 'per-fba-box-columns-reset-to-one-with-five-columns-and-one-code-range-per-ticket';
   await page.goto('/shipping'); await page.getByRole('button', { name: '查看发货表', exact: true }).click();
   await expect(productTable().locator('tbody tr')).toHaveCount(3);
   await expect(generate()).toBeEnabled();
   const headers = await productTable().getByRole('columnheader').allTextContents();
   const column = (name) => { const index = headers.indexOf(name); assert(index >= 0, `missing product column ${name}`); return index; };
   const expected = [
-    ['—', '—', '—', '—', '—', '—', '15', '15', '—', '—', '—', '—'],
-    ['—', '—', '—', '—', '—', '—', '—', '—', '11', '11', '—', '—'],
-    ['—', '—', '—', '—', '—', '—', '—', '—', '—', '—', '9', '9'],
+    ['15', '15', '—', '—', '—'],
+    ['11', '11', '—', '—', '—'],
+    ['9', '9', '—', '—', '—'],
   ];
-  const expectedCodes = [['G7', 'G8'], ['G9', 'G10'], ['G11', 'G12']];
+  const expectedRanges = ['G7-G10', '', 'G11-G12'];
   const expectedQuantities = ['30', '22', '18'];
+  assert.deepEqual(headers.filter((header) => /^箱 \d+$/.test(header)), ['箱 1', '箱 2', '箱 3', '箱 4', '箱 5']);
   for (let index = 0; index < 3; index++) {
     const row = productTable().locator('tbody tr').nth(index), cells = row.getByRole('cell');
     await expect(cells.nth(column('FBA / 目的仓'))).toContainText(state.fbas[index]);
     await expect(cells.nth(column('商品数量'))).toHaveText(expectedQuantities[index]);
-    await expect(cells.nth(column('内部箱码'))).toHaveText(expectedCodes[index].join('、'));
-    for (let order = 1; order <= 12; order++) await expect(cells.nth(column(`箱 ${order}`))).toHaveText(expected[index][order - 1]);
+    await expect(cells.nth(column('整票编码范围'))).toHaveText(expectedRanges[index]);
+    for (let order = 1; order <= 5; order++) await expect(cells.nth(column(`箱 ${order}`))).toHaveText(expected[index][order - 1]);
   }
-  // Three separate FBA rows retain all 70 units; local boxes 1/2 must never
-  // cause any of the G7-G12 quantities to collapse back into columns 1/2.
+  // Each FBA keeps separate local boxes 1/2 and all 70 accepted units, while
+  // original G7-G12 codes remain independently visible in the box details.
   assert.equal(state.report().rows.reduce((total, row) => total + row.quantity, 0), 70);
   assert.equal(new Set(state.report().boxes.map((box) => box.demandId)).size, 3);
   await productTable().scrollIntoViewIfNeeded();
   await productTable().evaluate((element) => { element.scrollLeft = element.scrollWidth; });
-  await page.screenshot({ path: resolve(evidence, 'allocated-display-box-columns-1440.png') });
+  await page.screenshot({ path: resolve(evidence, 'per-fba-box-columns-1440.png') });
   await result().getByRole('button', { name: '逐箱明细', exact: true }).click();
   const boxTable = result().getByRole('region', { name: '本次发货逐箱表，可横向滚动', exact: true });
   await expect(boxTable.locator('tbody tr')).toHaveCount(6);
@@ -472,8 +483,7 @@ async function allocationColumnChecks(state) {
       const displayOrder = 7 + index * 2 + localOrder - 1;
       const row = boxTable.locator('tbody tr').nth(index * 2 + localOrder - 1), cells = row.getByRole('cell');
       await expect(cells.nth(0)).toContainText(state.fbas[index]);
-      await expect(cells.nth(1)).toContainText(`箱 ${displayOrder} · G${displayOrder}`);
-      await expect(cells.nth(1)).toContainText(`货件内箱 ${localOrder}`);
+      await expect(cells.nth(1)).toHaveText(`箱 ${localOrder} · G${displayOrder}`);
       await expect(cells.nth(3)).toHaveText(String([15, 11, 9][index]));
     }
   }
