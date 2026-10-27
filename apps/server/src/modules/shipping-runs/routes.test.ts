@@ -59,7 +59,7 @@ describe('shipping-run HTTP interfaces', () => {
     const list = await api.request('/api/v1/shipping-runs');
     expect(list.status).toBe(200); expect(await list.json()).toEqual({ items: [] });
     expect(list.headers.get('Cache-Control')).toBe('no-store');
-    expect(state.list).toHaveBeenCalledExactlyOnceWith('technical-admin');
+    expect(state.list).toHaveBeenCalledExactlyOnceWith('technical-admin', 'active');
     const detail = await api.request(`/api/v1/shipping-runs/${runId}`);
     expect(detail.status).toBe(200); expect(detail.headers.get('Cache-Control')).toBe('no-store');
     expect(state.get).toHaveBeenCalledExactlyOnceWith(runId, 'technical-admin');

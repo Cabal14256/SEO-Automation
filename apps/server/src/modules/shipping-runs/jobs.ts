@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { PgBoss } from 'pg-boss';
 import type { ConfirmAndAllocateSubBatchInput, FbaLookupCandidate, FbaLookupInput, ImportCommitInput, ImportNormalizedRow, ImportSellerSelection, ShippingRunIssue } from '@scm/contracts';
 import { db, pool } from '../../db/client.js';
@@ -18,6 +18,7 @@ import { activeSeller, CatalogError, getCatalogState } from '../seller-mappings/
 import { lookupDateRange, numberTickets, shippingCountry, shippingOperationId, sourceTicketLayout } from './domain.js';
 import { activeShippingRuns, enqueueShippingRunInTx, getShippingRunReportScopeInTx, reserveShippingSequenceInTx, shippingRunReadinessIssuesInTx, SHIPPING_RUN_QUEUE } from './service.js';
 import { shippingRuns, shippingTicketMembers, shippingTickets } from './schema.js';
+import { assertLifecycleActiveInTx } from '../shipping-lifecycle/guards.js';
 
 type Run = typeof shippingRuns.$inferSelect;
 type SourceRow = typeof sourceImportRows.$inferSelect;
@@ -25,10 +26,11 @@ type Stage = 'lookup' | 'commit' | 'grouping' | 'sync' | 'confirmation' | 'ready
 class ReviewRequired extends Error { constructor(public issues: ShippingRunIssue[]) { super(issues[0]?.message ?? '请处理本次发货的异常后重试。'); } }
 function review(code: string, message: string, extra: Omit<ShippingRunIssue, 'code' | 'message'> = {}): never { throw new ReviewRequired([{ code, message, ...extra }]); }
 async function transition(run: Run, stage: Stage, status = 'running') {
-  await db.update(shippingRuns).set({ stage, status, version: sql`${shippingRuns.version}+1`, issues: [], error: null, updatedAt: new Date() }).where(eq(shippingRuns.id, run.id));
+  const changed = await db.update(shippingRuns).set({ stage, status, version: sql`${shippingRuns.version}+1`, issues: [], error: null, updatedAt: new Date() }).where(and(eq(shippingRuns.id, run.id), eq(shippingRuns.lifecycle, 'active'), eq(shippingRuns.lifecyclePending, false))).returning({ id: shippingRuns.id });
+  if (!changed.length) throw new BatchError('SHIPPING_LIFECYCLE_INACTIVE', 409, '记录正在取消或删除，已停止后台整理。');
   run.stage = stage; run.status = status;
 }
-async function saveCheckpoint(run: Run) { await db.update(shippingRuns).set({ checkpoint: run.checkpoint, updatedAt: new Date() }).where(eq(shippingRuns.id, run.id)); }
+async function saveCheckpoint(run: Run) { const changed = await db.update(shippingRuns).set({ checkpoint: run.checkpoint, updatedAt: new Date() }).where(and(eq(shippingRuns.id, run.id), eq(shippingRuns.lifecycle, 'active'), eq(shippingRuns.lifecyclePending, false))).returning({ id: shippingRuns.id }); if (!changed.length) throw new BatchError('SHIPPING_LIFECYCLE_INACTIVE', 409, '记录正在取消或删除，已停止保存后台检查点。'); }
 async function checkpointInput<T>(run: Run, key: string, create: () => Promise<T> | T): Promise<T> {
   const old = run.checkpoint.operations[key]; if (old) return old.input as T;
   const input = await create(); run.checkpoint.operations[key] = { input }; await saveCheckpoint(run); return input;
@@ -49,6 +51,7 @@ async function ensureTickets(run: Run, rows: SourceRow[]) {
   const layout = sourceTicketLayout(rows);
   if (layout.issues.length) throw new ReviewRequired(layout.issues);
   await db.transaction(async (tx) => {
+    await assertLifecycleActiveInTx(tx, 'run', run.id);
     const [exists] = await tx.select({ id: shippingTickets.id }).from(shippingTickets).where(eq(shippingTickets.runId, run.id)).limit(1); if (exists) return;
     for (const ticket of layout.tickets) {
       const id = randomUUID(); await tx.insert(shippingTickets).values({ id, runId: run.id, sourceTicketIndex: ticket.sourceTicketIndex });
@@ -188,7 +191,7 @@ async function attachCommittedDemands(run: Run, items: Array<{ demandId: string;
   await db.transaction(async (tx) => {
     for (const item of [...items].sort((a, b) => a.demandId.localeCompare(b.demandId))) {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`shipping-demand:${item.demandId}`},0))`);
-      const [occupied] = await tx.select().from(shippingTicketMembers).where(eq(shippingTicketMembers.demandId, item.demandId));
+      const [occupied] = await tx.select().from(shippingTicketMembers).where(and(eq(shippingTicketMembers.demandId, item.demandId), isNull(shippingTicketMembers.releasedAt)));
       if (occupied && occupied.runId !== run.id) {
         const [ticket] = await tx.select().from(shippingTickets).where(eq(shippingTickets.id, occupied.ticketId));
         const [previous] = await tx.select().from(shippingRuns).where(eq(shippingRuns.id, occupied.runId));
@@ -210,8 +213,8 @@ async function reserveNumbers(run: Run) {
 }
 async function groupingStage(run: Run) {
   await reserveNumbers(run);
-  const members = await db.select({ member: shippingTicketMembers, demand: demands }).from(shippingTicketMembers).innerJoin(demands, eq(demands.id, shippingTicketMembers.demandId)).where(eq(shippingTicketMembers.runId, run.id));
-  const all = await db.select().from(shippingTicketMembers).where(eq(shippingTicketMembers.runId, run.id));
+  const members = await db.select({ member: shippingTicketMembers, demand: demands }).from(shippingTicketMembers).innerJoin(demands, eq(demands.id, shippingTicketMembers.demandId)).where(and(eq(shippingTicketMembers.runId, run.id), isNull(shippingTicketMembers.releasedAt)));
+  const all = await db.select().from(shippingTicketMembers).where(and(eq(shippingTicketMembers.runId, run.id), isNull(shippingTicketMembers.releasedAt)));
   if (members.length !== all.length || !members.length) review('DEMAND_NOT_COMMITTED', '部分 FBA 尚未提交为正式需求，请核对来源。');
   const groups = new Map<string, typeof members>();
   for (const entry of members) {
@@ -248,10 +251,10 @@ async function groupingStage(run: Run) {
   }
   await transition(run, 'sync'); return true;
 }
-async function runGroupIds(runId: string) { const members = await db.select().from(shippingTicketMembers).where(eq(shippingTicketMembers.runId, runId)); return [...new Set(members.flatMap((member) => member.groupId ? [member.groupId] : []))]; }
+async function runGroupIds(runId: string) { const members = await db.select().from(shippingTicketMembers).where(and(eq(shippingTicketMembers.runId, runId), isNull(shippingTicketMembers.releasedAt))); return [...new Set(members.flatMap((member) => member.groupId ? [member.groupId] : []))]; }
 async function syncStage(boss: PgBoss, run: Run) {
   let waiting = false; const issues: ShippingRunIssue[] = [];
-  const expected = await db.select().from(shippingTicketMembers).where(eq(shippingTicketMembers.runId, run.id));
+  const expected = await db.select().from(shippingTicketMembers).where(and(eq(shippingTicketMembers.runId, run.id), isNull(shippingTicketMembers.releasedAt)));
   const memberships = expected.length ? await db.select().from(subBatchMembers).where(and(inArray(subBatchMembers.demandId, expected.flatMap((member) => member.demandId ? [member.demandId] : [])), eq(subBatchMembers.active, true))) : [];
   for (const member of expected) if (!memberships.some((current) => current.groupId === member.groupId && current.demandId === member.demandId)) issues.push({ code: 'SHIPPING_MEMBER_REMOVED', message: '本票的 FBA 已从其内部处理组移除，请恢复正确归属后重试。', fba: member.fba, ...(member.demandId ? { demandId: member.demandId } : {}), ...(member.groupId ? { groupId: member.groupId } : {}) });
   if (issues.length) throw new ReviewRequired(issues);
@@ -328,11 +331,12 @@ export async function executeShippingRun(boss: PgBoss, runId: string) {
   const connection = await pool.connect(); let locked = false;
   try {
     const lock = await connection.query<{ locked: boolean }>('select pg_try_advisory_lock(hashtextextended($1,0)) as locked', [`shipping-run:${runId}`]); locked = lock.rows[0]?.locked ?? false; if (!locked) return;
-    const [run] = await db.select().from(shippingRuns).where(eq(shippingRuns.id, runId)); if (!run || !['queued', 'running'].includes(run.status)) return;
+    const [run] = await db.select().from(shippingRuns).where(eq(shippingRuns.id, runId)); if (!run || !['queued', 'running'].includes(run.status) || run.lifecycle !== 'active' || run.lifecyclePending) return;
     try {
       await db.transaction((tx) => requireBatchActor(tx, run.createdBy));
-      await db.update(shippingRuns).set({ status: 'running', updatedAt: new Date() }).where(eq(shippingRuns.id, runId));
+      await db.update(shippingRuns).set({ status: 'running', updatedAt: new Date() }).where(and(eq(shippingRuns.id, runId), eq(shippingRuns.lifecycle, 'active'), eq(shippingRuns.lifecyclePending, false)));
       for (let pass = 0; pass < 6; pass++) {
+        await db.transaction((tx) => assertLifecycleActiveInTx(tx, 'run', runId));
         let advanced = false;
         if (run.stage === 'lookup') advanced = await lookupStage(boss, run);
         else if (run.stage === 'commit') advanced = await commitStage(run);
@@ -344,7 +348,7 @@ export async function executeShippingRun(boss: PgBoss, runId: string) {
     } catch (error) {
       const known = error instanceof BatchError || error instanceof ImportError || error instanceof CatalogError || error instanceof BatchSyncError || error instanceof LingxingReadError;
       const issues = error instanceof ReviewRequired ? error.issues : [{ code: known ? error.code : 'SHIPPING_RUN_FAILED', message: known ? error.message : '发货整理暂未完成，已保存成功步骤，请重试。' }];
-      await db.update(shippingRuns).set({ status: error instanceof ReviewRequired || known ? 'needs_review' : 'failed', issues, error: { code: issues[0]!.code, message: issues[0]!.message }, version: sql`${shippingRuns.version}+1`, updatedAt: new Date() }).where(eq(shippingRuns.id, runId));
+      await db.update(shippingRuns).set({ status: error instanceof ReviewRequired || known ? 'needs_review' : 'failed', issues, error: { code: issues[0]!.code, message: issues[0]!.message }, version: sql`${shippingRuns.version}+1`, updatedAt: new Date() }).where(and(eq(shippingRuns.id, runId), eq(shippingRuns.lifecycle, 'active'), eq(shippingRuns.lifecyclePending, false)));
       if (!known && !(error instanceof ReviewRequired)) logError('Shipping organization failed', error);
     }
   } finally { let failed = false; try { if (locked) await connection.query('select pg_advisory_unlock(hashtextextended($1,0))', [`shipping-run:${runId}`]); } catch { failed = true; } finally { connection.release(failed); } }
@@ -358,7 +362,7 @@ export async function reconcileShippingRuns(boss: PgBoss) {
       const lock = await connection.query<{ locked: boolean }>('select pg_try_advisory_lock(hashtextextended($1,0)) as locked', [`shipping-run:${record.id}`]); locked = lock.rows[0]?.locked ?? false; if (!locked) continue;
       await db.transaction(async (tx) => {
         const [current] = await tx.select().from(shippingRuns).where(eq(shippingRuns.id, record.id)).for('update');
-        if (!current || current.queueJobId !== record.queueJobId || !['queued', 'running'].includes(current.status)) return;
+        if (!current || current.queueJobId !== record.queueJobId || !['queued', 'running'].includes(current.status) || current.lifecycle !== 'active' || current.lifecyclePending) return;
         await enqueueShippingRunInTx(tx, boss, current.id);
       });
     } finally { let failed = false; try { if (locked) await connection.query('select pg_advisory_unlock(hashtextextended($1,0))', [`shipping-run:${record.id}`]); } catch { failed = true; } finally { connection.release(failed); } }

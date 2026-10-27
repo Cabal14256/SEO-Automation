@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import type { BatchWorkspace, BatchWorkspaceQuery, DemandRecord, SubBatchRecord, WeeklyBatch } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { demands } from '../../db/schema.js';
@@ -13,7 +13,7 @@ export async function getBatchWorkspace(actorId: string, query: BatchWorkspaceQu
   return db.transaction(async (tx) => {
     await requireBatchActor(tx, actorId);
     const batches = await tx.select().from(weeklyBatches).orderBy(desc(weeklyBatches.weekStartDate));
-    const groups = await tx.select().from(subBatches).where(ne(subBatches.status, 'superseded')).orderBy(asc(subBatches.position), asc(subBatches.id));
+    const groups = await tx.select().from(subBatches).where(and(ne(subBatches.status, 'superseded'), query.lifecycle === 'all' ? undefined : eq(subBatches.lifecycle, query.lifecycle ?? 'active'))).orderBy(asc(subBatches.position), asc(subBatches.id));
     const groupIds = groups.map((group) => group.id);
     const members = groupIds.length ? await tx.select({ groupId: subBatchMembers.groupId, demandId: subBatchMembers.demandId }).from(subBatchMembers)
       .where(and(inArray(subBatchMembers.groupId, groupIds), eq(subBatchMembers.active, true))) : [];
@@ -33,12 +33,12 @@ export async function getBatchWorkspace(actorId: string, query: BatchWorkspaceQu
       id: batchSyncRuns.id, subBatchId: batchSyncRuns.subBatchId, status: batchSyncRuns.status, groupVersion: batchSyncRuns.groupVersion,
       createdAt: batchSyncRuns.createdAt, completedAt: batchSyncRuns.completedAt,
     }).from(batchSyncRuns).where(inArray(batchSyncRuns.subBatchId, groupIds)).orderBy(asc(batchSyncRuns.subBatchId), desc(batchSyncRuns.createdAt), desc(batchSyncRuns.id)) : [];
-    const occurrences = await tx.select({ id: shippingRuns.id, month: shippingRuns.month, sequence: shippingRuns.sequence, numberingDate: shippingRuns.numberingDate }).from(shippingRuns);
-    const shippingMemberships = groupIds.length ? await tx.select({ groupId: shippingTicketMembers.groupId, demandId: shippingTicketMembers.demandId, runId: shippingTicketMembers.runId }).from(shippingTicketMembers).where(inArray(shippingTicketMembers.groupId, groupIds)) : [];
+    const occurrences = await tx.select({ id: shippingRuns.id, month: shippingRuns.month, sequence: shippingRuns.sequence, numberingDate: shippingRuns.numberingDate }).from(shippingRuns).where(eq(shippingRuns.lifecycle, 'active'));
+    const shippingMemberships = groupIds.length ? await tx.select({ groupId: shippingTicketMembers.groupId, demandId: shippingTicketMembers.demandId, runId: shippingTicketMembers.runId }).from(shippingTicketMembers).where(and(inArray(shippingTicketMembers.groupId, groupIds), isNull(shippingTicketMembers.releasedAt))) : [];
     return projectBatchWorkspace({
       shippingRuns: occurrences, shippingMemberships,
       batches: batches.map((batch): WeeklyBatch => ({ ...batch, sortMode: batch.sortMode as WeeklyBatch['sortMode'], createdAt: batch.createdAt.toISOString() })),
-      groups: groups.map((group): SubBatchRecord => ({ ...group, status: group.status as SubBatchRecord['status'],
+      groups: groups.map((group): SubBatchRecord => ({ ...group, lifecycle: group.lifecycle as SubBatchRecord['lifecycle'], status: group.status as SubBatchRecord['status'],
         demandIds: members.filter((member) => member.groupId === group.id).map((member) => member.demandId).sort(),
         frozenAt: group.frozenAt?.toISOString() ?? null, createdAt: group.createdAt.toISOString(), updatedAt: group.updatedAt.toISOString() })),
       demands: demandRows.map(serializeDemand), shipments: revisions,

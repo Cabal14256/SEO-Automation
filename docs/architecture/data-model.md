@@ -1,5 +1,17 @@
 # 发货模块数据模型
 
+## 统一生命周期（2026-10-28）
+
+迁移 `0023_shipping_lifecycle.sql` 为 `shipping_run`、`sub_batch`、`demand` 增加独立 `lifecycle=active/cancelled/trashed`、变更人／时间／原因、操作号、快照号及 `lifecycle_pending`。整理／确认状态与发布历史独立保存；取消、删除可作用于已发布安排，不覆盖原确认和文件。`weekly_batch` 是兼容容器，不是第四种生命周期对象。
+
+`shipping_ticket_member.released_at` 保留已解除的票安排；需求和同次 FBA 唯一索引仅约束未释放行。内部组继续以 `sub_batch_member.active` 保证一个需求最多一个有效组；取消父容器释放安排但保持底层 demand 当前有效。需求的 `sid+FBA` 身份唯一约束在回收站期间仍保留，重新导入不能绕过显式恢复。
+
+`shipping_lifecycle_operation` 保存动作、操作者、请求哈希、完整输入、结果及待处理标记，支持版本化影响令牌、同请求重放与后台安全停止。`shipping_lifecycle_snapshot` 保存原生命周期、受本次操作影响的实体和票成员／组成员／箱码标识；恢复检查当前归属和独立子操作，不抢占或部分恢复，恢复后重新确认与生成。
+
+生命周期账本、快照不向业务实体建立外键；`shipping_run_operation.run_id` 也保留为无实体外键的目标 UUID，使实体永久清理后仍能识别旧操作。永久清理仅允许无发布、打印、冻结及共享依赖保护的未发布记录；旧业务载荷和相关工作快照清除，保留最小幂等记录，底层需求不随父容器清理。输入、共享网络归档及已发布文件保留。
+
+历史界面的 `demand.cancel` 表示删除。迁移将这些需求映射为 `trashed` 并回填变更元数据、释放票占用；当前生命周期不再以审计中是否存在取消事件判断。历史无安排快照的删除需求可恢复为当前未分组，新操作按保存快照恢复。接口与边界见[生命周期 API](../api/shipping-lifecycle.md)。
+
 ## 月内发货次模型（2026-10-24）
 
 `shipping_run` 统一保存编号日期、`month`、月内 `sequence`、版本、`origin=import/manual` 和 `membership_frozen_at`。人工与自动共用 `shipping_month_counter`；人工首票、内部组与编号原子提交，失败不占次数。人工导入引用为空，初始 `draft`，不自动同步。

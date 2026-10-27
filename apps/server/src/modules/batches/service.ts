@@ -9,6 +9,7 @@ import { alphabeticPrefix, BATCH_RULE_VERSION, validateShipmentData } from './va
 import { demandLifecycleCondition, loadDemandCancellationsInTx, requireActiveDemandInTx } from '../imports/demand-lifecycle.js';
 import { shippingRuns, shippingTicketMembers } from '../shipping-runs/schema.js';
 import { batchExports } from './export-schema.js';
+import { assertLifecycleActiveInTx } from '../shipping-lifecycle/guards.js';
 
 export type BatchTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export class BatchError extends Error {
@@ -20,7 +21,7 @@ export async function requireBatchActor(tx: BatchTx, actorId: string) {
   return actor;
 }
 const hash = (input: unknown) => createHash('sha256').update(JSON.stringify(input)).digest('hex');
-export function serializeDemand(row: typeof demands.$inferSelect): DemandRecord { return { id: row.id, snapshot: row.snapshot, version: row.version, businessDate: row.businessDate, weekStartDate: row.weekStartDate, weekEndDate: row.weekEndDate, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() }; }
+export function serializeDemand(row: typeof demands.$inferSelect): DemandRecord { return { id: row.id, lifecycle: row.lifecycle as DemandRecord['lifecycle'], lifecyclePending: row.lifecyclePending, snapshot: row.snapshot, version: row.version, businessDate: row.businessDate, weekStartDate: row.weekStartDate, weekEndDate: row.weekEndDate, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() }; }
 export function serializeShipment(row: typeof shipmentRevisions.$inferSelect): ShipmentRevision { return { ...row, source: row.source as ShipmentRevision['source'], createdAt: row.createdAt.toISOString() }; }
 const serializeBatch = (row: typeof weeklyBatches.$inferSelect): WeeklyBatch => ({ ...row, sortMode: row.sortMode as WeeklyBatch['sortMode'], createdAt: row.createdAt.toISOString() });
 const serializeConfirmation = (row: typeof groupConfirmations.$inferSelect): GroupConfirmation => ({ ...row, createdAt: row.createdAt.toISOString() });
@@ -29,7 +30,7 @@ async function groupRecord(tx: BatchTx, row: typeof subBatches.$inferSelect): Pr
   const members = await tx.select({ demandId: subBatchMembers.demandId }).from(subBatchMembers).where(and(eq(subBatchMembers.groupId, row.id), eq(subBatchMembers.active, true))).orderBy(asc(subBatchMembers.demandId));
   let demandIds = members.map((m) => m.demandId);
   if (!demandIds.length && row.status === 'superseded') { const [historical] = await tx.select().from(subBatchRevisions).where(eq(subBatchRevisions.groupId,row.id)).orderBy(desc(subBatchRevisions.version)).limit(1); demandIds = historical?.snapshot.demandIds ?? []; }
-  return { ...row, status: row.status as SubBatchRecord['status'], demandIds, frozenAt: row.frozenAt?.toISOString() ?? null, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
+  return { ...row, lifecycle: row.lifecycle as SubBatchRecord['lifecycle'], status: row.status as SubBatchRecord['status'], demandIds, frozenAt: row.frozenAt?.toISOString() ?? null, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
 }
 async function operation(actorId: string, operationId: string, action: string, input: unknown, execute: (tx: BatchTx) => Promise<Omit<BatchMutationResult, 'operationId' | 'replayed'>>, auditDetails: Record<string, string> = {}) {
   const requestHash = hash({ action, input });
@@ -39,6 +40,7 @@ async function operation(actorId: string, operationId: string, action: string, i
     const [existing] = await tx.select().from(batchOperations).where(eq(batchOperations.operationId, operationId));
     if (existing) {
       if (existing.actorId !== actorId || existing.requestHash !== requestHash) throw new BatchError('OPERATION_CONFLICT', 409, '操作编号已用于其他请求。');
+      if (existing.result.purged) throw new BatchError('RESOURCE_PURGED', 404, '原记录已永久删除，不能重放建立。');
       return { ...existing.result, replayed: true } as BatchMutationResult;
     }
     if(['sub_batch.members','sub_batch.merge','sub_batch.split','sub_batch.move','sub_batch.correction'].includes(action)){
@@ -51,7 +53,7 @@ async function operation(actorId: string, operationId: string, action: string, i
           const values=sql.join(batchIds.map((id)=>sql`${id}::uuid`),sql`,`);
           await tx.execute(sql`SELECT id FROM shipping_run WHERE id IN (SELECT shipping_run_id FROM weekly_batch WHERE id IN (${values}) UNION SELECT m.run_id FROM shipping_ticket_member m JOIN sub_batch g ON g.id=m.group_id WHERE g.batch_id IN (${values})) ORDER BY id FOR UPDATE`);
           await tx.select({id:weeklyBatches.id}).from(weeklyBatches).where(inArray(weeklyBatches.id,batchIds)).orderBy(asc(weeklyBatches.id)).for('update');
-          const references=await tx.select({runId:shippingTicketMembers.runId}).from(shippingTicketMembers).where(inArray(shippingTicketMembers.groupId,ids));
+          const references=await tx.select({runId:shippingTicketMembers.runId}).from(shippingTicketMembers).where(and(inArray(shippingTicketMembers.groupId,ids),isNull(shippingTicketMembers.releasedAt)));
           for(const runId of [...new Set(references.map((reference)=>reference.runId))].sort())await createRunBatchInTx(tx,runId,actorId);
         }
       }
@@ -73,19 +75,21 @@ export async function lockBatchRunScopesInTx(tx: BatchTx, batchId: string) {
     UNION SELECT m.run_id FROM shipping_ticket_member m JOIN sub_batch g ON g.id=m.group_id WHERE g.batch_id=${batchId}::uuid
   ) ORDER BY id FOR UPDATE`);
 }
-async function lockBatch(tx: BatchTx, batchId: string, version?: number) {
+async function lockBatch(tx: BatchTx, batchId: string, version?: number, sharedGroup = false) {
   await lockBatchRunScopesInTx(tx, batchId);
   const [batch] = await tx.select().from(weeklyBatches).where(eq(weeklyBatches.id, batchId)).for('update');
   if (!batch) throw new BatchError('NOT_FOUND', 404, '处理批次不存在。');
+  if (batch.shippingRunId && !sharedGroup) await assertLifecycleActiveInTx(tx, 'run', batch.shippingRunId);
   if (version !== undefined && batch.version !== version) throw new BatchError('VERSION_CONFLICT', 409, '处理批次已经变化，请刷新。', { currentVersion: batch.version });
   return batch;
 }
 async function lockGroup(tx: BatchTx, groupId: string, version?: number, allowFrozen = false) {
   const [initial] = await tx.select().from(subBatches).where(eq(subBatches.id, groupId));
   if (!initial) throw new BatchError('NOT_FOUND', 404, '子批次不存在。');
-  const batch = await lockBatch(tx, initial.batchId);
+  const batch = await lockBatch(tx, initial.batchId, undefined, true);
   const [group] = await tx.select().from(subBatches).where(eq(subBatches.id, groupId)).for('update');
   if (!group) throw new BatchError('NOT_FOUND', 404, '子批次不存在。');
+  await assertLifecycleActiveInTx(tx, 'group', groupId);
   if (version !== undefined && group.version !== version) throw new BatchError('VERSION_CONFLICT', 409, '子批次已经变化，请刷新。', { currentVersion: group.version });
   if (group.status === 'superseded') throw new BatchError('GROUP_SUPERSEDED', 409, '子批次已经被更正版本替代。');
   if ((group.frozenAt || group.status === 'frozen') && !allowFrozen) throw new BatchError('GROUP_FROZEN', 409, '子批次已导出或打印，请发起更正。');
@@ -110,7 +114,7 @@ async function setMembers(tx: BatchTx, group: typeof subBatches.$inferSelect, ro
   for (const row of [...rows].sort((a,b)=>a.id.localeCompare(b.id))) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`shipping-demand:${row.id}`},0))`);
   const occupied = await tx.select().from(subBatchMembers).where(and(eq(subBatchMembers.active, true), inArray(subBatchMembers.demandId, rows.map((r) => r.id))));
   if (occupied.some((m) => m.groupId !== group.id)) throw new BatchError('MEMBER_ALREADY_GROUPED', 409, '需求已属于其他有效批次。', { demandIds: occupied.filter((m) => m.groupId !== group.id).map((m) => m.demandId) });
-  const ticketMembers = await tx.select().from(shippingTicketMembers).where(inArray(shippingTicketMembers.demandId, rows.map((r)=>r.id)));
+  const ticketMembers = await tx.select().from(shippingTicketMembers).where(and(inArray(shippingTicketMembers.demandId, rows.map((r)=>r.id)), isNull(shippingTicketMembers.releasedAt)));
   const [scope] = await tx.select().from(weeklyBatches).where(eq(weeklyBatches.id, group.batchId));
   if (scope?.shippingRunId && ticketMembers.some((member)=>member.runId !== scope.shippingRunId)) throw new BatchError('MEMBER_ALREADY_SHIPPED',409,'需求已属于其他发货次。');
   await tx.update(subBatchMembers).set({ active: false }).where(and(eq(subBatchMembers.groupId, group.id), eq(subBatchMembers.active, true)));
@@ -119,10 +123,11 @@ async function setMembers(tx: BatchTx, group: typeof subBatches.$inferSelect, ro
 
 export async function assertMutableBatchArrangementInTx(tx: BatchTx, batchId: string, groupId?:string) {
   const [scope] = await tx.select().from(weeklyBatches).where(eq(weeklyBatches.id,batchId));
-  const references = await tx.select({ runId: shippingTicketMembers.runId }).from(shippingTicketMembers).innerJoin(subBatches,eq(subBatches.id,shippingTicketMembers.groupId)).where(and(eq(subBatches.batchId,batchId),groupId?eq(subBatches.id,groupId):undefined));
-  const ids = [...new Set([scope?.shippingRunId,...references.map((m)=>m.runId)].filter((id):id is string=>Boolean(id)))];
+  const references = await tx.select({ runId: shippingTicketMembers.runId }).from(shippingTicketMembers).innerJoin(subBatches,eq(subBatches.id,shippingTicketMembers.groupId)).where(and(eq(subBatches.batchId,batchId),isNull(shippingTicketMembers.releasedAt),groupId?eq(subBatches.id,groupId):undefined));
+  const ids = [...new Set([...(references.length ? [] : [scope?.shippingRunId]),...references.map((m)=>m.runId)].filter((id):id is string=>Boolean(id)))];
   if (!ids.length) throw new BatchError('SHIPPING_RUN_REQUIRED',409,'请先将历史批次关联到发货次，再调整发货安排。');
   const runs = await tx.select().from(shippingRuns).where(inArray(shippingRuns.id,ids));
+  if (runs.some((run)=>run.lifecycle && run.lifecycle!=='active' || run.lifecyclePending)) throw new BatchError('SHIPPING_LIFECYCLE_INACTIVE',409,'关联发货次已取消、删除或正在处理生命周期操作。');
   if (runs.some((run)=>run.membershipFrozenAt)) throw new BatchError('SHIPPING_RUN_FROZEN',409,'本次发货安排已冻结，请先发起发货次更正。');
   if (runs.some((run)=>['queued','running'].includes(run.status))) throw new BatchError('SHIPPING_RUN_BUSY',409,'本次发货正在整理，请完成后调整安排。');
   const pending = await tx.select({id:batchExports.id}).from(batchExports).where(and(inArray(batchExports.status,['queued','running']),or(sql`${batchExports.projection}->>'shippingRunId' IN (${sql.join(ids.map((id)=>sql`${id}`),sql`,`)})`,sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${batchExports.groupIds}) item WHERE item IN (SELECT id::text FROM sub_batch WHERE batch_id=${batchId}::uuid ${groupId?sql`AND id=${groupId}::uuid`:sql``}))`))).limit(1);
@@ -132,6 +137,7 @@ export async function assertMutableBatchArrangementInTx(tx: BatchTx, batchId: st
 export async function createRunBatchInTx(tx: BatchTx, runId: string, actorId: string): Promise<{batchId:string}> {
   const [run] = await tx.select().from(shippingRuns).where(eq(shippingRuns.id,runId)).for('update');
   if (!run) throw new BatchError('NOT_FOUND',404,'发货次不存在。');
+  if (run.lifecycle && run.lifecycle !== 'active' || run.lifecyclePending) throw new BatchError('SHIPPING_LIFECYCLE_INACTIVE',409,'发货次已取消、删除或正在处理生命周期操作。');
   const [existing] = await tx.select().from(weeklyBatches).where(eq(weeklyBatches.shippingRunId,runId));
   const legacyCodes=await tx.select({prefix:allocationCodes.prefix}).from(allocationCodes).where(sql`${allocationCodes.groupId} IN (SELECT group_id FROM shipping_ticket_member WHERE run_id=${runId}::uuid)`);
   const reserved=legacyCodes.reduce((last,{prefix})=>/^[A-Z]+$/.test(prefix)?Math.max(last,[...prefix].reduce((value,char)=>value*26+char.charCodeAt(0)-64,0)):last,0);
@@ -160,7 +166,7 @@ export async function bindLegacyGroupToRunInTx(tx:BatchTx,batchId:string,existin
   const {group}=await lockGroup(tx,existingGroupId,input.expectedGroupVersion);
   const [sync]=await tx.select({id:batchSyncRuns.id}).from(batchSyncRuns).where(and(eq(batchSyncRuns.subBatchId,existingGroupId),inArray(batchSyncRuns.status,['queued','running']))).limit(1);
   if(sync)throw new BatchError('SYNC_ACTIVE',409,'历史批次正在同步，请完成后关联发货次。');
-  const linked=await tx.select({id:shippingTicketMembers.id}).from(shippingTicketMembers).where(eq(shippingTicketMembers.groupId,existingGroupId)).limit(1);
+  const linked=await tx.select({id:shippingTicketMembers.id}).from(shippingTicketMembers).where(and(eq(shippingTicketMembers.groupId,existingGroupId),isNull(shippingTicketMembers.releasedAt))).limit(1);
   if(linked.length)throw new BatchError('GROUP_ALREADY_ASSIGNED',409,'该批次已有发货次归属，请打开原发货次。');
   const previous=await groupRecord(tx,group);
   if(previous.demandIds.length!==input.demandIds.length||previous.demandIds.some((id)=>!input.demandIds.includes(id)))throw new BatchError('GROUP_SCOPE_MISMATCH',422,'关联历史批次必须包含其全部当前成员。');
@@ -174,28 +180,28 @@ export async function bindLegacyGroupToRunInTx(tx:BatchTx,batchId:string,existin
 }
 async function refreshShippingGroupLinksInTx(tx:BatchTx,groupIds:string[],addMembers=false) {
   if(!groupIds.length)return;
-  const members=await tx.select().from(shippingTicketMembers).where(inArray(shippingTicketMembers.groupId,groupIds));
+  const members=await tx.select().from(shippingTicketMembers).where(and(inArray(shippingTicketMembers.groupId,groupIds),isNull(shippingTicketMembers.releasedAt)));
   if(!members.length)return;
   const ids=members.flatMap((member)=>member.demandId?[member.demandId]:[]);
   const active=ids.length?await tx.select().from(subBatchMembers).where(and(inArray(subBatchMembers.demandId,ids),eq(subBatchMembers.active,true))):[];
-  for(const member of members){const current=active.find((entry)=>entry.demandId===member.demandId);if(current)await tx.update(shippingTicketMembers).set({groupId:current.groupId}).where(eq(shippingTicketMembers.id,member.id));else await tx.delete(shippingTicketMembers).where(eq(shippingTicketMembers.id,member.id));}
+  for(const member of members){const current=active.find((entry)=>entry.demandId===member.demandId);if(current)await tx.update(shippingTicketMembers).set({groupId:current.groupId}).where(eq(shippingTicketMembers.id,member.id));else await tx.update(shippingTicketMembers).set({releasedAt:new Date()}).where(eq(shippingTicketMembers.id,member.id));}
   const current=addMembers?await tx.select({membership:subBatchMembers,demand:demands}).from(subBatchMembers).innerJoin(demands,eq(demands.id,subBatchMembers.demandId)).where(and(inArray(subBatchMembers.groupId,groupIds),eq(subBatchMembers.active,true))):[];
   for(const {membership,demand} of current){
-    const [already]=await tx.select({id:shippingTicketMembers.id}).from(shippingTicketMembers).where(eq(shippingTicketMembers.demandId,demand.id));if(already)continue;
+    const [already]=await tx.select({id:shippingTicketMembers.id}).from(shippingTicketMembers).where(and(eq(shippingTicketMembers.demandId,demand.id),isNull(shippingTicketMembers.releasedAt)));if(already)continue;
     const anchors=members.filter((member)=>member.groupId===membership.groupId),tickets=[...new Set(anchors.map((member)=>member.ticketId))];
     if(tickets.length!==1)throw new BatchError('TICKET_REQUIRED',409,'追加需求须选择明确的发货票，请使用加入批次入口。');
     const anchor=anchors[0]!;const ticketMembers=await tx.select({order:shippingTicketMembers.inputOrder}).from(shippingTicketMembers).where(eq(shippingTicketMembers.ticketId,anchor.ticketId));
     await tx.insert(shippingTicketMembers).values({id:randomUUID(),runId:anchor.runId,ticketId:anchor.ticketId,demandId:demand.id,fba:demand.fba,sid:demand.sid,inputOrder:ticketMembers.reduce((last,item)=>Math.max(last,item.order),0)+1,groupId:membership.groupId});
   }
-  for(const ticketId of new Set(members.map((member)=>member.ticketId))){const [remaining]=await tx.select({id:shippingTicketMembers.id}).from(shippingTicketMembers).where(eq(shippingTicketMembers.ticketId,ticketId)).limit(1);if(!remaining)throw new BatchError('EMPTY_TICKET',422,'调整后发货票不能为空，请保留至少一个货件。');}
   for(const runId of [...new Set(members.map((member)=>member.runId))].sort()){
     const [run]=await tx.select().from(shippingRuns).where(eq(shippingRuns.id,runId));if(!run)continue;
+    if(run.lifecycle && run.lifecycle!=='active' || run.lifecyclePending)continue;
     const operations=Object.fromEntries(Object.entries(run.checkpoint.operations).filter(([key])=>!groupIds.some((id)=>key===`confirm:${id}`||key===`sync:${id}`)));
     await tx.update(shippingRuns).set({version:run.version+1,status:run.origin==='manual'?'draft':'needs_review',stage:'sync',issues:[],error:null,checkpoint:{...run.checkpoint,operations},updatedAt:new Date()}).where(eq(shippingRuns.id,runId));
   }
 }
 async function requireSameOccurrenceInTx(tx:BatchTx,leftBatchId:string,rightBatchId:string,leftGroupId:string,rightGroupId:string){
-  const runIds=async(batchId:string,groupId:string)=>{const [scope]=await tx.select().from(weeklyBatches).where(eq(weeklyBatches.id,batchId));const linked=await tx.select({runId:shippingTicketMembers.runId}).from(shippingTicketMembers).where(eq(shippingTicketMembers.groupId,groupId));return [...new Set([scope?.shippingRunId,...linked.map((entry)=>entry.runId)].filter(Boolean))];};
+  const runIds=async(batchId:string,groupId:string)=>{const [scope]=await tx.select().from(weeklyBatches).where(eq(weeklyBatches.id,batchId));const linked=await tx.select({runId:shippingTicketMembers.runId}).from(shippingTicketMembers).where(and(eq(shippingTicketMembers.groupId,groupId),isNull(shippingTicketMembers.releasedAt)));return [...new Set([scope?.shippingRunId,...linked.map((entry)=>entry.runId)].filter(Boolean))];};
   const left=await runIds(leftBatchId,leftGroupId),right=await runIds(rightBatchId,rightGroupId);
   if(left.length!==1||right.length!==1||left[0]!==right[0])throw new BatchError('SHIPPING_RUN_SCOPE_MISMATCH',422,'只能调整同一次发货内的处理组。');
 }
@@ -261,6 +267,7 @@ export async function replayRetiredBatchOperation(actorId:string,operationId:str
     const [existing]=await tx.select().from(batchOperations).where(eq(batchOperations.operationId,operationId));
     if(!existing)throw new BatchError('LEGACY_FLOW_RETIRED',409,'旧版建立流程已停用，原请求尚未执行，请保留需求选择并改用发货次建立。');
     if(existing.actorId!==actorId||existing.requestHash!==hash({action,input}))throw new BatchError('OPERATION_CONFLICT',409,'操作编号已用于其他请求。');
+    if(existing.result.purged)throw new BatchError('RESOURCE_PURGED',404,'原记录已永久删除，不能重放建立。');
     return {...existing.result,replayed:true} as BatchMutationResult;
   });
 }
@@ -292,7 +299,7 @@ async function detailInTx(tx:BatchTx,groupId:string):Promise<SubBatchDetail>{
   const [confirmation]=row.confirmedVersion?await tx.select().from(groupConfirmations).where(and(eq(groupConfirmations.groupId,groupId),eq(groupConfirmations.groupVersion,row.confirmedVersion))):[];
   const codes=await tx.select().from(allocationCodes).where(eq(allocationCodes.groupId,groupId)).orderBy(asc(allocationCodes.sequence));
   const history=await tx.select().from(subBatchRevisions).where(eq(subBatchRevisions.groupId,groupId)).orderBy(desc(subBatchRevisions.version));
-  const linkedRuns=await tx.select({runId:shippingTicketMembers.runId}).from(shippingTicketMembers).where(eq(shippingTicketMembers.groupId,groupId));
+  const linkedRuns=await tx.select({runId:shippingTicketMembers.runId}).from(shippingTicketMembers).where(and(eq(shippingTicketMembers.groupId,groupId),isNull(shippingTicketMembers.releasedAt)));
   const [scope]=await tx.select({runId:weeklyBatches.shippingRunId}).from(weeklyBatches).where(eq(weeklyBatches.id,group.batchId));
   const shippingRunIds=[...new Set([scope?.runId,...linkedRuns.map((entry)=>entry.runId)].filter((id):id is string=>Boolean(id)))];
   return{group,shippingRunIds,members:memberRows.map(serializeDemand),shipments,issues,confirmation:confirmation?serializeConfirmation(confirmation):null,codes:codes.map(serializeCode),history:history.map((h)=>({...h,createdAt:h.createdAt.toISOString()}))};
@@ -395,7 +402,7 @@ export async function confirmAndAllocateGroup(groupId: string, input: ConfirmAnd
     return { groupId, batchId: batch.id };
   }, { reason: AUTO_CONFIRM_REASON });
 }
-async function confirmedInTx(tx:BatchTx,groupId:string,requireCodes=true){const detail=await detailInTx(tx,groupId);if(!detail.confirmation||!['confirmed','frozen'].includes(detail.group.status))throw new BatchError('CONFIRMATION_REQUIRED',409,'请先确认子批次。');
+async function confirmedInTx(tx:BatchTx,groupId:string,requireCodes=true){const detail=await detailInTx(tx,groupId);if(detail.group.lifecycle && detail.group.lifecycle!=='active' || detail.group.lifecyclePending)throw new BatchError('SHIPPING_LIFECYCLE_INACTIVE',409,'批次已取消、删除或正在处理生命周期操作。');if(!detail.confirmation||!['confirmed','frozen'].includes(detail.group.status))throw new BatchError('CONFIRMATION_REQUIRED',409,'请先确认子批次。');
   if((await loadDemandCancellationsInTx(tx,detail.confirmation.snapshot.members.map((member)=>member.id))).size)throw new BatchError('DEMAND_CANCELLED',409,'确认范围包含已取消需求，不能安排或导出。');
   const snapshot=detail.confirmation.snapshot;if(!detail.group.frozenAt){for(const m of detail.members){const old=snapshot.members.find((d)=>d.id===m.id);const current=detail.shipments.find((s)=>s.demandId===m.id)?.revision;const accepted=snapshot.shipments.find((s)=>s.demandId===m.id)?.revision;if(!old||old.version!==m.version||!current||current.id!==accepted?.id)throw new BatchError('CONFIRMATION_STALE',409,'确认之后需求或候选数据发生变化，请重新确认。');}
   if(detail.issues.some((i)=>i.severity==='error'))throw new BatchError('VALIDATION_BLOCKED',422,'子批次存在阻塞差异。',{issues:detail.issues});}
@@ -406,7 +413,7 @@ export async function getConfirmedGroupInTx(tx:BatchTx,groupId:string,actorId:st
 export async function freezeGroupForExport(tx:BatchTx,groupId:string,confirmationId:string,actorId:string){await requireBatchActor(tx,actorId);const {group}=await lockGroup(tx,groupId,undefined,true);const record=await groupRecord(tx,group);if(record.demandIds.length)await tx.select({id:demands.id}).from(demands).where(inArray(demands.id,record.demandIds)).orderBy(asc(demands.id)).for('share');const confirmed=await confirmedInTx(tx,groupId);if(confirmed.confirmation.id!==confirmationId)throw new BatchError('CONFIRMATION_STALE',409,'导出期间确认版本已变化。');await tx.update(subBatches).set({status:'frozen',frozenAt:group.frozenAt??new Date(),updatedAt:new Date()}).where(eq(subBatches.id,groupId));return confirmed;}
 async function allocateGroupCodesInTx(tx: BatchTx, batchId: string, group: typeof subBatches.$inferSelect, detail: Awaited<ReturnType<typeof confirmedInTx>>, nextPrefix: number) {
   const [parent] = await tx.select().from(weeklyBatches).where(eq(weeklyBatches.id,batchId));
-  const linked = await tx.select({runId:shippingTicketMembers.runId}).from(shippingTicketMembers).where(eq(shippingTicketMembers.groupId,group.id));
+  const linked = await tx.select({runId:shippingTicketMembers.runId}).from(shippingTicketMembers).where(and(eq(shippingTicketMembers.groupId,group.id),isNull(shippingTicketMembers.releasedAt)));
   const runIds=[...new Set([parent?.shippingRunId,...linked.map((entry)=>entry.runId)].filter((id):id is string=>Boolean(id)))].sort();
   let allocationBatchId=batchId;
   const occurrenceScopes:Array<typeof weeklyBatches.$inferSelect>=[];
@@ -463,7 +470,7 @@ export async function moveMembers(groupId:string,input:{operationId:string;expec
   await tx.update(subBatchMembers).set({active:false}).where(and(inArray(subBatchMembers.groupId,[groupId,target.id]),eq(subBatchMembers.active,true)));await setMembers(tx,group,sourceRows);await setMembers(tx,target,targetRows);await invalidateCodes(tx,groupId);await invalidateCodes(tx,target.id);await revise(tx,group,actorId,'move_out',input.reason,true);await revise(tx,target,actorId,'move_in',input.reason,true);if(target.batchId!==batch.id)await tx.update(weeklyBatches).set({version:sql`${weeklyBatches.version}+1`}).where(eq(weeklyBatches.id,target.batchId));await tx.update(weeklyBatches).set({version:batch.version+1}).where(eq(weeklyBatches.id,batch.id));return{groupIds:[groupId,target.id],batchId:batch.id};});}
 
 export async function correctGroup(groupId:string,input:{operationId:string;expectedVersion:number;reason:string},actorId:string){return operation(actorId,input.operationId,'sub_batch.correction',{groupId,...input},async(tx)=>{
-  const {group,batch}=await lockGroup(tx,groupId,input.expectedVersion,true);const [linked]=await tx.select({id:shippingTicketMembers.id}).from(shippingTicketMembers).where(eq(shippingTicketMembers.groupId,groupId)).limit(1);if(batch.shippingRunId||linked)await assertMutableBatchArrangementInTx(tx,batch.id,group.id);if(!group.frozenAt)throw new BatchError('CORRECTION_NOT_REQUIRED',422,'未冻结子批次可直接调整。');const record=await groupRecord(tx,group);const rows=await selectedDemands(tx,batch,record.demandIds,undefined,false);
+  const {group,batch}=await lockGroup(tx,groupId,input.expectedVersion,true);const [linked]=await tx.select({id:shippingTicketMembers.id}).from(shippingTicketMembers).where(and(eq(shippingTicketMembers.groupId,groupId),isNull(shippingTicketMembers.releasedAt))).limit(1);if(batch.shippingRunId||linked)await assertMutableBatchArrangementInTx(tx,batch.id,group.id);if(!group.frozenAt)throw new BatchError('CORRECTION_NOT_REQUIRED',422,'未冻结子批次可直接调整。');const record=await groupRecord(tx,group);const rows=await selectedDemands(tx,batch,record.demandIds,undefined,false);
   const[newGroup]=await tx.insert(subBatches).values({id:randomUUID(),batchId:batch.id,name:`${group.name}（更正）`,position:group.position,correctionOfId:groupId,actualShipDate:group.actualShipDate,createdBy:actorId}).returning();
   await tx.update(subBatchMembers).set({active:false}).where(and(eq(subBatchMembers.groupId,groupId),eq(subBatchMembers.active,true)));await setMembers(tx,newGroup!,rows);await saveRevision(tx,newGroup!,actorId,'correction',input.reason);
   const[old]=await tx.update(subBatches).set({version:group.version+1,status:'superseded',replacedById:newGroup!.id,updatedAt:new Date()}).where(eq(subBatches.id,groupId)).returning();await saveRevision(tx,old!,actorId,'replaced',input.reason);await tx.update(weeklyBatches).set({version:batch.version+1}).where(eq(weeklyBatches.id,batch.id));return{groupId:newGroup!.id,batchId:batch.id};});}

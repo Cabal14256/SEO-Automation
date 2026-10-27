@@ -68,7 +68,7 @@ async function availableDemands(): Promise<Choice[]> {
   const choices = new Map<string, Choice>();
   for (let page = 1; ; page++) {
     const result = await api.demands(demandWorkspaceQuerySchema.parse({ grouping: 'ungrouped', lifecycle: 'active', pageBy: 'demand', page, pageSize: 100 }));
-    for (const row of result.rows) if (!row.groupId && row.lifecycle !== 'cancelled') choices.set(row.demandId, { id: row.demandId, version: row.currentDemandVersion, businessDate: row.businessDate, snapshot: { sid: row.sid, fba: row.fba, shop: row.shop, country: row.country, channel: row.channel, destinationFc: row.destinationFc, referenceQuantity: row.referenceQuantity, notes: row.notes, subBatchName: null, destinationAddress: row.destinationAddress } });
+    for (const row of result.rows) if (!row.groupId && row.lifecycle === 'active' && !row.lifecyclePending) choices.set(row.demandId, { id: row.demandId, version: row.currentDemandVersion, businessDate: row.businessDate, snapshot: { sid: row.sid, fba: row.fba, shop: row.shop, country: row.country, channel: row.channel, destinationFc: row.destinationFc, referenceQuantity: row.referenceQuantity, notes: row.notes, subBatchName: null, destinationAddress: row.destinationAddress } });
     if (page * result.pageSize >= result.demandTotal) return [...choices.values()];
   }
 }
@@ -148,8 +148,8 @@ function BatchWizardSession(props: BatchWizardProps & { storageKey: string }) {
   }, onError: (error) => { if (certainFailure(error)) { update({ legacy: null, step: 1 }); setNotice(`旧请求未执行：${messageOf(error)}。请按月份和发货次重新核对。`); } } });
   const locked = create.isPending || Boolean(draft.pending || draft.legacy);
   const edit = (change: Partial<Draft>) => { if (!locked) { create.reset(); update({ ...change, confirmed: false }); } };
-  const existing = runs.data?.items.filter((item) => !item.membershipFrozenAt && !['queued', 'running'].includes(item.status)) ?? [];
-  const runValid = draft.mode === 'new' ? !dateInputError(draft.numberingDate, { required: true }) : Boolean(run.data && !run.isError && !run.isFetching && !run.data.run.membershipFrozenAt && !['queued', 'running'].includes(run.data.run.status));
+  const existing = runs.data?.items.filter((item) => (item.lifecycle ?? 'active') === 'active' && !item.lifecyclePending && !item.membershipFrozenAt && !['queued', 'running'].includes(item.status)) ?? [];
+  const runValid = draft.mode === 'new' ? !dateInputError(draft.numberingDate, { required: true }) : Boolean(run.data && !run.isError && !run.isFetching && (run.data.run.lifecycle ?? 'active') === 'active' && !run.data.run.lifecyclePending && !run.data.run.membershipFrozenAt && !['queued', 'running'].includes(run.data.run.status));
   const scopeLabel = draft.mode === 'new' ? `${draft.numberingDate.slice(0, 7)} 下一次发货` : run.data ? `${run.data.run.month} 第 ${run.data.run.sequence ?? '待分配'} 次发货` : '请选择发货次';
   const available = props.existingGroupId ? legacyGroup.data?.members ?? [] : pool.data ?? []; const byId = new Map(available.map((entry) => [entry.id, entry])); const anchor = draft.selected[0];
   const compatible = (entry: Choice) => !anchor || sameScope(anchor, entry);

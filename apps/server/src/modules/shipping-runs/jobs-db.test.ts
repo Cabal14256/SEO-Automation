@@ -148,7 +148,7 @@ describe.runIf(process.env.SHIPPING_RUN_DB_TEST === '1')('shipping pipeline with
     expect(ready.run.status).toBe('ready'); expect(ready.run.sequence).toBe(draft.run.sequence); expect(ready.tickets[0]!.number).toBe(draft.tickets[0]!.number);
     expect(state.lookupCalls).toBe(0);
   });
-  it('releases a cancelled demand claim and atomically refuses to empty its final ticket', async () => {
+  it('releases cancelled demand claims, retains historical members and permits an empty final ticket', async () => {
     const ids = [await manualDemand(), await manualDemand()];
     const run = await createManualShippingRun({ operationId: randomUUID(), numberingDate: '2030-07-23', name: '成员取消', reason: '核对', demandIds: ids, expectedDemandVersions: Object.fromEntries(ids.map((id) => [id, 1])) }, actor);
     const groupId = run.tickets[0]!.members[0]!.groupId!;
@@ -162,10 +162,12 @@ describe.runIf(process.env.SHIPPING_RUN_DB_TEST === '1')('shipping pipeline with
     await cancel(ids[0]!);
     const current = await getShippingRun(run.run.id, actor);
     expect(current.run.version).toBeGreaterThan(run.run.version); expect(current.tickets[0]!.members.map((member) => member.demandId)).toEqual([ids[1]]);
-    expect(await db.select().from(shippingTicketMembers).where(eq(shippingTicketMembers.demandId, ids[0]!))).toHaveLength(0);
-    await expect(cancel(ids[1]!)).rejects.toMatchObject({ code: 'EMPTY_TICKET' });
-    expect((await getShippingRun(run.run.id, actor)).tickets[0]!.members.map((member) => member.demandId)).toEqual([ids[1]]);
-    expect((await getSubBatchDetail(groupId, actor)).members.map((member) => member.id)).toEqual([ids[1]]);
+    const released = await db.select().from(shippingTicketMembers).where(eq(shippingTicketMembers.demandId, ids[0]!));
+    expect(released).toHaveLength(1); expect(released[0]!.releasedAt).not.toBeNull();
+    await cancel(ids[1]!);
+    expect((await getShippingRun(run.run.id, actor)).tickets).toEqual([]);
+    expect((await getSubBatchDetail(groupId, actor)).members).toEqual([]);
+    expect((await getShipmentReport(actor, { shippingRunId: run.run.id })).confirmations).toEqual([]);
   });
   async function fixture(tickets: Array<Array<{ fba?: string; country?: string }>> = [[{}]], month = '2026-10') {
     const fileId = randomUUID(), importId = randomUUID(), parseRunId = randomUUID();

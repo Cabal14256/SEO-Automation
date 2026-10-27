@@ -1,6 +1,12 @@
 # 发票与单据 API
 
-更新：2026-10-25。共享校验契约为 `packages/contracts/src/documents.ts`。所有端点均以 `/api/v1` 为前缀，仅有效管理员可访问；写操作校验同源、`operationId` 幂等和乐观版本。409 表示版本/占用冲突，422 表示参数或业务阻塞。
+更新：2026-10-28。共享校验契约为 `packages/contracts/src/documents.ts`。所有端点均以 `/api/v1` 为前缀，仅有效管理员可访问；写操作校验同源、`operationId` 幂等和乐观版本。409 表示版本/占用冲突，422 表示参数或业务阻塞。
+
+## 发货来源作废与历史文件
+
+发货次、内部批次或单条 FBA 的取消／删除使用[统一生命周期 API](shipping-lifecycle.md)，与下文单据自身的取消、自动任务删除分开。已发布／冻结来源允许本地作废；涉及一条 FBA 即使相关完整单据及整批文件来源失效，待处理任务停止，不生成部分文件，不把剩余 FBA 静默保留为有效合票。
+
+来源恢复不会自动恢复旧确认、复核及下游有效性，须重新核对、生成与复核。已发布单张／整批文件保留原字节和映射，可从授权下载入口读取并核验哈希；自动任务及单据历史下载均按不可变发布映射读取归档，不以实时来源仍有效为条件。列表中的当前有效性、生成和复核继续核对实时来源。失效历史文件不能用于新复核，取消不代表领星等外部单据已取消，也不删除其外部事实。
 
 ## 当前发票规则 v2
 
@@ -47,7 +53,7 @@
 | POST `/documents/automations/:id/supplement` | `operationId,expectedVersion,documentVersions,values`；documentVersions 为单据 ID→版本，values 为 `{id,value}` 数组；原子保存并安排整批复检，返回 `{job,replayed}` |
 | POST `/documents/automations/:id/retry` | `operationId,expectedVersion` 及可选 `itemIds`；重新安排检查，仍须全部范围通过才生成；返回 `{job,replayed}` |
 | POST `/documents/automations/:id/delete` | `operationId,expectedVersion,reason`；取消并软删除当前账号的指定任务，不依赖队列可用；返回 `{automationId,version,deleted,deletedAt,cancelledDocumentIds,preservedDocumentIds,replayed}` |
-| GET `/documents/automations/:id/download` | 下载已完整发布且来源仍有效的一份合并 XLSX；不同表头按 Sheet 保留 |
+| GET `/documents/automations/:id/download` | 授权下载完整发布的一份归档合并 XLSX，核验不可变发布映射及哈希；来源失效不改变原字节，不同表头按 Sheet 保留 |
 | GET/POST `/documents` | 搜索、筛选及分页列表，或建立草稿；创建携带 shippingRunId、demandIds、title、fields |
 | GET `/documents/:id` | 当前单据、当前修订校验及导出记录；失效来源显示 stale |
 | GET `/documents/:id/history` | 修订、校验及绑定文件哈希的复核历史 |
@@ -75,7 +81,7 @@
 
 自动任务删除使用与后台 worker 相同的排他锁；正在处理时返回 `DOCUMENT_AUTOMATION_BUSY`（409），任务版本变化返回 `VERSION_CONFLICT`（409），不能在后台步骤中途取消并释放占用。已请求的独立单票导出仍在排队或运行时返回 DOCUMENT_EXPORT_BUSY（409），须等待其结束，避免删除后仍产生新文件。成功后保存删除时间、操作人、原因和审计记录，清除待续跑意图，最近任务列表隐藏该任务；原任务读取、缺项、补充、续跑及整批下载均返回 404，延迟队列与恢复扫描也不再运行该任务。相同操作号和原请求重放返回原结果，不重复取消或增加版本。
 
-删除只取消能以本任务确定建票操作的已提交幂等结果证明归属、仍为相同货件范围及检查点版本、没有任何导出记录且未被其他任务引用的草稿，并仅释放这些草稿的货件占用。建票成功但响应丢失的草稿也按该证明检查。接入的既有草稿、归属不明、后续版本已变化、有导出记录或被其他任务使用的单据保留，分别返回 cancelledDocumentIds / preservedDocumentIds 供核对。已有文件、单据历史、来源归档和冻结事实不删除；历史单据的原导出入口仍可在整份范围及引用有效时访问已有文件，不通过已删除任务下载。
+删除只取消能以本任务确定建票操作的已提交幂等结果证明归属、仍为相同货件范围及检查点版本、没有任何导出记录且未被其他任务引用的草稿，并仅释放这些草稿的货件占用。建票成功但响应丢失的草稿也按该证明检查。接入的既有草稿、归属不明、后续版本已变化、有导出记录或被其他任务使用的单据保留，分别返回 cancelledDocumentIds / preservedDocumentIds 供核对。已有文件、单据历史、来源归档和冻结事实不删除；历史单据从原已发布导出入口授权读取归档字节，允许来源已失效，不通过已删除任务下载，也不据此认定文件当前有效。
 
 GET `/documents` 接受 `page`（默认 1）、`pageSize`（默认 20，最多 100）、`q`、`weekStartDate` 和 `status`。关键词去除首尾空格，最多 200 字，忽略英文大小写，按字面匹配单据名称、单据 ID、订单号及成员 FBA／店铺；`%`、`_` 不作为通配符。来源周按 `YYYY-MM-DD` 精确匹配。状态默认 `active`，排除已取消及被替代单据；`all` 查询全部，或使用 draft、pending_review、approved、returned、stale、cancelled、superseded。状态按当前有效性判断，筛选先于分页，返回 `items,total,page,pageSize` 及规范化条件。取消后的原 ID 仍可读取详情、文件及历史；相同操作号重放不重复取消或增加版本。
 

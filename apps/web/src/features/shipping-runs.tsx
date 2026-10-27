@@ -6,6 +6,7 @@ import { correctShippingRunInputSchema, reportTicketKey, type CorrectShippingRun
 import { api, ApiError } from '../api';
 import { Button, IconButton } from '../components/ui/button';
 import { Input } from '../components/ui/input';
+import { SelectField } from '../components/ui/select';
 import { BatchPagination, BatchTable, downloadBlob, newOperation, QueryError, timestamp, useBatchAction } from './batch-shared';
 import { batchApi } from './batch-api';
 import { ImportDialog } from './import-dialog';
@@ -15,12 +16,14 @@ import { emptyOnlineRow } from './online-import-grid';
 import { UploadPanel, ParseControls, isBusy } from './import-source';
 import { shanghaiToday } from '../components/ui/date-utils';
 import { getReportTicketCodeRanges, getShippingBoxColumns } from './shipping-table-parts';
+import { ShippingLifecycleActions, ShippingLifecyclePending, ShippingRecycleBin, lifecycleLabels } from './shipping-lifecycle';
+import { lifecycleOf, lifecyclePending } from './shipping-lifecycle-api';
 import './shipping-runs.css';
 
 type ShippingDraft = NonNullable<ImportDraftContent['shipping']>;
 const labels: Record<ShippingRun['status'], string> = { draft: '待处理', queued: '排队中', running: '处理中', needs_review: '待处理', ready: '可导出', failed: '失败' };
 const stages: Record<ShippingRun['stage'], string> = { lookup: '补全货件资料', commit: '提交需求', grouping: '建立分票关联', sync: '同步商品与箱数据', confirmation: '校验和分配箱码', ready: '发货表已就绪' };
-const running = (run?: ShippingRun) => run && (run.status === 'queued' || run.status === 'running');
+const running = (run?: ShippingRun) => run && (lifecyclePending(run) || lifecycleOf(run) === 'active' && (run.status === 'queued' || run.status === 'running'));
 const steps = [
   { stage: 'lookup', label: '补全资料' }, { stage: 'commit', label: '保存需求' }, { stage: 'grouping', label: '建立分票' },
   { stage: 'sync', label: '同步商品与箱' }, { stage: 'confirmation', label: '校验与箱码' },
@@ -65,13 +68,18 @@ export function AutomaticShippingRun({ record, active, initial, onChange }: { re
 export function ShippingRunsWorkspace({ active, onCreate }: { active: boolean; onCreate: () => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  const runs = useQuery({ queryKey: ['shipping-runs'], queryFn: shippingRunApi.list, enabled: active, retry: false,
+  const [lifecycle, setLifecycle] = useState('active');
+  const [notice, setNotice] = useState('');
+  const runs = useQuery({ queryKey: ['shipping-runs', lifecycle], queryFn: () => shippingRunApi.listForLifecycle(lifecycle), enabled: active, retry: false,
     refetchInterval: (query) => active && query.state.data?.items.some(running) ? 2000 : false });
+  useEffect(() => { if (runs.data && page > Math.max(1, Math.ceil(runs.data.items.length / 10))) setPage(Math.max(1, Math.ceil(runs.data.items.length / 10))); }, [runs.data, page]);
   return <section className="shipping-run-history" aria-labelledby="shipping-runs-title">
-    <div className="section-heading panel-heading"><div><h2 id="shipping-runs-title">本次发货与票号</h2><p>导入本次所需的 FBA，按空行分票，自动整理到可预览、可导出。</p></div><div className="import-selection-actions"><IconButton type="button" icon={RefreshCw} label="刷新发货记录" loading={runs.isFetching} onClick={() => void runs.refetch()} /><Button type="button" variant="primary" icon={FileSpreadsheet} onClick={onCreate}>导入本次发货</Button></div></div>
-    {runs.isPending ? <p className="list-state" role="status">正在读取发货记录…</p> : runs.isError ? <QueryError error={runs.error} retry={() => void runs.refetch()} /> : !runs.data.items.length ? <p className="mapping-help">点击“导入本次发货”，只填 FBA 并以空行分票即可。</p> : <><BatchTable label="本次发货记录" headers={['编号日期 / 发货次数', '整理进度', '接收时间', '发货表']}>{runs.data.items.slice((page - 1) * 10, page * 10).map((run) => <tr key={run.id}>
+    <div className="section-heading panel-heading"><div><h2 id="shipping-runs-title">本次发货与票号</h2><p>导入本次所需的 FBA，按空行分票，自动整理到可预览、可导出。</p></div><div className="import-selection-actions"><ShippingLifecyclePending active={active} /><ShippingRecycleBin active={active} /><IconButton type="button" icon={RefreshCw} label="刷新发货记录" loading={runs.isFetching} onClick={() => void runs.refetch()} /><Button type="button" variant="primary" icon={FileSpreadsheet} onClick={onCreate}>导入本次发货</Button></div></div>
+    <div className="field shipping-run-history-filter"><label htmlFor="shipping-run-lifecycle">发货记录状态</label><SelectField id="shipping-run-lifecycle" value={lifecycle} onValueChange={(value) => { setLifecycle(value); setPage(1); }} options={[{ value: 'active', label: '当前发货' }, { value: 'cancelled', label: '已取消发货' }, { value: 'all', label: '全部未删除发货' }]} /></div>
+    {notice && <p className="form-note success-note" role="status">{notice}</p>}
+    {runs.isPending ? <p className="list-state" role="status">正在读取发货记录…</p> : runs.isError ? <QueryError error={runs.error} retry={() => void runs.refetch()} /> : !runs.data.items.length ? <p className="mapping-help">{lifecycle === 'active' ? '点击“导入本次发货”，只填 FBA 并以空行分票即可。' : '此范围暂无发货记录。'}</p> : <><BatchTable label="本次发货记录" headers={['编号日期 / 发货次数', '整理进度', '接收时间', '操作']}>{runs.data.items.slice((page - 1) * 10, page * 10).map((run) => <tr key={run.id}>
       <td><strong>{run.numberingDate}</strong><small className="mapping-subtext">{run.sequence ? `${run.month} 第 ${run.sequence} 次发货` : '校验通过后分配次数'}</small></td>
-      <td><span>{labels[run.status]}</span><small className="mapping-subtext">{run.origin === 'manual' && run.status === 'draft' ? '手工批次已保存，待同步核对' : stages[run.stage]}</small>{run.membershipFrozenAt && <small className="mapping-subtext">已发布，成员安排已冻结</small>}{run.error && <small className="mapping-subtext error-note">{run.error.message}</small>}</td><td>{timestamp(run.createdAt)}</td><td><Button type="button" icon={FileSpreadsheet} onClick={() => setSelected(run.id)}>{run.status === 'ready' ? '查看发货表' : '查看进度与处理'}</Button></td>
+      <td><span>{lifecycleOf(run) === 'active' ? labels[run.status] : lifecycleLabels[lifecycleOf(run)]}</span><small className="mapping-subtext">{run.origin === 'manual' && run.status === 'draft' ? '手工批次已保存，待同步核对' : stages[run.stage]}</small>{run.membershipFrozenAt && <small className="mapping-subtext">已发布，成员安排已冻结</small>}{run.error && <small className="mapping-subtext error-note">{run.error.message}</small>}</td><td>{timestamp(run.createdAt)}</td><td><Button type="button" icon={FileSpreadsheet} onClick={() => setSelected(run.id)}>{lifecycleOf(run) !== 'active' ? '查看发货历史' : run.status === 'ready' ? '查看发货表' : '查看进度与处理'}</Button><ShippingLifecycleActions target={{ type: 'run', id: run.id, name: `${run.month} 第 ${run.sequence ?? '待编号'} 次发货`, lifecycle: lifecycleOf(run), lifecyclePending: lifecyclePending(run) }} active={active} disabled={runs.isFetching} changed={(result) => { setSelected(null); setNotice(result.pending ? '已停止本次安排，后台任务正在结束。' : '操作已完成，发货安排与需求范围已更新。'); }} /></td>
     </tr>)}</BatchTable>{runs.data.items.length > 10 && <BatchPagination page={page} pageSize={10} total={runs.data.items.length} change={setPage} />}</>}
     <ImportDialog open={active && Boolean(selected)} title="本次发货表" close={() => setSelected(null)} wide>{selected && <ShippingRunPanel key={selected} id={selected} active={active} />}</ImportDialog>
   </section>;
@@ -86,13 +94,13 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
   const detail = useQuery({ queryKey: ['shipping-run', id], queryFn: () => shippingRunApi.detail(id), enabled: active, retry: false,
     refetchInterval: (query) => active && running(query.state.data?.run) ? 1500 : false });
   const run = detail.data?.run;
-  const report = useQuery({ queryKey: ['shipping-run-report', id, run?.version, run?.status, page], queryFn: () => batchApi.reports({ month: '', region: 'all', page, shippingRunId: id }), enabled: active && Boolean(run?.sequence), retry: false,
+  const report = useQuery({ queryKey: ['shipping-run-report', id, run?.version, run?.status, page], queryFn: () => batchApi.reports({ month: '', region: 'all', page, shippingRunId: id }), enabled: active && Boolean(run?.sequence) && lifecycleOf(run) === 'active' && !lifecyclePending(run), retry: false,
     refetchInterval: active && running(run) ? 2000 : false });
   const exports = useQuery({ queryKey: ['batch-exports', 'shipping-run', id], queryFn: () => batchApi.exports({ shippingRunId: id }), enabled: active, retry: false,
     refetchInterval: (query) => active && query.state.data?.some((item) => item.status === 'queued' || item.status === 'running') ? 1500 : false });
   const completedExports = exports.data?.filter((item) => item.status === 'completed').map((item) => item.id).join(',');
   useEffect(() => { if (completedExports) void client.invalidateQueries({ queryKey: ['shipping-run-report', id] }); }, [completedExports, client, id]);
-  const ready = run?.status === 'ready' && Boolean(report.data?.confirmations.length) && !report.isFetching && !report.isError && !report.data?.blocked.length;
+  const ready = run?.status === 'ready' && !lifecyclePending(run) && Boolean(report.data?.confirmations.length) && !report.isFetching && !report.isError && !report.data?.blocked.length;
   const refresh = () => { void detail.refetch(); void report.refetch(); void exports.refetch(); };
   const retry = () => {
     if (!run) return;
@@ -113,6 +121,7 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
   if (detail.isPending) return <p className="list-state" role="status">正在读取本次发货…</p>;
   if (detail.isError) return <QueryError error={detail.error} retry={() => void detail.refetch()} />;
   if (!run || !detail.data) return null;
+  if (lifecycleOf(run) !== 'active' || lifecyclePending(run)) return <section className="shipping-run-process" aria-label="本次发货历史"><h3>{run.month} · 第 {run.sequence ?? '待编号'} 次发货 · {lifecycleLabels[lifecycleOf(run)]}</h3><p>原安排及历史文件保留，当前不能继续整理或生成文件。恢复前会重新核对成员占用。</p><ShippingLifecycleActions target={{ type: 'run', id, name: `${run.month} 第 ${run.sequence ?? '待编号'} 次发货`, lifecycle: lifecycleOf(run), lifecyclePending: lifecyclePending(run) }} active={active} changed={refresh} /><h4>历史文件</h4>{exports.isError ? <QueryError error={exports.error} retry={() => void exports.refetch()} /> : exports.data?.filter((item) => item.fileId).map((item) => <div key={item.id}><span>{timestamp(item.createdAt)} · 历史文件仅供追溯 </span><Button type="button" icon={Download} onClick={() => action.run(`shipping-download-${item.id}`, () => downloadBlob(batchApi.download(item.fileId!), `${run.numberingDate}-${run.sequence}-发货表.xlsx`), '下载已开始。')}>下载 XLSX</Button></div>)}{action.feedback}</section>;
   const runDetail = detail.data;
   const boxes = getShippingBoxColumns(report.data?.maxBoxes, report.data?.boxes);
   const ticketRanges = getReportTicketCodeRanges(report.data);
@@ -140,7 +149,10 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
       : inProgress ? progressCopy[run.stage] : tableReady ? progressCopy.ready : '正在核对发货表，读取完成后即可预览和生成 XLSX。';
   const StatusIcon = hasProblems ? CircleAlert : inProgress || !tableReady ? LoaderCircle : Check;
   return <section className="shipping-run-process" aria-label="本次发货整理结果">
-    <div className="section-heading panel-heading"><div><h3>{run.month} · {run.sequence ? `第 ${run.sequence} 次发货` : '待分配发货次数'}</h3><p className="mapping-help">编号日期 {run.numberingDate}</p></div><Button type="button" icon={RefreshCw} disabled={detail.isFetching} onClick={refresh}>刷新</Button></div>
+    <div className="section-heading panel-heading"><div><h3>{run.month} · {run.sequence ? `第 ${run.sequence} 次发货` : '待分配发货次数'}</h3><p className="mapping-help">编号日期 {run.numberingDate}</p></div><div className="import-selection-actions"><ShippingLifecycleActions target={{ type: 'run', id, name: `${run.month} 第 ${run.sequence ?? '待编号'} 次发货`, lifecycle: lifecycleOf(run), lifecyclePending: lifecyclePending(run) }} active={active} disabled={action.busy} changed={refresh} /><Button type="button" icon={RefreshCw} disabled={detail.isFetching} onClick={refresh}>刷新</Button></div></div>
+    <details className="shipping-run-export-history" open><summary>本次发货导出记录</summary>
+      {exports.isPending ? <p role="status">正在读取导出记录…</p> : exports.isError ? <QueryError error={exports.error} retry={() => void exports.refetch()} /> : !exports.data.length ? <p className="mapping-help">查看发货表后，点击“生成本次发货 XLSX”保存文件。</p> : <BatchTable label="本次发货导出记录" headers={['生成时间', '状态 / 数量', '文件']}>{exports.data.map((item) => <tr key={item.id}><td>{timestamp(item.createdAt)}</td><td>{({ queued: '排队中', running: '生成中', completed: '已生成', failed: '失败', stale: '已过期' } as const)[item.status]} · {item.rowCount} 条商品 / {item.boxCount} 箱{item.error && <small className="mapping-subtext error-note">{item.error}</small>}{!item.valid && item.invalidReason && <small className="mapping-subtext warning-note">{item.invalidReason}</small>}</td><td>{item.fileId && <Button type="button" icon={Download} disabled={action.busy} onClick={() => action.run(`shipping-download-${item.id}`, () => downloadBlob(batchApi.download(item.fileId!), `${run.numberingDate.replaceAll('-', '')}-${run.sequence}-发货表.xlsx`), '下载已开始。')}>下载 XLSX</Button>}</td></tr>)}</BatchTable>}
+    </details>
     <div className={`shipping-run-progress${hasProblems ? ' shipping-run-progress-attention' : ''}`}>
       <div role="status" aria-label="自动整理进度" className="shipping-run-progress-summary">
         <StatusIcon aria-hidden="true" size={20} className={!hasProblems && (inProgress || !tableReady) ? 'motion-spin' : undefined} />
@@ -182,9 +194,6 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
         {report.data.boxes.flatMap((box) => box.items.map((item, index) => <tr key={`${box.boxId}-${index}`}><td><strong>{box.ticketNumber}</strong><small className="mapping-subtext">{box.fba}</small></td><td>箱 {box.boxOrder} · {box.code}</td><td>{item.msku}<small className="mapping-subtext">{item.fnsku} / {item.sku}</small></td><td>{item.quantity}</td><td>{box.weight === null ? '缺失' : `${box.weight} ${box.weightUnit || ''}`}</td><td>{box.length ?? '—'} × {box.width ?? '—'} × {box.height ?? '—'} {box.lengthUnit || ''}</td></tr>))}
       </BatchTable>}
     </>}
-    <details className="shipping-run-export-history"><summary>本次发货导出记录</summary>
-      {exports.isPending ? <p role="status">正在读取导出记录…</p> : exports.isError ? <QueryError error={exports.error} retry={() => void exports.refetch()} /> : !exports.data.length ? <p className="mapping-help">查看发货表后，点击“生成本次发货 XLSX”保存文件。</p> : <BatchTable label="本次发货导出记录" headers={['生成时间', '状态 / 数量', '文件']}>{exports.data.map((item) => <tr key={item.id}><td>{timestamp(item.createdAt)}</td><td>{({ queued: '排队中', running: '生成中', completed: '已生成', failed: '失败', stale: '已过期' } as const)[item.status]} · {item.rowCount} 条商品 / {item.boxCount} 箱{item.error && <small className="mapping-subtext error-note">{item.error}</small>}{!item.valid && item.invalidReason && <small className="mapping-subtext warning-note">{item.invalidReason}</small>}</td><td>{item.fileId && <Button type="button" icon={Download} disabled={action.busy} onClick={() => action.run(`shipping-download-${item.id}`, () => downloadBlob(batchApi.download(item.fileId!), `${run.numberingDate.replaceAll('-', '')}-${run.sequence}-发货表.xlsx`), '下载已开始。')}>下载 XLSX</Button>}</td></tr>)}</BatchTable>}
-    </details>
     <ImportDialog open={active && correcting && run.origin === 'import'} title="修正本次发货清单" close={() => setCorrecting(false)} wide>{correcting && run.importId && run.parseRunId && <ShippingRunCorrection run={run as ShippingRun & { importId: string; parseRunId: string }} active={active} completed={() => { setCorrecting(false); refresh(); }} />}</ImportDialog>
   </section>;
 }

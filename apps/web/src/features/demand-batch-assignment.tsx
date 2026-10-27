@@ -35,10 +35,10 @@ async function loadSelection(ids: string[]) {
   const demands = records.map((record) => record.demand).sort((a, b) => a.snapshot.sid - b.snapshot.sid || a.snapshot.country.localeCompare(b.snapshot.country) || (a.snapshot.channel ?? '').localeCompare(b.snapshot.channel ?? '') || a.snapshot.fba.localeCompare(b.snapshot.fba));
   const owners = new Map(records.flatMap((record) => record.management.groupId && record.management.batchId ? [[record.demand.id, { groupId: record.management.groupId, batchId: record.management.batchId }] as const] : []));
   const list = await shippingRunApi.list();
-  const runs = await bounded(list.items.filter((run) => !run.membershipFrozenAt && !['queued', 'running'].includes(run.status)), (run) => shippingRunApi.detail(run.id));
+  const runs = await bounded(list.items.filter((run) => (run.lifecycle ?? 'active') === 'active' && !run.lifecyclePending && !run.membershipFrozenAt && !['queued', 'running'].includes(run.status)), (run) => shippingRunApi.detail(run.id));
   const refs = runs.flatMap((entry) => entry.tickets.flatMap((ticket) => [...new Set(ticket.members.flatMap((member) => member.groupId ? [member.groupId] : []))].map((groupId) => ({ run: entry.run, ticketId: ticket.id, ticketNumber: ticket.number, groupId }))));
   const groups = await bounded([...new Set(refs.map((entry) => entry.groupId))], batchApi.group);
-  const targets: Target[] = refs.flatMap((ref) => { const detail = groups.find((group) => group.group.id === ref.groupId); return detail && !detail.group.frozenAt && !['frozen', 'superseded'].includes(detail.group.status) ? [{ detail, run: ref.run, ticketId: ref.ticketId, ticketNumber: ref.ticketNumber }] : []; });
+  const targets: Target[] = refs.flatMap((ref) => { const detail = groups.find((group) => group.group.id === ref.groupId); return detail && (detail.group.lifecycle ?? 'active') === 'active' && !detail.group.lifecyclePending && !detail.group.frozenAt && !['frozen', 'superseded'].includes(detail.group.status) ? [{ detail, run: ref.run, ticketId: ref.ticketId, ticketNumber: ref.ticketNumber }] : []; });
   return { demands, owners, targets };
 }
 function readPending(key: string): AppendRequest | null {

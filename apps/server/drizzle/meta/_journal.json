@@ -162,6 +162,13 @@
       "when": 1792917975393,
       "tag": "0022_document_automation_soft_delete",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793115880078,
+      "tag": "0023_shipping_lifecycle",
+      "breakpoints": true
     }
   ]
 }

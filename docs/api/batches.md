@@ -6,6 +6,8 @@ T23恢复配置新增 `LINGXING_REQUESTS_ENABLED`（默认true，严格接受tru
 
 ## 批次工作区列表
 
+2026-10-28：内部组增加独立 `lifecycle=active/cancelled/trashed` 及 `lifecyclePending`；查询可用 `lifecycle=active|cancelled|trashed|all`，默认当前记录。界面“批次”的取消／删除针对 `sub-batches/:id`，不指整个兼容容器。`GET /sub-batches/:id/lifecycle-impact?action=...` 和 `POST /sub-batches/:id/lifecycle/{cancel|trash|restore|purge}` 见[生命周期 API](shipping-lifecycle.md)。取消父批次释放成员安排但保留底层需求；冻结只限制普通编辑，允许通过影响确认本地作废并保留发布历史。
+
 `GET /api/v1/batches/workspace` 返回本地批次摘要，不查询领星、不建立批次，也不读取商品/逐箱大 JSON。共享契约为 `batchWorkspaceQuerySchema`、`batchWorkspaceSchema`。
 
 | 查询参数 | 约束与含义 |

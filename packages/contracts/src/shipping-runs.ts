@@ -5,6 +5,7 @@ export const shippingRunStageSchema = z.enum(['lookup', 'commit', 'grouping', 's
 export const shippingRunIssueSchema = z.object({ code: z.string(), message: z.string(), ticketIndex: z.number().int().positive().optional(), fba: z.string().optional(), demandId: z.uuid().optional(), groupId: z.uuid().optional() });
 export type ShippingRunIssue = z.infer<typeof shippingRunIssueSchema>;
 export const shippingRunSchema = z.object({
+  lifecycle: z.enum(['active', 'cancelled', 'trashed']).optional(), lifecyclePending: z.boolean().optional(),
   id: z.uuid(), version: z.number().int().positive(), status: shippingRunStatusSchema, stage: shippingRunStageSchema,
   numberingDate: z.iso.date(), month: z.string(), sequence: z.number().int().positive().nullable(), importId: z.uuid().nullable(), parseRunId: z.uuid().nullable(),
   origin: z.enum(['import', 'manual']).default('import'), membershipFrozenAt: z.iso.datetime().nullable().default(null),

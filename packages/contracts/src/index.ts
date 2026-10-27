@@ -18,6 +18,7 @@ export * from './logistics.js';
 export * from './customs.js';
 export * from './finance.js';
 export * from './shipping-runs.js';
+export * from './shipping-lifecycle.js';
 
 export const roleSchema = z.enum(['admin']);
 export type Role = z.infer<typeof roleSchema>;

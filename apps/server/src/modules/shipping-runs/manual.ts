@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { AddShippingTicketInput, AppendShippingTicketMembersInput, CorrectShippingRunInput, CreateManualShippingRunInput } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { demands, operationAudit } from '../../db/schema.js';
@@ -11,6 +11,7 @@ import { businessDateForReceipt } from '../imports/date.js';
 import { shippingCountry, shippingTicketNumber } from './domain.js';
 import { shippingRunCorrections, shippingRunOperations, shippingRuns, shippingTicketMembers, shippingTickets } from './schema.js';
 import { getShippingRun, getShippingRunReportScopeInTx, reserveShippingSequenceInTx, shippingHash } from './service.js';
+import { assertLifecycleActiveInTx } from '../shipping-lifecycle/guards.js';
 
 type Run = typeof shippingRuns.$inferSelect;
 type Selection = { demandIds: string[]; expectedDemandVersions: Record<string, number> };
@@ -23,6 +24,8 @@ async function operation(input: { operationId: string }, actorId: string, action
     const [previous] = await tx.select().from(shippingRunOperations).where(eq(shippingRunOperations.operationId, input.operationId));
     if (previous) {
       if (previous.actorId !== actorId || previous.requestHash !== requestHash) throw new BatchError('OPERATION_CONFLICT', 409, '操作编号已用于其他发货请求。');
+      const [target] = await tx.select({ id: shippingRuns.id }).from(shippingRuns).where(eq(shippingRuns.id, previous.runId));
+      if (!target) throw new BatchError('RESOURCE_PURGED', 404, '原发货记录已永久删除，不能重放建立。');
       return previous.runId;
     }
     const id = await execute(tx);
@@ -39,7 +42,7 @@ async function selectedDemands(tx: BatchTx, input: Selection) {
   if (!input.demandIds.length || new Set(input.demandIds).size !== input.demandIds.length || rows.length !== input.demandIds.length) throw new BatchError('VALIDATION_ERROR', 422, '请选择有效且不重复的需求。');
   if ((await loadDemandCancellationsInTx(tx, input.demandIds)).size) throw new BatchError('DEMAND_CANCELLED', 409, '所选需求已取消。');
   if (rows.some((row) => input.expectedDemandVersions[row.id] !== row.version)) throw new BatchError('DEMAND_VERSION_CONFLICT', 409, '需求版本已变化，请重新核对。');
-  const [occupied] = await tx.select().from(shippingTicketMembers).where(inArray(shippingTicketMembers.demandId, input.demandIds)).limit(1);
+  const [occupied] = await tx.select().from(shippingTicketMembers).where(and(inArray(shippingTicketMembers.demandId, input.demandIds), isNull(shippingTicketMembers.releasedAt))).limit(1);
   if (occupied) throw new BatchError('MEMBER_ALREADY_SHIPPED', 409, '所选需求已属于其他发货票，请打开原发货记录。', { demandId: occupied.demandId, runId: occupied.runId });
   const first = rows[0]!;
   if (rows.some((row) => row.sid !== first.sid || row.snapshot.country !== first.snapshot.country || row.snapshot.channel !== first.snapshot.channel)) throw new BatchError('GROUP_SCOPE_MISMATCH', 422, '人工批次的店铺、国家和业务渠道须一致。');
@@ -58,6 +61,7 @@ async function pendingExports(tx: BatchTx, runId: string) {
 async function lockRun(tx: BatchTx, runId: string, version: number, correction = false): Promise<Run> {
   const [run] = await tx.select().from(shippingRuns).where(eq(shippingRuns.id, runId)).for('update');
   if (!run) throw new BatchError('NOT_FOUND', 404, '发货次不存在。');
+  await assertLifecycleActiveInTx(tx, 'run', runId);
   if (run.version !== version) throw new BatchError('VERSION_CONFLICT', 409, '发货次版本已变化，请重新核对。');
   if (['queued', 'running'].includes(run.status)) throw new BatchError('SHIPPING_RUN_BUSY', 409, '本次发货正在整理，请等待完成后操作。');
   await pendingExports(tx, runId);
@@ -69,7 +73,7 @@ async function ticketAndGroup(tx: BatchTx, run: Run, input: Selection & { name: 
   const { batchId } = await createRunBatchInTx(tx, run.id, actorId);
   const [legacy] = input.existingGroupId ? await tx.select().from(subBatches).where(eq(subBatches.id, input.existingGroupId)) : [];
   if (legacy) {
-    const [linked] = await tx.select({ id: shippingTicketMembers.id }).from(shippingTicketMembers).where(eq(shippingTicketMembers.groupId, legacy.id)).limit(1);
+    const [linked] = await tx.select({ id: shippingTicketMembers.id }).from(shippingTicketMembers).where(and(eq(shippingTicketMembers.groupId, legacy.id), isNull(shippingTicketMembers.releasedAt))).limit(1);
     if (linked) throw new BatchError('GROUP_ALREADY_ASSIGNED', 409, '该历史批次已有发货次归属，请打开原记录。');
   }
   const batchIds = [...new Set([batchId, ...(legacy ? [legacy.batchId] : [])])].sort();

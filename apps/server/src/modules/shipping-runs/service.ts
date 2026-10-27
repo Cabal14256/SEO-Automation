@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { fromDrizzle, type PgBoss } from 'pg-boss';
 import type { CreateShippingRunInput, RetryShippingRunInput, ShippingRun, ShippingRunDetail } from '@scm/contracts';
 import { db } from '../../db/client.js';
@@ -13,13 +13,14 @@ import { shippingMonthCounters, shippingRunOperations, shippingRuns, shippingTic
 import type { ShippingRunIssue } from '@scm/contracts';
 import { demands } from '../../db/schema.js';
 import { loadDemandCancellationsInTx } from '../imports/demand-lifecycle.js';
+import { assertLifecycleActiveInTx } from '../shipping-lifecycle/guards.js';
 
 export const SHIPPING_RUN_QUEUE = 'shipping-run-organize';
 export const shippingHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function serializeShippingRun(row: typeof shippingRuns.$inferSelect): ShippingRun {
-  return { id: row.id, version: row.version, status: row.status as ShippingRun['status'], stage: row.stage as ShippingRun['stage'], numberingDate: row.numberingDate, month: row.month, sequence: row.sequence, importId: row.importId, parseRunId: row.parseRunId, origin: row.origin as ShippingRun['origin'], membershipFrozenAt: row.membershipFrozenAt?.toISOString() ?? null, error: row.error, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
+  return { id: row.id, lifecycle: row.lifecycle as ShippingRun['lifecycle'], lifecyclePending: row.lifecyclePending, version: row.version, status: row.status as ShippingRun['status'], stage: row.stage as ShippingRun['stage'], numberingDate: row.numberingDate, month: row.month, sequence: row.sequence, importId: row.importId, parseRunId: row.parseRunId, origin: row.origin as ShippingRun['origin'], membershipFrozenAt: row.membershipFrozenAt?.toISOString() ?? null, error: row.error, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
 }
-export async function getShippingRunReportScopeInTx(tx: BatchTx, runId: string, actorId: string) {
+export async function getShippingRunReportScopeInTx(tx: BatchTx, runId: string, actorId: string, historical = false) {
   await requireBatchActor(tx, actorId);
   // A historical parent container can be shared by several occurrences.
   // Discover its complete run set before locking any single run; readers and
@@ -34,11 +35,12 @@ export async function getShippingRunReportScopeInTx(tx: BatchTx, runId: string, 
   const [run] = await tx.select().from(shippingRuns).where(eq(shippingRuns.id, runId)).for('update');
   if (!run) throw new BatchError('NOT_FOUND', 404, '本次发货整理记录不存在。');
   const tickets = await tx.select().from(shippingTickets).where(eq(shippingTickets.runId, runId)).orderBy(asc(shippingTickets.sourceTicketIndex));
-  const members = await tx.select().from(shippingTicketMembers).where(eq(shippingTicketMembers.runId, runId)).orderBy(asc(shippingTicketMembers.inputOrder));
-  return { run, tickets: tickets.map((ticket) => ({ ...ticket, members: members.filter((member) => member.ticketId === ticket.id) })), groupIds: [...new Set(members.flatMap((member) => member.groupId ? [member.groupId] : []))] };
+  const members = await tx.select().from(shippingTicketMembers).where(and(eq(shippingTicketMembers.runId, runId), historical ? undefined : isNull(shippingTicketMembers.releasedAt))).orderBy(asc(shippingTicketMembers.inputOrder));
+  return { run, tickets: tickets.map((ticket) => ({ ...ticket, members: members.filter((member) => member.ticketId === ticket.id) })).filter((ticket) => historical || ticket.members.length), groupIds: [...new Set(members.flatMap((member) => member.groupId ? [member.groupId] : []))] };
 }
 export async function getReadyShippingRunInTx(tx: BatchTx, runId: string, expectedVersion: number | undefined, actorId: string) {
   const scope = await getShippingRunReportScopeInTx(tx, runId, actorId);
+  await assertLifecycleActiveInTx(tx, 'run', runId);
   if (expectedVersion !== undefined && scope.run.version !== expectedVersion) throw new BatchError('VERSION_CONFLICT', 409, '本次发货版本已变化，请刷新后导出。');
   if (scope.run.status !== 'ready' || scope.run.sequence === null || !scope.tickets.length || scope.tickets.some((ticket) => !ticket.number || !ticket.members.length || ticket.members.some((member) => !member.demandId || !member.groupId))) throw new BatchError('SHIPPING_RUN_NOT_READY', 409, '本次发货仍在整理或存在待处理异常，暂不能导出完整发货表。');
   const issues = await shippingRunReadinessIssuesInTx(tx, scope);
@@ -59,7 +61,7 @@ export async function shippingRunReadinessIssuesInTx(tx: BatchTx, scope: Awaited
   for (const ticket of scope.tickets) for (const member of ticket.members) {
     const group = groups.find((entry) => entry.id === member.groupId); const extra = { ticketIndex: ticket.sourceTicketIndex, fba: member.fba, ...(member.demandId ? { demandId: member.demandId } : {}), ...(member.groupId ? { groupId: member.groupId } : {}) };
     if (cancelled.has(member.demandId!)) { issues.push({ code: 'DEMAND_CANCELLED', message: '本票的 FBA 已取消，请先核对需求。', ...extra }); continue; }
-    if (!group || group.status === 'superseded') { issues.push({ code: 'GROUP_SUPERSEDED', message: '原内部处理组已不存在或被更正版本替代。', ...extra }); continue; }
+    if (!group || group.status === 'superseded' || group.lifecycle && group.lifecycle !== 'active' || group.lifecyclePending) { issues.push({ code: 'GROUP_SUPERSEDED', message: '原内部处理组已取消、删除或被更正版本替代。', ...extra }); continue; }
     const current = memberRows.filter((entry) => entry.member.groupId === group.id);
     if (!current.some((entry) => entry.demand.id === member.demandId)) { issues.push({ code: 'SHIPPING_MEMBER_REMOVED', message: '本票的 FBA 已从其内部处理组移除，请恢复正确归属后重试。', ...extra }); continue; }
     const confirmation = confirmations.find((entry) => entry.groupId === group.id && entry.groupVersion === group.confirmedVersion);
@@ -75,8 +77,9 @@ export async function shippingRunReadinessIssuesInTx(tx: BatchTx, scope: Awaited
 export async function getShippingRun(runId: string, actorId: string): Promise<ShippingRunDetail> {
   return db.transaction(async (tx) => {
     await requireBatchActor(tx, actorId);
-    const scope = await getShippingRunReportScopeInTx(tx, runId, actorId);
-    if (scope.run.status === 'ready' || scope.run.origin === 'manual' && scope.run.status === 'draft') {
+    let scope = await getShippingRunReportScopeInTx(tx, runId, actorId);
+    if (scope.run.lifecycle && scope.run.lifecycle !== 'active') scope = await getShippingRunReportScopeInTx(tx, runId, actorId, true);
+    if ((!scope.run.lifecycle || scope.run.lifecycle === 'active') && !scope.run.lifecyclePending && (scope.run.status === 'ready' || scope.run.origin === 'manual' && scope.run.status === 'draft')) {
       const issues = await shippingRunReadinessIssuesInTx(tx, scope);
       if (issues.length && scope.run.status === 'ready') {
         const [updated] = await tx.update(shippingRuns).set({ status: 'needs_review', stage: 'sync', version: scope.run.version + 1, issues, error: { code: issues[0]!.code, message: issues[0]!.message }, updatedAt: new Date() }).where(eq(shippingRuns.id, runId)).returning();
@@ -90,8 +93,8 @@ export async function getShippingRun(runId: string, actorId: string): Promise<Sh
     return { run: serializeShippingRun(scope.run), tickets: scope.tickets.map((ticket) => ({ id: ticket.id, sourceTicketIndex: ticket.sourceTicketIndex, country: ticket.country, ticketSequence: ticket.ticketSequence, number: ticket.number, members: ticket.members.map(({ demandId, fba, sid, inputOrder, groupId }) => ({ demandId, fba, sid, inputOrder, groupId })) })), issues: scope.run.issues };
   });
 }
-export async function listShippingRuns(actorId: string) {
-  return db.transaction(async (tx) => { await requireBatchActor(tx, actorId); const rows = await tx.select().from(shippingRuns).orderBy(desc(shippingRuns.createdAt)).limit(200); return { items: rows.map(serializeShippingRun) }; });
+export async function listShippingRuns(actorId: string, lifecycle: 'active' | 'cancelled' | 'trashed' | 'all' = 'active') {
+  return db.transaction(async (tx) => { await requireBatchActor(tx, actorId); const rows = await tx.select().from(shippingRuns).where(lifecycle === 'all' ? undefined : eq(shippingRuns.lifecycle, lifecycle)).orderBy(desc(shippingRuns.createdAt)).limit(200); return { items: rows.map(serializeShippingRun) }; });
 }
 async function assertImport(tx: BatchTx, importId: string, parseRunId: string) {
   const [record] = await tx.select().from(sourceImports).where(eq(sourceImports.id, importId)).for('share');
@@ -111,7 +114,7 @@ export async function createShippingRun(boss: PgBoss, input: CreateShippingRunIn
     await requireBatchActor(tx, actorId);
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`shipping-operation:${input.operationId}`},0))`);
     const [previous] = await tx.select().from(shippingRunOperations).where(eq(shippingRunOperations.operationId, input.operationId));
-    if (previous) { if (previous.actorId !== actorId || previous.requestHash !== hash) throw new BatchError('OPERATION_CONFLICT', 409, '操作编号已用于其他整理请求。'); return previous.runId; }
+    if (previous) { if (previous.actorId !== actorId || previous.requestHash !== hash) throw new BatchError('OPERATION_CONFLICT', 409, '操作编号已用于其他整理请求。'); const [target] = await tx.select({ id: shippingRuns.id }).from(shippingRuns).where(eq(shippingRuns.id, previous.runId)); if (!target) throw new BatchError('RESOURCE_PURGED', 404, '原发货记录已永久删除，不能重放建立。'); return previous.runId; }
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`shipping-import:${input.importId}`},0))`);
     const [existing] = await tx.select().from(shippingRuns).where(eq(shippingRuns.importId, input.importId));
     const numberingDate = input.numberingDate ?? businessDateForReceipt(new Date()).businessDate;
@@ -138,6 +141,7 @@ export async function retryShippingRun(boss: PgBoss, runId: string, input: Retry
     if (previous) { if (previous.runId !== runId || previous.actorId !== actorId || previous.requestHash !== hash) throw new BatchError('OPERATION_CONFLICT', 409, '操作编号已用于其他重试请求。'); return; }
     const [run] = await tx.select().from(shippingRuns).where(eq(shippingRuns.id, runId)).for('update');
     if (!run) throw new BatchError('NOT_FOUND', 404, '发货整理任务不存在。');
+    await assertLifecycleActiveInTx(tx, 'run', runId);
     if (run.version !== input.expectedVersion) throw new BatchError('VERSION_CONFLICT', 409, '发货整理版本已变化，请刷新后重试。');
     if (!['draft', 'needs_review', 'failed'].includes(run.status)) throw new BatchError('SHIPPING_RUN_NOT_RETRYABLE', 409, '仅待处理或失败的发货整理任务可以继续。');
     if (run.origin === 'manual') {
@@ -200,7 +204,7 @@ export async function retryShippingRun(boss: PgBoss, runId: string, input: Retry
 }
 
 export async function enqueueShippingRunInTx(tx: BatchTx, boss: PgBoss, runId: string) { return enqueue(tx, boss, runId); }
-export async function activeShippingRuns() { return db.select().from(shippingRuns).where(inArray(shippingRuns.status, ['queued', 'running'])).orderBy(asc(shippingRuns.updatedAt)).limit(100); }
+export async function activeShippingRuns() { return db.select().from(shippingRuns).where(and(inArray(shippingRuns.status, ['queued', 'running']), eq(shippingRuns.lifecycle, 'active'), eq(shippingRuns.lifecyclePending, false))).orderBy(asc(shippingRuns.updatedAt)).limit(100); }
 
 export async function reserveShippingSequenceInTx(tx: BatchTx, run: typeof shippingRuns.$inferSelect) {
   if (run.sequence !== null) return run.sequence;

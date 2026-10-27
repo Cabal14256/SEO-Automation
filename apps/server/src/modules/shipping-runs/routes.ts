@@ -27,7 +27,7 @@ export function createShippingRunRoutes(getBoss: () => PgBoss | null) {
     await next();
   });
   const queue = () => { const boss = getBoss(); if (!boss) throw new BatchError('QUEUE_UNAVAILABLE', 503, '后台整理队列暂不可用。'); return boss; };
-  routes.get('/', async (c) => c.json(await listShippingRuns(c.get('actorId'))));
+  routes.get('/', async (c) => c.json(await listShippingRuns(c.get('actorId'), z.enum(['active', 'cancelled', 'trashed', 'all']).parse(c.req.query('lifecycle') ?? 'active'))));
   routes.post('/', async (c) => c.json(await createShippingRun(queue(), createShippingRunInputSchema.parse(await c.req.json()), c.get('actorId')), 202));
   routes.post('/manual', async (c) => c.json(await createManualShippingRun(createManualShippingRunInputSchema.parse(await c.req.json()), c.get('actorId')), 201));
   routes.get('/:id', async (c) => c.json(await getShippingRun(z.uuid().parse(c.req.param('id')), c.get('actorId'))));

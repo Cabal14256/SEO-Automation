@@ -287,7 +287,7 @@ async function automaticChecks(state) {
 
   step = 'whole-run-export-uses-current-run-version-and-all-confirmations';
   await generate().click(); await expect.poll(() => state.exportBodies.length).toBe(1);
-  await wizard().getByText('本次发货导出记录', { exact: true }).click();
+  await expect(wizard().locator('.shipping-run-export-history')).toHaveAttribute('open', '');
   await expect(wizard()).toContainText('已生成 · 3 条商品 / 15 箱');
   const download = page.waitForEvent('download'); await wizard().getByRole('button', { name: '下载 XLSX', exact: true }).click();
   assert.equal((await download).suggestedFilename(), '20261023-3-发货表.xlsx'); note();

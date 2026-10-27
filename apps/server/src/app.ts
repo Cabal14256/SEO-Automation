@@ -21,11 +21,13 @@ import { createDocumentExportRoutes, createDocumentProfileRoutes, createDocument
 import { createWorkflowRoutes, createWorkflowSourceRoutes, createWorkflowFileRoutes, createWorkflowExportRoutes } from './modules/workflow/routes.js';
 import { workflowPolicies } from './modules/workflow/registry.js';
 import { createShippingRunRoutes } from './modules/shipping-runs/routes.js';
+import { createShippingLifecycleRoutes } from './modules/shipping-lifecycle/routes.js';
 
 const config = readConfig();
 
 export function createApp(getBoss: () => PgBoss | null): Hono {
   const app = new Hono();
+  app.route('/api/v1', createShippingLifecycleRoutes());
   app.route('/api/v1/seller-mappings', sellerMappingRoutes);
   app.route('/api/v1/imports', createImportRoutes(getBoss));
   app.route('/api/v1/demands', createDemandRoutes());

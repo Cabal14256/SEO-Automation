@@ -71,6 +71,7 @@
     "shipping:browser": "node scripts/t34/shipping-integration-browser.mjs && node scripts/t36/shipping-tables-browser.mjs && node scripts/t38/shipping-unified-table-browser.mjs",
     "shipping:workbench:browser": "node scripts/t38/shipping-unified-table-browser.mjs",
     "shipping:runs:browser": "node scripts/t39/shipping-runs-browser.mjs",
+    "shipping:lifecycle:browser": "node scripts/t41/shipping-lifecycle-browser.mjs",
     "batches:auto-confirm:browser": "node scripts/t35/auto-confirm-browser.mjs",
     "shipping:legacy:browser": "node scripts/t27/shipping-workspace-browser.mjs",
     "ui:browser": "node scripts/t24/shell-icons-browser.mjs && node scripts/t24/batch-icons-browser.mjs && node scripts/t26/settings-browser.mjs && node scripts/t26/batches-workspace-browser.mjs && node scripts/t34/shipping-integration-browser.mjs",

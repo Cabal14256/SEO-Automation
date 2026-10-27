@@ -28,7 +28,7 @@ const at = new Date('2026-10-25T01:00:00Z'), dialect = new PgDialect();
 function rows(table: unknown, params: unknown[] = []) {
   const result = table === documentAutomationJobs ? [state.job] : table === fileIndex ? state.files : table === documentInvoiceBundles ? state.bundles : table === documentExports ? state.exports : [];
   const ids = params.filter((value): value is string => typeof value === 'string' && /^[a-f0-9-]{36}$/i.test(value));
-  return !ids.length ? result : result.filter((entry) => ids.includes(entry.id) || 'jobId' in entry && ids.includes(String(entry.jobId)) || 'reference' in entry && ids.includes(String(entry.reference.documentId)));
+  return !ids.length ? result : result.filter((entry) => ids.includes(entry.id) || 'fileId' in entry && ids.includes(String(entry.fileId)) || 'jobId' in entry && ids.includes(String(entry.jobId)) || 'reference' in entry && ids.includes(String(entry.reference.documentId)));
 }
 function query(table: unknown) {
   let params: unknown[] = [];
@@ -83,7 +83,7 @@ describe('whole-batch preflight and atomic XLSX publication', () => {
     await expect(assertDocumentBundleValidInTx(tx, id, 'admin')).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await expect(readDocumentBundle(id, 'admin', { historicalExport: true })).resolves.toHaveProperty('file.id', state.job.bundle!.fileId);
     invalid.add(sources[1]!.documentId);
-    await expect(readDocumentBundle(id, 'admin', { historicalExport: true })).rejects.toMatchObject({ code: 'DOCUMENT_EXPORT_STALE' });
+    await expect(readDocumentBundle(id, 'admin', { historicalExport: true })).resolves.toHaveProperty('file.id', state.job.bundle!.fileId);
     expect(state.exports).toHaveLength(2); expect(state.bundles).toHaveLength(1);
   });
   it('never renders a deleted task during preflight and never publishes after deletion', async () => {
@@ -127,11 +127,14 @@ describe('whole-batch preflight and atomic XLSX publication', () => {
     await expect(publishDocumentBundle(structuredClone(state.job), sources)).rejects.toMatchObject({ code: 'DOCUMENT_SOURCE_STALE' });
     expect(state.bundles).toEqual([]); expect(state.exports).toEqual([]); expect(state.files).toHaveLength(1); expect(state.frozen).toEqual([]); expect(state.job.bundle).toBeNull();
   });
-  it('checks every fixed reference on download and refuses access when another sheet/member has become invalid', async () => {
+  it('keeps immutable archives downloadable after source invalidation but rejects damaged publication mappings', async () => {
     const id = state.job.id; await publishDocumentBundle(structuredClone(state.job), sources);
     await expect(assertDocumentBundleValidInTx(tx, id, 'admin')).resolves.toBeTruthy();
     invalid.add(sources[1]!.documentId);
-    await expect(readDocumentBundle(id, 'admin')).rejects.toMatchObject({ code: 'DOCUMENT_EXPORT_STALE' });
+    await expect(assertDocumentBundleValidInTx(tx, id, 'admin')).rejects.toMatchObject({ code: 'DOCUMENT_EXPORT_STALE' });
+    await expect(readDocumentBundle(id, 'admin')).resolves.toHaveProperty('file.id', state.job.bundle!.fileId);
+    state.exports.pop();
+    await expect(readDocumentBundle(id, 'admin')).rejects.toMatchObject({ code: 'FILE_UNAVAILABLE' });
     expect(state.bundles).toHaveLength(1); expect(state.job.bundle?.status).toBe('completed');
   });
 });

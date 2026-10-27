@@ -21,6 +21,7 @@ import type { StoredDocumentAutomationItem } from './automation-types.js';
 import { applyDocumentAutomationSupplementInTx, getDocumentAutomationRequirementsInTx } from './automation-supplement.js';
 import { preflightDocumentBundle, publishDocumentBundle } from './document-bundle.js';
 import { DocumentWorkbookError } from './workbook-errors.js';
+import { assertLifecycleActiveInTx } from '../shipping-lifecycle/guards.js';
 
 export const DOCUMENT_AUTOMATION_QUEUE = 'document-invoice-automation';
 type Job = typeof documentAutomationJobs.$inferSelect;
@@ -292,13 +293,14 @@ export async function executeDocumentAutomation(boss: PgBoss, id: string) {
     locked = lock.rows[0]?.locked === true; if (!locked) return;
     const [row] = await db.select().from(documentAutomationJobs).where(eq(documentAutomationJobs.id, id));
     if (!row || row.deletedAt || !activeStatuses.includes(row.status) && !row.retryRequests.length) return;
-    await db.transaction((tx) => requireBatchActor(tx, row.createdBy));
+    await db.transaction(async (tx) => { await requireBatchActor(tx, row.createdBy); await assertLifecycleActiveInTx(tx, 'run', row.shippingRunId); });
     await db.update(documentAutomationJobs).set({ leaseUntil: leaseTime(), status: 'running', updatedAt: new Date() }).where(eq(documentAutomationJobs.id, id));
     heartbeat = setInterval(() => void db.update(documentAutomationJobs).set({ leaseUntil: leaseTime() }).where(eq(documentAutomationJobs.id, id)).catch((error) => logError('Automatic invoice lease refresh failed', error)), 30_000); heartbeat.unref();
     const services = servicesFor(boss, row);
     await consumeRetries(row);
     let processed = 0;
     for (const item of [...row.items].sort((left, right) => Number(left.status === 'exporting') - Number(right.status === 'exporting'))) {
+      await db.transaction((tx) => assertLifecycleActiveInTx(tx, 'run', row.shippingRunId));
       if (item.status === 'blocked' || item.status === 'completed' || item.status === 'ready') continue;
       try { await advanceAutomationItem(row, item, services, () => save(row)); }
       catch (error) { const status = error && typeof error === 'object' && 'status' in error ? Number(error.status) : 0;

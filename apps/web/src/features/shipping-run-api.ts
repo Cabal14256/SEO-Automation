@@ -4,6 +4,7 @@ import { request } from '../api';
 const base = '/api/v1/shipping-runs';
 export const shippingRunApi = {
   list: async () => shippingRunListSchema.parse(await request(base)),
+  listForLifecycle: async (lifecycle: string) => shippingRunListSchema.parse(await request(`${base}?${new URLSearchParams({ lifecycle })}`)),
   detail: async (id: string) => shippingRunDetailSchema.parse(await request(`${base}/${encodeURIComponent(id)}`)),
   create: async (input: CreateShippingRunInput) => shippingRunDetailSchema.parse(await request(base, { method: 'POST', body: JSON.stringify(createShippingRunInputSchema.parse(input)) })),
   createManual: async (input: CreateManualShippingRunInput) => shippingRunDetailSchema.parse(await request(`${base}/manual`, { method: 'POST', body: JSON.stringify(createManualShippingRunInputSchema.parse(input)) })),

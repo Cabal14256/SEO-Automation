@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { AllocationCode, DemandWorkspace, DemandWorkspaceQuery, GroupConfirmation, WeeklyBatch } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { demands, demandSources, sourceImportRows } from '../../db/schema.js';
@@ -18,7 +18,7 @@ export async function getDemandWorkspace(actorId: string, query: DemandWorkspace
     const batchRows = await tx.select().from(weeklyBatches).orderBy(desc(weeklyBatches.weekStartDate), asc(weeklyBatches.id));
     const memberRows = demandIds.length ? await tx.select({ member: subBatchMembers, group: subBatches }).from(subBatchMembers)
       .innerJoin(subBatches, eq(subBatchMembers.groupId, subBatches.id))
-      .where(and(inArray(subBatchMembers.demandId, demandIds), eq(subBatchMembers.active, true), sql`${subBatches.status} <> 'superseded'`)) : [];
+      .where(and(inArray(subBatchMembers.demandId, demandIds), eq(subBatchMembers.active, true), eq(subBatches.lifecycle, 'active'), eq(subBatches.lifecyclePending, false), sql`${subBatches.status} <> 'superseded'`)) : [];
     const groupIds = [...new Set(memberRows.map((entry) => entry.group.id))];
     const revisions = demandIds.length ? await tx.selectDistinctOn([shipmentRevisions.demandId]).from(shipmentRevisions).where(inArray(shipmentRevisions.demandId, demandIds)).orderBy(asc(shipmentRevisions.demandId), desc(shipmentRevisions.version), desc(shipmentRevisions.id)) : [];
     const confirmations = groupIds.length ? await tx.select({ confirmation: groupConfirmations }).from(groupConfirmations)
@@ -31,7 +31,7 @@ export async function getDemandWorkspace(actorId: string, query: DemandWorkspace
     const uniqueGroups = new Map(memberRows.map(({ group }) => [group.id, group]));
     const shippingMemberships = demandIds.length ? await tx.select({ demandId: shippingTicketMembers.demandId, groupId: shippingTicketMembers.groupId, runId: shippingRuns.id, month: shippingRuns.month, sequence: shippingRuns.sequence, numberingDate: shippingRuns.numberingDate, ticketNumber: shippingTickets.number }).from(shippingTicketMembers)
       .innerJoin(shippingRuns, eq(shippingRuns.id, shippingTicketMembers.runId)).innerJoin(shippingTickets, eq(shippingTickets.id, shippingTicketMembers.ticketId))
-      .where(inArray(shippingTicketMembers.demandId, demandIds)) : [];
+      .where(and(inArray(shippingTicketMembers.demandId, demandIds), isNull(shippingTicketMembers.releasedAt), eq(shippingRuns.lifecycle, 'active'), eq(shippingRuns.lifecyclePending, false))) : [];
     return projectDemandWorkspace({
       demands: demandRows.map(serializeDemand), cancelledDemandIds: [...cancellations.keys()], members: memberRows.map(({ member }) => member),
       shippingMemberships: shippingMemberships.flatMap((member) => member.demandId ? [{ ...member, demandId: member.demandId }] : []),

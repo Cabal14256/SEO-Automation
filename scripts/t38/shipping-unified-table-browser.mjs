@@ -105,7 +105,14 @@ async function contextFor(state) {
     if (method === 'GET' && path === '/api/v1/batch-reports') return json(state.report(Object.fromEntries(url.searchParams)));
     if (method === 'GET' && path === '/api/v1/batch-reports/exports') return json({ items: state.exports });
     if (method === 'GET' && path === '/api/v1/imports') return json({ items: [], total: 0, page: 1, pageSize: 10 });
+    if (method === 'GET' && path === '/api/v1/imports/transport-methods') return json({ items: [], queriedAt: now });
     if (method === 'GET' && path === '/api/v1/seller-mappings/catalog-settings') return json({ settings: { mode: 'manual', version: 1, catalogVersion: 1, lastSyncedAt: now, lastError: null, configured: true, readOnly: true } });
+    const lifecycle = path.match(/^\/api\/v1\/demands\/([^/]+)\/(lifecycle-impact|lifecycle\/(cancel|trash|restore|purge))$/);
+    if (lifecycle && state.lifecycleImpact) {
+      if (method === 'GET') return json(state.lifecycleImpact(lifecycle[1], url.searchParams.get('action')));
+      const result = await state.mutateLifecycle(lifecycle[1], lifecycle[3], request.postDataJSON()); return json(result.body, result.status);
+    }
+    if (method === 'GET' && path === '/api/v1/shipping-recycle-bin' && state.recycle) return json(state.recycle(Object.fromEntries(url.searchParams)));
     const demand = path.match(/^\/api\/v1\/demands\/([^/]+)(?:\/(revisions|cancel))?$/);
     if (demand && state.demandDetail) {
       if (method === 'GET' && !demand[2]) return json(state.demandDetail(demand[1]));
@@ -162,8 +169,11 @@ async function scopeScrollChecks(state) {
   ];
   for (const choice of scopeChoices) {
     const button = nav().getByRole('button', { name: choice.name, exact: typeof choice.name === 'string' });
-    await page.evaluate(() => window.scrollTo(0, 300));
-    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(300);
+    // Keep the full target in view after adding lifecycle controls to the nav;
+    // otherwise Playwright itself scrolls a clipped button before clicking it.
+    const scrollOffset = await button.evaluate((node) => Math.max(300, Math.ceil(node.getBoundingClientRect().bottom + scrollY - innerHeight + 100)));
+    await page.evaluate((offset) => window.scrollTo(0, offset), scrollOffset);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollOffset);
     await expect(button).toBeInViewport();
     const before = await page.evaluate(() => ({ y: scrollY, max: document.documentElement.scrollHeight - innerHeight }));
     assert(before.max > before.y + 100, 'the current scope must leave room below the retained scroll offset');
@@ -208,10 +218,6 @@ async function unifiedNavigation(state) {
   const shippingNavigation = [
     { label: '发货工作台', view: 'demands' },
     { label: '发票与单据', view: 'documents' },
-    { label: '领星单据与分配', view: 'fulfillment' },
-    { label: '物流与交接', view: 'logistics' },
-    { label: '报关与 9810', view: 'customs' },
-    { label: '批次归档', view: 'archives' },
   ];
   await expect(submenu.getByRole('link')).toHaveCount(shippingNavigation.length);
   await expect(submenu.getByRole('link')).toHaveText(shippingNavigation.map(({ label }) => label));
@@ -220,6 +226,7 @@ async function unifiedNavigation(state) {
     await expect(link).toBeVisible();
     await expect(link).toHaveAttribute('href', `/shipping?view=${view}`);
   }
+  for (const label of ['领星单据与分配', '物流与交接', '报关与 9810', '批次归档']) await expect(submenu.getByRole('button', { name: label + '（待维护）', exact: true })).toBeDisabled();
   await expect(submenu.getByRole('link', { name: '发货工作台', exact: true })).toHaveAttribute('aria-current', 'page');
   for (const label of ['草稿箱', '导入记录', '生成所选批次 XLSX', '批次导出记录', '刷新工作区']) {
     const button = form().getByRole('button', { name: label, exact: true });
@@ -311,15 +318,15 @@ async function filtersAndScope(state) {
   await expect(newBatch()).toBeDisabled(); await expect(generate()).toBeDisabled(); await expect.poll(() => state.queries.at(-1)?.q).toBe('FBA-SHARED'); state.delayDemand = 0;
   await expect(demandCheck('FBA-SHARED-2').first()).not.toBeChecked(); await expect(exportCheck(state.groups[0].name).first()).not.toBeChecked(); assert.deepEqual(state.mutations, before); note();
   step = 'all-shared-filters-apply-to-the-one-table-with-status-and-region-together';
-  await form().getByLabel('业务月份', { exact: true }).fill('2026-10');
-  await expect(form().getByLabel('业务月份', { exact: true })).toHaveValue('2026-10');
-  await chooseOption(form().getByLabel('需求周范围', { exact: true }), state.batch.weekStartDate);
+  await form().getByLabel('发货月份', { exact: true }).fill('2026-10');
+  await expect(form().getByLabel('发货月份', { exact: true })).toHaveValue('2026-10');
+  await expect(form().getByLabel('需求周范围', { exact: true })).toHaveCount(0);
   await chooseOption(form().getByLabel('店铺', { exact: true }), '101'); await chooseOption(form().getByLabel('国家', { exact: true }), '美国'); await chooseOption(form().getByLabel('业务渠道', { exact: true }), 'HY');
   await chooseOption(form().getByLabel('数据处理状态', { exact: true }), 'candidate'); await chooseOption(form().getByLabel('国家 / 区域', { exact: true }), 'US'); await form().getByRole('button', { name: '筛选', exact: true }).click();
-  const expected = { month: '2026-10', weekStartDate: state.batch.weekStartDate, sid: '101', country: '美国', channel: 'HY', q: 'FBA-SHARED', status: 'candidate', region: 'US' };
+  const expected = { month: '2026-10', sid: '101', country: '美国', channel: 'HY', q: 'FBA-SHARED', status: 'candidate', region: 'US' };
   await expect.poll(() => Object.fromEntries(Object.keys(expected).map((key) => [key, state.queries.at(-1)?.[key]]))).toEqual(expected);
   await expect(table()).toContainText('SKU-2-1'); await expect(table()).not.toContainText('SKU-0-0'); await expect(generate()).toBeDisabled();
-  for (const view of ['products', 'boxes', 'shipments']) { await chooseOption(presentation(), view); await expect(table()).toContainText('SKU-2-1'); await expect(form().getByLabel('业务月份', { exact: true })).toHaveValue('2026-10'); }
+  for (const view of ['products', 'boxes', 'shipments']) { await chooseOption(presentation(), view); await expect(table()).toContainText('SKU-2-1'); await expect(form().getByLabel('发货月份', { exact: true })).toHaveValue('2026-10'); }
   await reset(); await expect(table()).toContainText('SKU-0-0'); note();
   step = 'specific-batch-summary-frozen-snapshot-and-legacy-entry-links-use-the-same-table';
   await nav().getByRole('button', { name: new RegExp(state.groups[1].name) }).click(); await expect.poll(() => state.queries.at(-1)?.groupId).toBe(state.groups[1].id);
@@ -462,6 +469,7 @@ function crudFixture() {
   state.demandRows = (raw) => {
     state.queries.push(copy(raw)); const allRows = state.demands.flatMap((demand) => {
       const group = owner(demand.id), lifecycle = state.lifecycles.get(demand.id), source = templates.get(demand.id);
+      if (lifecycle === 'trashed') return [];
       if (lifecycle === 'cancelled') return [{ ...copy(source[0]), ...copy(demand.snapshot), id: `${demand.id}:cancelled`, lifecycle, demandId: demand.id, demandVersion: demand.version, currentDemandVersion: demand.version, rowKind: 'placeholder', msku: null, fnsku: null, sku: null, productName: null, quantity: null, groupQuantity: null, monthQuantity: null, boxes: [], codes: [], totalBoxes: null, groupId: null, groupName: null, groupVersion: null, confirmationId: null, status: 'unsynced' }];
       return source.map((entry) => {
         const row = copy(entry), frozen = Boolean(group?.frozenAt);
@@ -503,6 +511,22 @@ function crudFixture() {
     const body = { demand: contracts.demandRecordSchema.parse(demand), replayed: false }; replays.set(input.operationId, { input: copy(input), body: copy(body) });
     return { status: 200, body };
   };
+  state.lifecycleImpact = (demandId, action) => {
+    const demand = state.demands.find((entry) => entry.id === demandId), group = owner(demandId); assert(demand);
+    return contracts.shippingLifecycleImpactSchema.parse({ type: 'demand', id: demandId, name: demand.snapshot.fba, version: demand.version, lifecycle: state.lifecycles.get(demandId), action, impactToken: 'a'.repeat(64), members: [{ id: demandId, fba: demand.snapshot.fba }], groups: group ? [{ id: group.id, name: group.name }] : [], affectedRuns: [], documents: [], workflowCount: 0, conflicts: [], canExecute: true, blockingReasons: [] });
+  };
+  const lifecycleReplays = new Map();
+  state.mutateLifecycle = async (demandId, action, raw) => {
+    const input = contracts.shippingLifecycleInputSchema.parse(raw); state.cancelBodies.push({ demandId, input: copy(input) });
+    if (lifecycleReplays.has(input.operationId)) return { status: 200, body: { ...lifecycleReplays.get(input.operationId), replayed: true } };
+    if (state.holdNextMutation === action) { state.holdNextMutation = null; await new Promise((resolve) => { state.releaseMutation = resolve; }); state.releaseMutation = null; }
+    if (state.nextFailure?.action === action) { state.nextFailure = null; return { status: 503, body: { error: { code: 'QUEUE_UNAVAILABLE', message: '技术夹具：请求暂未完成，请保持内容重试。' } } }; }
+    const demand = state.demands.find((entry) => entry.id === demandId); assert(demand); assert.equal(demand.version, input.expectedVersion);
+    demand.version++; state.lifecycles.set(demandId, action === 'trash' ? 'trashed' : action === 'restore' ? 'active' : 'cancelled');
+    const operations = state.operationHistory.get(demandId) ?? []; operations.push({ action: `demand.${action}`, reason: input.reason, createdBy: 'technical-workbench', createdAt: now, version: demand.version }); state.operationHistory.set(demandId, operations);
+    const body = contracts.shippingLifecycleResultSchema.parse({ type: 'demand', id: demandId, version: demand.version, lifecycle: state.lifecycles.get(demandId), pending: false, purged: false, replayed: false }); lifecycleReplays.set(input.operationId, body); return { status: 200, body };
+  };
+  state.recycle = () => { const items = state.demands.filter((entry) => state.lifecycles.get(entry.id) === 'trashed').map((entry) => ({ type: 'demand', id: entry.id, name: entry.snapshot.fba, version: entry.version, lifecycle: 'trashed', changedAt: now, changedBy: 'technical-workbench', reason: state.operationHistory.get(entry.id)?.at(-1)?.reason ?? '', pending: false, memberCount: 1, canPurge: true, purgeBlockingReasons: [] })); return contracts.shippingRecycleListSchema.parse({ items, total: items.length, page: 1, pageSize: 20 }); };
   return state;
 }
 
@@ -538,7 +562,7 @@ async function crudChecks(state) {
       await expect(rowAction('FBA-SHARED-0', name)).toHaveCount(1);
     }
     await expect(rowAction('FBA-SHARED-1', '编辑需求')).toBeDisabled();
-    await expect(rowAction('FBA-SHARED-1', '删除需求')).toBeDisabled();
+    await expect(rowAction('FBA-SHARED-1', '删除需求')).toBeEnabled();
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 });
       await resetScroll(); await noOverflow();
@@ -611,40 +635,40 @@ async function crudChecks(state) {
   await reset(); await expect(table()).toContainText('冻结原确认商品');
   await rowAction('FBA-SHARED-1', '查看需求').click();
   await expect(demandDialog()).toContainText('CURRENT SERVER NOTE FOR FROZEN SHIPMENT'); await expect(demandDialog()).toContainText('LATEST-FC');
-  await expect(demandDialog().getByRole('button', { name: '编辑需求', exact: true })).toBeDisabled(); await expect(demandDialog().getByRole('button', { name: '删除需求', exact: true })).toBeDisabled();
+  await expect(demandDialog().getByRole('button', { name: '编辑需求', exact: true })).toBeDisabled(); await expect(demandDialog().getByRole('button', { name: '删除需求', exact: true })).toBeEnabled();
   await expect(demandDialog().getByRole('status')).toContainText('批次已冻结');
   await demandDialog().getByRole('button', { name: '关闭货件需求', exact: true }).click();
   await expect(table().getByRole('row').filter({ hasText: 'FBA-SHARED-1' }).filter({ hasText: 'SKU-1-0' })).toContainText('77');
   const writes = state.mutations.length; await rowAction('FBA-SHARED-4', '查看需求').click();
-  await expect(demandDialog().getByRole('status')).toContainText('已有下游单据或任务引用'); await expect(demandDialog().getByRole('button', { name: '编辑需求', exact: true })).toBeDisabled(); await expect(demandDialog().getByRole('button', { name: '删除需求', exact: true })).toBeDisabled();
+  await expect(demandDialog().getByRole('status')).toContainText('已有下游单据或任务引用'); await expect(demandDialog().getByRole('button', { name: '编辑需求', exact: true })).toBeDisabled(); await expect(demandDialog().getByRole('button', { name: '删除需求', exact: true })).toBeEnabled();
   await demandDialog().getByRole('button', { name: '关闭货件需求', exact: true }).click(); assert.equal(state.mutations.length, writes); note();
 
   step = 'delete-confirmation-required-reason-and-retry-keep-payload-and-id';
-  await filterDemands(fba); await rowAction(fba, '删除需求').click(); await expect(submitDemand()).toBeDisabled();
-  await expect(demandDialog().getByLabel('删除原因', { exact: true })).toHaveAttribute('maxlength', '1000');
-  await demandDialog().getByLabel('删除原因', { exact: true }).fill('do not delete yet'); await demandDialog().getByRole('button', { name: '保留需求', exact: true }).click();
-  assert.equal(state.cancelBodies.length, 0); await expect(demandDialog().getByRole('button', { name: '编辑需求', exact: true })).toBeEnabled();
-  await demandDialog().getByRole('button', { name: '删除需求', exact: true }).click(); await demandDialog().getByLabel('删除原因', { exact: true }).fill('CRUD deletion requested');
+  const deletion = () => page.getByRole('dialog', { name: '删除需求', exact: true });
+  const deleteSubmit = () => deletion().getByRole('button', { name: '确认删除需求', exact: true });
+  await filterDemands(fba); await rowAction(fba, '删除需求').click(); await expect(deleteSubmit()).toBeDisabled();
+  await expect(deletion().getByLabel('删除原因', { exact: true })).toHaveAttribute('maxlength', '2000');
+  await deletion().getByLabel('删除原因', { exact: true }).fill('do not delete yet'); await deletion().getByRole('button', { name: '返回', exact: true }).click();
+  assert.equal(state.cancelBodies.length, 0); await expect(rowAction(fba, '编辑需求')).toBeEnabled();
+  await rowAction(fba, '删除需求').click(); await deletion().getByLabel('删除原因', { exact: true }).fill('CRUD deletion requested'); await deletion().getByRole('checkbox').check();
   for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 }); await noOverflow();
     await page.screenshot({ path: resolve(evidence, `workbench-demand-delete-${width}.png`), fullPage: true });
     if (width !== 320) await page.screenshot({ path: resolve(evidence, `workbench-demand-delete-viewport-${width}.png`), fullPage: false });
   }
-  await page.setViewportSize({ width: 1440, height: 1000 }); state.holdNextMutation = 'cancel'; state.nextFailure = { action: 'cancel', code: 'QUEUE_UNAVAILABLE' };
-  await submitDemand().click(); await expect.poll(() => Boolean(state.releaseMutation)).toBe(true); await expect(demandDialog().getByRole('button', { name: '关闭货件需求', exact: true })).toBeDisabled(); await expect(submitDemand()).toBeDisabled(); state.releaseMutation();
-  await expect(demandDialog().getByRole('alert')).toContainText('原操作编号已保留'); await expect(demandDialog().getByLabel('删除原因', { exact: true })).toHaveValue('CRUD deletion requested');
-  assert.equal(state.lifecycles.get(target.id), 'active'); const firstDelete = copy(state.cancelBodies.at(-1)); await submitDemand().click(); await expect(demandDialog()).not.toBeVisible();
-  assert.deepEqual(state.cancelBodies.at(-1), firstDelete); assert.equal(firstDelete.input.expectedVersion, 4); assert.equal(state.lifecycles.get(target.id), 'cancelled');
+  await page.setViewportSize({ width: 1440, height: 1000 }); state.holdNextMutation = 'trash'; state.nextFailure = { action: 'trash', code: 'QUEUE_UNAVAILABLE' };
+  await deleteSubmit().click(); await expect.poll(() => Boolean(state.releaseMutation)).toBe(true); await expect(deletion().getByRole('button', { name: '关闭删除需求', exact: true })).toBeDisabled(); await expect(deletion().locator('button[type=submit]')).toBeDisabled(); state.releaseMutation();
+  await expect(deletion().getByRole('alert')).toContainText('重试原请求'); await expect(deletion().getByLabel('删除原因', { exact: true })).toHaveValue('CRUD deletion requested');
+  assert.equal(state.lifecycles.get(target.id), 'active'); const firstDelete = copy(state.cancelBodies.at(-1)); await deletion().getByRole('button', { name: '重试原请求', exact: true }).click(); await expect(deletion()).not.toBeVisible();
+  assert.deepEqual(state.cancelBodies.at(-1), firstDelete); assert.equal(firstDelete.input.expectedVersion, 4); assert.equal(state.lifecycles.get(target.id), 'trashed');
   await expect(page.getByText('此范围暂无发货明细，请调整筛选或导入并提交需求。', { exact: true })).toBeVisible(); await expect(table()).toHaveCount(0); note();
 
-  step = 'deleted-history-remains-queryable-without-product-or-grouping-export-actions';
-  await chooseOption(form().getByLabel('需求记录状态', { exact: true }), 'cancelled'); await form().getByRole('button', { name: '筛选', exact: true }).click();
-  await expect.poll(() => state.queries.at(-1)?.lifecycle).toBe('cancelled'); await expect(table()).toContainText(fba);
-  await expect(table()).not.toContainText('CRUD-SKU-21-0'); await expect(table()).not.toContainText('CRUD-SKU-21-1'); await expect(demandCheck(fba)).toHaveCount(0);
-  await expect(rowAction(fba, '编辑需求')).toBeDisabled(); await expect(rowAction(fba, '删除需求')).toBeDisabled(); await expect(newBatch()).toBeDisabled(); await expect(generate()).toBeDisabled();
-  await rowAction(fba, '查看需求').click(); await expect(demandDialog().getByRole('status')).toContainText('需求已删除'); await demandDialog().getByText('修订与操作历史', { exact: true }).click(); await expect(demandDialog()).toContainText('CRUD deletion requested');
-  await demandDialog().getByRole('button', { name: '关闭货件需求', exact: true }).click();
-  await chooseOption(form().getByLabel('需求记录状态', { exact: true }), 'all'); await form().getByRole('button', { name: '筛选', exact: true }).click(); await expect(table()).toContainText(fba);
+  step = 'deleted-demand-is-in-recycle-bin-and-excluded-from-all-current-demand-filters';
+  await page.getByRole('button', { name: '回收站', exact: true }).click();
+  const recycle = page.getByRole('dialog', { name: '发货回收站', exact: true }); await recycle.getByRole('button', { name: '需求', exact: true }).click();
+  await expect(recycle).toContainText(fba); await expect(recycle).toContainText('CRUD deletion requested'); await expect(recycle.getByRole('button', { name: '恢复需求', exact: true })).toBeVisible();
+  await recycle.getByRole('button', { name: '关闭发货回收站', exact: true }).click();
+  await chooseOption(form().getByLabel('需求记录状态', { exact: true }), 'all'); await form().getByRole('button', { name: '筛选', exact: true }).click(); await expect(table()).toHaveCount(0);
   await reset(); await expect.poll(() => state.queries.at(-1)?.lifecycle).toBe('active'); await expect.poll(() => state.queries.at(-1)?.page).toBe('1'); await expect(table()).not.toContainText(fba); note();
 }
 

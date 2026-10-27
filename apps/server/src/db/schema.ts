@@ -1,4 +1,5 @@
 import { boolean, bigint, check, date, foreignKey, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, type AnyPgColumn } from 'drizzle-orm/pg-core';
+import { shippingLifecycleColumns } from '../modules/shipping-lifecycle/columns.js';
 import { sql } from 'drizzle-orm';
 export * from '../modules/batches/schema.js';
 export * from '../modules/batches/export-schema.js';
@@ -201,11 +202,13 @@ export const importOperations = pgTable('import_operation', {
 }, (table) => [check('import_operation_kind_check', sql`${table.kind} IN ('upload','parse')`)]);
 
 export const demands = pgTable('demand', {
+  ...shippingLifecycleColumns(),
   id: uuid('id').primaryKey(), sid: integer('sid').notNull(), fba: text('fba').notNull(),
   snapshot: jsonb('snapshot').$type<DemandSnapshot>().notNull(), version: integer('version').notNull(),
   businessDate: date('business_date').notNull(), weekStartDate: date('week_start_date').notNull(), weekEndDate: date('week_end_date').notNull(),
   createdAt: at('created_at').notNull().defaultNow(), updatedAt: at('updated_at').notNull().defaultNow(),
 }, (table) => [uniqueIndex('demand_sid_fba_idx').on(table.sid, table.fba),
+  check('demand_lifecycle_check', sql`${table.lifecycle} IN ('active','cancelled','trashed')`),
   check('demand_identity_check', sql`${table.sid} > 0 AND ${table.fba} ~ '^FBA[A-Z0-9]+$'`),
   check('demand_version_check', sql`${table.version} > 0`)]);
 
@@ -250,3 +253,4 @@ export const sellerCatalogOperations = pgTable('seller_catalog_operation', {
 export * from '../modules/lingxing/sync-schema.js';
 export * from '../modules/imports/fba-lookup-schema.js';
 export * from '../modules/shipping-runs/schema.js';
+export * from '../modules/shipping-lifecycle/schema.js';

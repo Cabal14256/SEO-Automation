@@ -2,6 +2,7 @@ import { boolean, check, date, foreignKey, index, integer, jsonb, pgTable, text,
 import { sql } from 'drizzle-orm';
 import type { GroupConfirmation, ShipmentData, SubBatchRecord } from '@scm/contracts';
 import { demands, demandRevisions, user } from '../../db/schema.js';
+import { shippingLifecycleColumns } from '../shipping-lifecycle/columns.js';
 
 const at = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
 export const weeklyBatches = pgTable('weekly_batch', {
@@ -12,11 +13,12 @@ export const weeklyBatches = pgTable('weekly_batch', {
   createdBy: text('created_by').notNull().references(() => user.id), createdAt: at('created_at').notNull().defaultNow(),
 }, (t) => [uniqueIndex('weekly_batch_week_idx').on(t.weekStartDate, t.weekEndDate).where(sql`${t.shippingRunId} IS NULL`), uniqueIndex('processing_batch_run_uq').on(t.shippingRunId), check('weekly_batch_range_check', sql`${t.weekEndDate} = ${t.weekStartDate} + 6 AND extract(isodow from ${t.weekStartDate}) = 1`), check('weekly_batch_version_check', sql`${t.version}>0 AND ${t.nextPrefix}>=0`)]);
 export const subBatches = pgTable('sub_batch', {
+  ...shippingLifecycleColumns(),
   id: uuid('id').primaryKey(), batchId: uuid('batch_id').notNull().references(() => weeklyBatches.id), name: text('name').notNull(), version: integer('version').notNull().default(1),
   status: text('status').notNull().default('draft'), position: integer('position').notNull().default(0), prefix: text('prefix'), confirmedVersion: integer('confirmed_version'), frozenAt: at('frozen_at'),
   correctionOfId: uuid('correction_of_id'), replacedById: uuid('replaced_by_id'), actualShipDate: date('actual_ship_date'),
   createdBy: text('created_by').notNull().references(() => user.id), createdAt: at('created_at').notNull().defaultNow(), updatedAt: at('updated_at').notNull().defaultNow(),
-}, (t) => [index('sub_batch_week_idx').on(t.batchId), uniqueIndex('sub_batch_id_week_unique').on(t.id,t.batchId), check('sub_batch_status_check', sql`${t.status} IN ('draft','confirmed','frozen','superseded')`), check('sub_batch_version_check', sql`${t.version}>0 AND ${t.position}>=0`)]);
+}, (t) => [check('sub_batch_lifecycle_check', sql`${t.lifecycle} IN ('active','cancelled','trashed')`), index('sub_batch_week_idx').on(t.batchId), uniqueIndex('sub_batch_id_week_unique').on(t.id,t.batchId), check('sub_batch_status_check', sql`${t.status} IN ('draft','confirmed','frozen','superseded')`), check('sub_batch_version_check', sql`${t.version}>0 AND ${t.position}>=0`)]);
 export const subBatchMembers = pgTable('sub_batch_member', {
   id: uuid('id').primaryKey(), batchId: uuid('batch_id').notNull().references(() => weeklyBatches.id), groupId: uuid('group_id').notNull().references(() => subBatches.id),
   demandId: uuid('demand_id').notNull().references(() => demands.id), demandVersion: integer('demand_version').notNull(), active: boolean('active').notNull().default(true),

@@ -1,4 +1,4 @@
-import { asc, desc, eq, inArray, ne } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne } from 'drizzle-orm';
 import type { DemandRecord, PhysicalReview, PhysicalWorkspace, PhysicalWorkspaceQuery, PhysicalWorkspaceRow } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { demands } from '../../db/schema.js';
@@ -50,14 +50,14 @@ export async function getPhysicalWorkspace(actorId: string, query: PhysicalWorks
   const groups = await db.transaction(async (tx) => {
     await requireBatchActor(tx, actorId);
     const rows = await tx.select({ group: subBatches, batch: weeklyBatches }).from(subBatches).innerJoin(weeklyBatches, eq(subBatches.batchId, weeklyBatches.id))
-      .where(ne(subBatches.status, 'superseded')).orderBy(desc(weeklyBatches.weekStartDate), asc(subBatches.position), asc(subBatches.id));
+      .where(and(ne(subBatches.status, 'superseded'), eq(subBatches.lifecycle, 'active'), eq(subBatches.lifecyclePending, false))).orderBy(desc(weeklyBatches.weekStartDate), asc(subBatches.position), asc(subBatches.id));
     const ids = rows.map(({ group }) => group.id);
     const memberships = ids.length ? await tx.select({ groupId: subBatchMembers.groupId, demandId: subBatchMembers.demandId, active: subBatchMembers.active }).from(subBatchMembers).where(inArray(subBatchMembers.groupId, ids)) : [];
     const demandIds = memberships.filter((member) => member.active).map((member) => member.demandId);
     const current = demandIds.length ? await tx.select().from(demands).where(inArray(demands.id, demandIds)) : [];
     const confirmations = ids.length ? await tx.select().from(groupConfirmations).where(inArray(groupConfirmations.groupId, ids)) : [];
-    const occurrences = await tx.select({ id: shippingRuns.id, month: shippingRuns.month, sequence: shippingRuns.sequence, numberingDate: shippingRuns.numberingDate }).from(shippingRuns);
-    const ticketMembers = ids.length ? await tx.select({ groupId: shippingTicketMembers.groupId, runId: shippingTicketMembers.runId }).from(shippingTicketMembers).where(inArray(shippingTicketMembers.groupId, ids)) : [];
+    const occurrences = await tx.select({ id: shippingRuns.id, month: shippingRuns.month, sequence: shippingRuns.sequence, numberingDate: shippingRuns.numberingDate }).from(shippingRuns).where(eq(shippingRuns.lifecycle, 'active'));
+    const ticketMembers = ids.length ? await tx.select({ groupId: shippingTicketMembers.groupId, runId: shippingTicketMembers.runId }).from(shippingTicketMembers).where(and(inArray(shippingTicketMembers.groupId, ids), isNull(shippingTicketMembers.releasedAt))) : [];
     return rows.map(({ group, batch }) => {
       const confirmation = confirmations.find((candidate) => candidate.groupId === group.id && candidate.groupVersion === group.confirmedVersion);
       const members = group.frozenAt && confirmation ? confirmation.snapshot.members : memberships.filter((member) => member.active && member.groupId === group.id).flatMap((member) => {

@@ -1,0 +1,20 @@
+import { z } from 'zod';
+
+export const shippingLifecycleTypeSchema = z.enum(['run', 'group', 'demand']);
+export type ShippingLifecycleType = z.infer<typeof shippingLifecycleTypeSchema>;
+export const shippingLifecycleSchema = z.enum(['active', 'cancelled', 'trashed']);
+export type ShippingLifecycle = z.infer<typeof shippingLifecycleSchema>;
+export const shippingLifecycleActionSchema = z.enum(['cancel', 'trash', 'restore', 'purge']);
+export type ShippingLifecycleAction = z.infer<typeof shippingLifecycleActionSchema>;
+export const shippingLifecycleInputSchema = z.object({ operationId: z.uuid(), expectedVersion: z.number().int().positive(), impactToken: z.string().min(32).max(128), reason: z.string().trim().min(1).max(2000) }).strict();
+export type ShippingLifecycleInput = z.infer<typeof shippingLifecycleInputSchema>;
+export const shippingLifecycleResultSchema = z.object({ type: shippingLifecycleTypeSchema, id: z.uuid(), version: z.number().int().positive(), lifecycle: shippingLifecycleSchema, pending: z.boolean(), purged: z.boolean(), replayed: z.boolean() });
+export type ShippingLifecycleResult = z.infer<typeof shippingLifecycleResultSchema>;
+const named = z.object({ id: z.uuid(), name: z.string() });
+export const shippingLifecycleImpactSchema = z.object({ type: shippingLifecycleTypeSchema, id: z.uuid(), name: z.string(), version: z.number().int().positive(), lifecycle: shippingLifecycleSchema, action: shippingLifecycleActionSchema, impactToken: z.string(), members: z.array(z.object({ id: z.uuid(), fba: z.string() })), affectedRuns: z.array(named), groups: z.array(named), documents: z.array(z.object({ id: z.uuid(), title: z.string() })), workflowCount: z.number().int().nonnegative(), conflicts: z.array(z.object({ code: z.string(), message: z.string(), fba: z.string().optional(), id: z.uuid().optional() })), canExecute: z.boolean(), blockingReasons: z.array(z.string()), willRestoreTo: shippingLifecycleSchema.optional() });
+export type ShippingLifecycleImpact = z.infer<typeof shippingLifecycleImpactSchema>;
+export const shippingRecycleQuerySchema = z.object({ type: shippingLifecycleTypeSchema.optional(), q: z.string().trim().max(200).default(''), page: z.coerce.number().int().min(1).max(100000).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20) }).strict();
+export type ShippingRecycleQuery = z.infer<typeof shippingRecycleQuerySchema>;
+export const shippingRecycleItemSchema = z.object({ type: shippingLifecycleTypeSchema, id: z.uuid(), name: z.string(), version: z.number().int().positive(), lifecycle: shippingLifecycleSchema, changedAt: z.iso.datetime(), changedBy: z.string().nullable(), reason: z.string(), pending: z.boolean(), memberCount: z.number().int().nonnegative(), canPurge: z.boolean(), purgeBlockingReasons: z.array(z.string()) });
+export const shippingRecycleListSchema = z.object({ items: z.array(shippingRecycleItemSchema), total: z.number().int().nonnegative(), page: z.number().int().positive(), pageSize: z.number().int().positive() });
+export type ShippingRecycleList = z.infer<typeof shippingRecycleListSchema>;

@@ -17,6 +17,7 @@ import { registerDocumentExportWorker } from './modules/documents/exports.js';
 import { registerDocumentAutomationWorker } from './modules/documents/automation.js';
 import { registerWorkflowExportWorker } from './modules/workflow/exports.js';
 import { registerShippingRunWorker } from './modules/shipping-runs/jobs.js';
+import { finalizePendingShippingLifecycles } from './modules/shipping-lifecycle/service.js';
 
 const config = readConfig();
 const boss = new PgBoss({ connectionString: config.DATABASE_URL, connectionTimeoutMillis: 5_000,
@@ -34,6 +35,13 @@ const stopDocumentExportWorker = await registerDocumentExportWorker(boss);
 const stopDocumentAutomationWorker = await registerDocumentAutomationWorker(boss);
 const stopWorkflowExportWorker = await registerWorkflowExportWorker(boss);
 const stopShippingRunWorker = await registerShippingRunWorker(boss);
+let finalizingLifecycles = false;
+const lifecycleInterval = setInterval(() => {
+  if (finalizingLifecycles) return;
+  finalizingLifecycles = true;
+  void finalizePendingShippingLifecycles().catch((error) => logError('Shipping lifecycle finalization failed', error)).finally(() => { finalizingLifecycles = false; });
+}, 2000);
+lifecycleInterval.unref();
 
 async function heartbeat(): Promise<void> {
   await db.insert(workerHeartbeat).values({
@@ -97,6 +105,7 @@ async function shutdown() {
   stopDocumentAutomationWorker();
   stopWorkflowExportWorker();
   stopShippingRunWorker();
+  clearInterval(lifecycleInterval);
   clearInterval(interval);
   await boss.stop();
   await closeDatabase();

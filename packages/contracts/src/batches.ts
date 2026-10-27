@@ -40,7 +40,7 @@ export type BatchScope = z.infer<typeof batchScopeSchema>;
 /** @deprecated Use BatchScope; dates do not define membership. */
 export const weeklyBatchSchema = batchScopeSchema;
 export type WeeklyBatch = BatchScope;
-export const subBatchRecordSchema = z.object({ id: z.uuid(), batchId: z.uuid(), name: z.string(), version: z.number().int().positive(), status: z.enum(['draft', 'confirmed', 'frozen', 'superseded']), position: z.number().int().nonnegative(), demandIds: z.array(z.uuid()), prefix: nullableText, confirmedVersion: z.number().int().positive().nullable(), frozenAt: z.iso.datetime().nullable(), correctionOfId: z.uuid().nullable(), replacedById: z.uuid().nullable(), actualShipDate: z.iso.date().nullable(), createdAt: z.iso.datetime(), updatedAt: z.iso.datetime() });
+export const subBatchRecordSchema = z.object({ id: z.uuid(), lifecycle: z.enum(['active', 'cancelled', 'trashed']).optional(), lifecyclePending: z.boolean().optional(), batchId: z.uuid(), name: z.string(), version: z.number().int().positive(), status: z.enum(['draft', 'confirmed', 'frozen', 'superseded']), position: z.number().int().nonnegative(), demandIds: z.array(z.uuid()), prefix: nullableText, confirmedVersion: z.number().int().positive().nullable(), frozenAt: z.iso.datetime().nullable(), correctionOfId: z.uuid().nullable(), replacedById: z.uuid().nullable(), actualShipDate: z.iso.date().nullable(), createdAt: z.iso.datetime(), updatedAt: z.iso.datetime() });
 export type SubBatchRecord = z.infer<typeof subBatchRecordSchema>;
 export const allocationCodeSchema = z.object({ id: z.uuid(), groupId: z.uuid(), demandId: z.uuid(), boxId: z.uuid(), prefix: z.string(), sequence: z.number().int().positive(), code: z.string(), valid: z.boolean(), createdAt: z.iso.datetime() });
 export type AllocationCode = z.infer<typeof allocationCodeSchema>;
@@ -83,6 +83,7 @@ export type BatchMutationResult = z.infer<typeof batchMutationResultSchema>;
 
 export const batchWorkspaceStatusSchema = z.enum(['empty', 'draft', 'confirmed', 'frozen']);
 export const batchWorkspaceQuerySchema = z.object({
+  lifecycle: z.enum(['active', 'cancelled', 'trashed', 'all']).optional(),
   month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(),
   shippingRunId: z.uuid().optional(),
   weekFrom: z.iso.date().optional(), weekTo: z.iso.date().optional(),

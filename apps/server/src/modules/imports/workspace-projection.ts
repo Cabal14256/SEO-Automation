@@ -50,7 +50,7 @@ function daysBetween(end: string | null, start: string | null): number | null {
 /** Browsing uses candidates and placeholders too; report/code allocation gates do not apply. */
 export function projectDemandWorkspace(input: DemandWorkspaceInput, query: DemandWorkspaceQuery, generatedAt = new Date().toISOString()): DemandWorkspace {
   const cancelledIds = new Set(input.cancelledDemandIds);
-  const visibleDemands = input.demands.filter((demand) => query.lifecycle === 'all' || (cancelledIds.has(demand.id) ? query.lifecycle === 'cancelled' : query.lifecycle !== 'cancelled'));
+  const visibleDemands = input.demands.filter((demand) => query.lifecycle === 'all' || (demand.lifecycle ?? (cancelledIds.has(demand.id) ? 'cancelled' : 'active')) === (query.lifecycle ?? 'active'));
   const demands = new Map(visibleDemands.map((demand) => [demand.id, demand]));
   const groups = new Map(input.groups.filter((group) => group.status !== 'superseded').map((group) => [group.id, group]));
   const shippingMemberships = new Map((input.shippingMemberships ?? []).map((member) => [member.demandId, member]));
@@ -150,7 +150,7 @@ export function projectDemandWorkspace(input: DemandWorkspaceInput, query: Deman
       .sort((left, right) => compare(left.importId, right.importId) || compare(left.sheetName, right.sheetName) || left.rowNumber - right.rowNumber)
       .map(({ importId, fileName, sheetName, rowNumber }) => ({ importId, fileName, sheetName, rowNumber }));
     const base = {
-      lifecycle: cancelled ? 'cancelled' as const : 'active' as const,
+      lifecycle: current.lifecycle ?? (cancelled ? 'cancelled' as const : 'active' as const), lifecyclePending: current.lifecyclePending || (current.lifecycle === 'active' && cancelledIds.has(current.id)),
       demandId: current.id, demandVersion: demand.version, currentDemandVersion: current.version,
       businessDate: demand.businessDate, weekStartDate: demand.weekStartDate, weekEndDate: demand.weekEndDate,
       shippingRunId: occurrence?.runId ?? null, shippingMonth: occurrence?.month ?? null, shippingSequence: occurrence?.sequence ?? null, ticketNumber: occurrence?.ticketNumber ?? null,

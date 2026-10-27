@@ -215,6 +215,7 @@ export async function commitImport(importId: string, input: ImportCommitInput, a
     const [previous] = await tx.select().from(importCommits).where(eq(importCommits.operationId, input.operationId));
     if (previous) {
       if (previous.actorUserId !== actorId || previous.requestHash !== requestHash) throw new ImportError('OPERATION_CONFLICT', 409, '操作编号已经用于其他提交请求。');
+      if ('purged' in previous.result && previous.result.purged) throw new ImportError('RESOURCE_PURGED', 404, '原提交包含已永久删除的需求，不能重新建立，请核对当前需求。');
       return { ...previous.result, replayed: true };
     }
     const record = await getConfirmationImport(tx, importId, actorId, true);

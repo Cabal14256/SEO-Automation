@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
 import { relative, resolve, isAbsolute } from 'node:path';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { fromDrizzle, type PgBoss } from 'pg-boss';
 import type { ReportExportInput, ReportExportRecord, ReportReference, ShipmentReport, ShipmentReportBox, ShipmentReportRow } from '@scm/contracts';
 import { reportTicketKey } from '@scm/contracts';
@@ -29,7 +29,7 @@ export type ShippingReportScope = {
 type Confirmed = Awaited<ReturnType<typeof getConfirmedGroup>> & { shippingDetails?: Record<string,{runId:string;month:string;sequence:number|null;ticketNumber:string|null;ticketId?:string;sourceTicketIndex?:number;inputOrder?:number}> };
 async function withShippingDetails(tx:BatchTx,groups:Confirmed[]):Promise<Confirmed[]> {
   if(!groups.length)return groups;
-  const members=await tx.select({member:shippingTicketMembers,run:shippingRuns,ticket:shippingTickets}).from(shippingTicketMembers).innerJoin(shippingRuns,eq(shippingRuns.id,shippingTicketMembers.runId)).innerJoin(shippingTickets,eq(shippingTickets.id,shippingTicketMembers.ticketId)).where(inArray(shippingTicketMembers.groupId,groups.map((bundle)=>bundle.group.id)));
+  const members=await tx.select({member:shippingTicketMembers,run:shippingRuns,ticket:shippingTickets}).from(shippingTicketMembers).innerJoin(shippingRuns,eq(shippingRuns.id,shippingTicketMembers.runId)).innerJoin(shippingTickets,eq(shippingTickets.id,shippingTicketMembers.ticketId)).where(and(inArray(shippingTicketMembers.groupId,groups.map((bundle)=>bundle.group.id)),isNull(shippingTicketMembers.releasedAt),eq(shippingRuns.lifecycle,'active'),eq(shippingRuns.lifecyclePending,false)));
   return groups.map((bundle)=>({...bundle,shippingDetails:Object.fromEntries(members.filter(({member})=>member.groupId===bundle.group.id&&member.demandId).map(({member,run,ticket})=>[member.demandId!,{runId:run.id,month:run.month,sequence:run.sequence,ticketNumber:ticket.number,ticketId:ticket.id,sourceTicketIndex:ticket.sourceTicketIndex,inputOrder:member.inputOrder}]))}));
 }
 const integer = (value: string | null | undefined) => { if (value === null || value === undefined || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new BatchError('INVALID_QUANTITY', 422, '数量无法安全写入 XLSX，请核对商品数据。'); return Number(value); };
@@ -190,7 +190,7 @@ export async function getShipmentReport(actorId: string, filter: ReportFilter = 
   }, { isolationLevel: 'repeatable read' });
   const actor = await db.query.user.findFirst({ where: eq(user.id, actorId) });
   if (!actor || actor.banned || actor.role !== 'admin') throw new BatchError('FORBIDDEN', 403, '需要有效管理员身份。');
-  const conditions = [sql`${subBatches.status} <> 'superseded'`];
+  const conditions = [sql`${subBatches.status} <> 'superseded'`, eq(subBatches.lifecycle, 'active'), eq(subBatches.lifecyclePending, false)];
   if (filter.weeklyBatchId) conditions.push(eq(subBatches.batchId, filter.weeklyBatchId));
   if (filter.subBatchId) conditions.push(eq(subBatches.id, filter.subBatchId));
   const candidates = await db.select().from(subBatches).where(and(...conditions)).orderBy(subBatches.position, subBatches.createdAt);
@@ -276,6 +276,7 @@ async function serializeExport(record: ExportRow): Promise<ReportExportRecord> {
   if (record.status === 'completed') {
     const groups = await db.select().from(subBatches).where(inArray(subBatches.id, record.groupIds));
     if (groups.some((g) => g.replacedById)) invalidReason = '已有更正版本；历史文件保留，请核对替代记录。';
+    else if (groups.length !== record.groupIds.length || groups.some((g) => g.lifecycle && g.lifecycle !== 'active' || g.lifecyclePending || !g.confirmedVersion || record.references.some((reference) => reference.groupId === g.id && reference.groupVersion !== g.confirmedVersion))) invalidReason = '发货来源已作废或重新确认；历史文件仅供追溯。';
   }
   return { id: record.id, status: record.status as ReportExportRecord['status'], groupIds: record.groupIds, references: record.references,
     ...(record.projection.shippingRunId ? { shippingRunId: record.projection.shippingRunId, shippingRunVersion: record.projection.shippingRunVersion } : {}),

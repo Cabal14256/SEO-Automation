@@ -58,12 +58,12 @@ export async function documentCandidatesInTx(tx: BatchTx, actorId: string, input
   const batches = await tx.select().from(weeklyBatches);
   if (!batches.length) return { items: [], total: 0, ...scope };
   const loadOccurrences = Boolean(scope.shippingRunId || scope.month || batches.some((batch) => batch.shippingRunId));
-  const runs = loadOccurrences ? await tx.select().from(shippingRuns).where(and(scope.shippingRunId ? eq(shippingRuns.id, scope.shippingRunId) : undefined, scope.month ? eq(shippingRuns.month, scope.month) : undefined)) : [];
-  const links = loadOccurrences && runs.length ? await tx.select().from(shippingTicketMembers).where(inArray(shippingTicketMembers.runId, runs.map((run) => run.id))) : [];
+  const runs = loadOccurrences ? await tx.select().from(shippingRuns).where(and(eq(shippingRuns.lifecycle, 'active'), eq(shippingRuns.lifecyclePending, false), scope.shippingRunId ? eq(shippingRuns.id, scope.shippingRunId) : undefined, scope.month ? eq(shippingRuns.month, scope.month) : undefined)) : [];
+  const links = loadOccurrences && runs.length ? await tx.select().from(shippingTicketMembers).where(and(inArray(shippingTicketMembers.runId, runs.map((run) => run.id)), isNull(shippingTicketMembers.releasedAt))) : [];
   const scoped = Boolean(scope.shippingRunId || scope.month);
   const selectedGroupIds = [...new Set(links.flatMap((link) => link.groupId ? [link.groupId] : []))];
   if (scoped && !selectedGroupIds.length) return { items: [], total: 0, ...scope };
-  const groups = await tx.select().from(subBatches).where(and(inArray(subBatches.status, ['confirmed', 'frozen']), scoped ? inArray(subBatches.id, selectedGroupIds) : undefined)).orderBy(asc(subBatches.id));
+  const groups = await tx.select().from(subBatches).where(and(eq(subBatches.lifecycle, 'active'), eq(subBatches.lifecyclePending, false), inArray(subBatches.status, ['confirmed', 'frozen']), scoped ? inArray(subBatches.id, selectedGroupIds) : undefined)).orderBy(asc(subBatches.id));
   const items: DocumentCandidate[] = [];
   for (const group of groups) {
     let bundle: Awaited<ReturnType<typeof getConfirmedGroupInTx>>;
@@ -245,7 +245,7 @@ export async function getDocument(id: string, actorId: string) {
 }
 export async function documentDependencyValidityInTx(tx: BatchTx, documentId: string, revisionId: string, actorId: string): Promise<{ valid: boolean; invalidReason: string | null }> {
   const { record } = await lockedDocument(tx, documentId, actorId);
-  if (record.currentRevisionId !== revisionId || ['cancelled', 'superseded'].includes(record.status)) return { valid: false, invalidReason: '单据已取消、被替代或已有新修订，历史文件仅供追溯。' };
+  if (record.currentRevisionId !== revisionId || ['cancelled', 'superseded', 'stale'].includes(record.status)) return { valid: false, invalidReason: '单据已取消、来源作废、被替代或已有新修订，历史文件仅供追溯。' };
   const validation = await validateDocumentInTx(tx, documentId, actorId);
   const invalidReason = documentDependencyInvalidReason(validation.issues);
   if (invalidReason) return { valid: false, invalidReason };
@@ -253,7 +253,7 @@ export async function documentDependencyValidityInTx(tx: BatchTx, documentId: st
 }
 export async function validateDocumentInTx(tx: BatchTx, id: string, actorId: string, expectedVersion?: number): Promise<DocumentValidation> {
   const { record, revision } = await lockedDocument(tx, id, actorId, expectedVersion), issues = validateDocumentData(revision.data);
-  if (['cancelled', 'superseded'].includes(record.status)) issues.push({ code: 'DOCUMENT_READ_ONLY', severity: 'error', message: '单据已取消或被替代，不能生成。' });
+  if (['cancelled', 'superseded', 'stale'].includes(record.status)) issues.push({ code: 'DOCUMENT_READ_ONLY', severity: 'error', message: '单据已取消、来源作废或被替代，不能生成，请建立更正。' });
   const candidates = await documentCandidatesInTx(tx, actorId, { shippingRunId: revision.data.shippingRunId }), current = new Map(candidates.items.map((item) => [item.demandId, item]));
   for (const member of revision.data.members) {
     const candidate = current.get(member.demand.id);

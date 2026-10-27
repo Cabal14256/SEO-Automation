@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { withDocumentInvoiceDefaults, type DocumentExportReference, type DocumentRevisionData } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { fileIndex, operationAudit } from '../../db/schema.js';
@@ -30,12 +30,19 @@ function assertReference(reference: DocumentExportReference, record: { status: s
   }
 }
 /** Bundle access always checks every member, including access through a historical per-document export. */
-export async function assertDocumentBundleValidInTx(tx: BatchTx, jobId: string, actorId: string, options: { historicalExport?: boolean } = {}) {
+export async function assertDocumentBundleValidInTx(tx: BatchTx, jobId: string, actorId: string, options: { historicalExport?: boolean; archiveOnly?: boolean } = {}) {
   await requireBatchActor(tx, actorId);
   const [job] = await tx.select().from(documentAutomationJobs).where(eq(documentAutomationJobs.id, jobId));
   if (!job || job.deletedAt && !options.historicalExport) throw new BatchError('NOT_FOUND', 404, '自动出单任务不存在或已删除。');
   const [bundle] = await tx.select().from(documentInvoiceBundles).where(eq(documentInvoiceBundles.jobId, jobId)).for('share');
   if (!bundle) throw new BatchError('FILE_UNAVAILABLE', 503, '整批工作簿的范围映射缺失，请联系管理员。');
+  if (options.archiveOnly) {
+    const published = await tx.select().from(documentExports).where(and(eq(documentExports.fileId, bundle.fileId), eq(documentExports.status, 'completed')));
+    if (!bundle.references.length || bundle.references.some((reference) => !published.some((item) => documentDigest(item.reference) === documentDigest(reference)))) {
+      throw new BatchError('FILE_UNAVAILABLE', 503, '历史工作簿的发布引用不完整，请联系管理员。');
+    }
+    return bundle;
+  }
   for (const reference of [...bundle.references].sort((left, right) => left.documentId.localeCompare(right.documentId))) {
     const { record, revision } = await lockedDocument(tx, reference.documentId, actorId); assertReference(reference, record, revision);
     const validation = await validateDocumentInTx(tx, reference.documentId, actorId);
@@ -51,7 +58,7 @@ export async function readDocumentBundle(jobId: string, actorId: string, options
   const file = await db.transaction(async (tx) => {
     const [job] = await tx.select().from(documentAutomationJobs).where(eq(documentAutomationJobs.id, jobId));
     if (!job || job.deletedAt && !options.historicalExport || job.mode !== 'single_workbook' || job.bundle?.status !== 'completed' || !job.bundle.fileId) throw new BatchError('NOT_FOUND', 404, '整批工作簿尚未成功发布或任务已删除。');
-    const bundle = await assertDocumentBundleValidInTx(tx, jobId, actorId, options);
+    const bundle = await assertDocumentBundleValidInTx(tx, jobId, actorId, { ...options, archiveOnly: true });
     const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, bundle.fileId));
     if (!file || file.id !== job.bundle.fileId) throw new BatchError('FILE_UNAVAILABLE', 503, '整批工作簿归档缺失，请联系管理员。'); return file;
   });

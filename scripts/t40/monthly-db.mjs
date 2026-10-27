@@ -51,8 +51,8 @@ try {
     try { await client.query(source); await client.query('COMMIT'); }
     catch (error) { await client.query('ROLLBACK'); throw error; }
   }
-  const child = spawn('corepack pnpm --filter @scm/server exec vitest run --maxWorkers=2 src/modules/shipping-runs/jobs-db.test.ts src/modules/batches/auto-confirm-db.test.ts', {
-    cwd: root, shell: true, stdio: 'inherit', env: { ...env, SCM_TEST_TEMPLATE_SCHEMA: template, SHIPPING_RUN_DB_TEST: '1', BATCH_AUTO_CONFIRM_DB_TEST: '1' },
+  const child = spawn('corepack pnpm --filter @scm/server exec vitest run --maxWorkers=2 src/modules/shipping-runs/jobs-db.test.ts src/modules/batches/auto-confirm-db.test.ts src/modules/shipping-lifecycle/service-db.test.ts', {
+    cwd: root, shell: true, stdio: 'inherit', env: { ...env, SCM_TEST_TEMPLATE_SCHEMA: template, SHIPPING_RUN_DB_TEST: '1', BATCH_AUTO_CONFIRM_DB_TEST: '1', SHIPPING_LIFECYCLE_DB_TEST: '1' },
   });
   exitCode = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', (code) => resolve(code ?? 1)); });
   const directory = join(root, '.local/t40/monthly-db');

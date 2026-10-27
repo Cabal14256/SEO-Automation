@@ -4,7 +4,7 @@ import { batchIssueSchema } from './batches.js';
 export const demandWorkspaceStatusSchema = z.enum(['unsynced', 'candidate', 'needs_review', 'confirmed', 'frozen']);
 export type DemandWorkspaceStatus = z.infer<typeof demandWorkspaceStatusSchema>;
 export const demandWorkspaceQuerySchema = z.object({
-  lifecycle: z.enum(['active', 'cancelled', 'all']).default('active'),
+  lifecycle: z.enum(['active', 'cancelled', 'trashed', 'all']).default('active'),
   month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(),
   shippingRunId: z.uuid().optional(),
   weekStartDate: z.iso.date().optional(), groupId: z.uuid().optional(),
@@ -21,7 +21,7 @@ export type DemandWorkspaceQuery = z.infer<typeof demandWorkspaceQuerySchema>;
 const nullableText = z.string().nullable();
 const nullableVersion = z.number().int().positive().nullable();
 export const demandWorkspaceRowSchema = z.object({
-  lifecycle: z.enum(['active', 'cancelled']).default('active'),
+  lifecycle: z.enum(['active', 'cancelled', 'trashed']).default('active'), lifecyclePending: z.boolean().optional(),
   id: z.string(), demandId: z.uuid(), rowKind: z.enum(['product', 'placeholder']),
   demandVersion: z.number().int().positive(), currentDemandVersion: z.number().int().positive(),
   businessDate: z.iso.date(), weekStartDate: z.iso.date(), weekEndDate: z.iso.date(),

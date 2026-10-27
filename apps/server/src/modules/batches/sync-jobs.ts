@@ -31,7 +31,7 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 async function validateRun(tx: Tx, run: Run) {
   await requireBatchActor(tx, run.createdBy);
   const [group] = await tx.select().from(subBatches).where(eq(subBatches.id, run.subBatchId)).for('share');
-  if (!group || group.version !== run.groupVersion || group.status === 'superseded') throw new BatchSyncError('VERSION_CONFLICT', '同步期间子批次版本已变化，请按当前成员新建同步。', 409);
+  if (!group || group.version !== run.groupVersion || group.status === 'superseded' || group.lifecycle && group.lifecycle !== 'active' || group.lifecyclePending) throw new BatchSyncError('VERSION_CONFLICT', '同步期间子批次已变化、取消或删除，请按当前成员新建同步。', 409);
   const members = await tx.select({ demand: demands }).from(subBatchMembers).innerJoin(demands, eq(demands.id, subBatchMembers.demandId)).where(and(eq(subBatchMembers.groupId, run.subBatchId), eq(subBatchMembers.active, true)));
   const items = await tx.select().from(batchSyncItems).where(eq(batchSyncItems.runId, run.id));
   if ((await loadDemandCancellationsInTx(tx, members.map(({ demand }) => demand.id))).size) throw new BatchSyncError('DEMAND_CANCELLED', '同步范围包含已取消需求，旧结果不会发布。', 409);
@@ -60,7 +60,7 @@ export async function requestBatchSync(boss: PgBoss, subBatchId: string, raw: z.
     const [old] = await tx.select().from(batchSyncRuns).where(eq(batchSyncRuns.operationId, input.operationId));
     if (old) { if (old.requestHash !== hash || old.createdBy !== actorId) throw new BatchSyncError('OPERATION_CONFLICT', '操作编号已用于其他同步。', 409); return old.id; }
     const [group] = await tx.select().from(subBatches).where(eq(subBatches.id, subBatchId)).for('share');
-    if (!group || group.version !== input.expectedVersion || group.status === 'superseded') throw new BatchSyncError('VERSION_CONFLICT', '子批次版本已变化，请刷新后同步。', 409);
+    if (!group || group.version !== input.expectedVersion || group.status === 'superseded' || group.lifecycle && group.lifecycle !== 'active' || group.lifecyclePending) throw new BatchSyncError('VERSION_CONFLICT', '子批次已变化、取消或删除，请刷新后同步。', 409);
     const [active] = await tx.select().from(batchSyncRuns).where(and(eq(batchSyncRuns.subBatchId, subBatchId), inArray(batchSyncRuns.status, ['queued', 'running']))).limit(1);
     if (active) throw new BatchSyncError('SYNC_ACTIVE', '该子批次已有同步任务，请等待结果。', 409);
     const members = await tx.select({ demand: demands }).from(subBatchMembers).innerJoin(demands, eq(demands.id, subBatchMembers.demandId)).where(and(eq(subBatchMembers.groupId, subBatchId), eq(subBatchMembers.active, true)));

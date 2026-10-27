@@ -56,6 +56,7 @@ docs/
 | [店铺映射 API](api/seller-mappings.md) | 目录、人工资料与映射维护 |
 | [导入 API](api/imports.md) | 上传、解析、预览、提交、草稿与需求 |
 | [发货次 API](api/shipping-runs.md) | 月内次数、票号、成员与自动整理 |
+| [取消、回收站与恢复 API](api/shipping-lifecycle.md) | 发货次、内部批次与 FBA 的影响核对、安全停止、恢复及永久清理 |
 | [批次与制表 API](api/batches.md) | 分组、同步、确认、箱码和导出 |
 | [发票与单据 API](api/documents.md) | 资料、模板、自动任务、修订、合并文件和复核 |
 | [后续工作流 API](api/workflows.md) | M5–M8、交接、报关、费用与归档 |
@@ -95,6 +96,7 @@ docs/
 | --- | --- |
 | [验收场景](acceptance/scenarios.md) | 功能、异常、并发与恢复的核对场景 |
 | [月内发货次验收](acceptance/monthly-shipping.md) | 编号、安排、更正、导出及迁移 |
+| [发货生命周期验收](acceptance/shipping-lifecycle.md) | 三层取消／删除、恢复冲突、回收站、已发布历史与永久清理 |
 | [业务验收操作](acceptance/t13-t22-runbook.md) | 资料预检、对账、版本包与显式签收 |
 | [M5–M8 技术验收说明](acceptance/m5-m8-technical.md) | 工作流与隔离技术验证的范围 |
 | [M5–M8 前端验证](acceptance/m5-m8-frontend.md) | 操作路径、恢复与界面验证 |

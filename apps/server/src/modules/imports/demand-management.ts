@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { demandCancelInputSchema, demandRevisionInputSchema, type DemandCancelInput, type DemandManagement, type DemandManagementOperation, type DemandRevisionInput } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { demands, demandRevisions, operationAudit } from '../../db/schema.js';
@@ -21,14 +21,15 @@ async function demandGroupsInTx(tx: BatchTx, demandId: string): Promise<Group[]>
 }
 async function managementInTx(tx: BatchTx, demandId: string, groups: Group[]): Promise<DemandManagement> {
   const cancelled = (await loadDemandCancellationsInTx(tx, [demandId])).get(demandId);
-  const base = { lifecycle: cancelled ? 'cancelled' as const : 'active' as const, groupId: groups[0]?.id ?? null, batchId: groups[0]?.batchId ?? null };
+  const base = { lifecycle: (cancelled?.lifecycle ?? (cancelled ? 'cancelled' : 'active')) as DemandManagement['lifecycle'], groupId: groups[0]?.id ?? null, batchId: groups[0]?.batchId ?? null };
   const blocked = (reason: string): DemandManagement => ({ ...base, canEdit: false, canDelete: false, reason });
   if (cancelled) return blocked(`需求已取消：${cancelled.reason}`);
+  if (groups.some((group) => group.lifecyclePending || group.lifecycle && group.lifecycle !== 'active')) return blocked('关联发货安排正在取消、删除或等待恢复，请完成后再修改需求。');
   if (groups.some((group) => group.status === 'superseded')) return blocked('需求所属批次已被替代，请读取当前更正批次。');
   if (groups.some((group) => group.frozenAt || group.status === 'frozen')) return blocked('需求所属批次已导出或打印并冻结，请通过批次更正处理。');
   const [claim] = await tx.select({ id: documentMemberClaims.id }).from(documentMemberClaims).where(and(eq(documentMemberClaims.demandId, demandId), isNull(documentMemberClaims.releasedAt))).limit(1);
   if (claim) return blocked('需求已被有效发票与单据占用，请先处理下游单据。');
-  const [workflow] = await tx.select({ id: workflowRecords.id }).from(workflowRecords).where(and(ne(workflowRecords.status, 'cancelled'), sql`EXISTS (SELECT 1 FROM jsonb_array_elements(${workflowRecords.source}->'members') AS member WHERE member->'demand'->>'id' = ${demandId} OR member->'source'->>'demandId' = ${demandId})`)).limit(1);
+  const [workflow] = await tx.select({ id: workflowRecords.id }).from(workflowRecords).where(and(notInArray(workflowRecords.status, ['cancelled', 'stale', 'superseded']), sql`EXISTS (SELECT 1 FROM jsonb_array_elements(${workflowRecords.source}->'members') AS member WHERE member->'demand'->>'id' = ${demandId} OR member->'source'->>'demandId' = ${demandId})`)).limit(1);
   if (workflow) return blocked('需求已有有效的履约、物流、清关、财务或归档记录，请先处理下游记录。');
   const [documentTask] = await tx.select({ id: documentExports.id }).from(documentExports).where(and(inArray(documentExports.status, ['queued', 'running']), sql`EXISTS (SELECT 1 FROM jsonb_array_elements(${documentExports.reference}->'sources') AS source WHERE source->>'demandId' = ${demandId})`)).limit(1);
   if (documentTask) return blocked('需求相关单据正在生成，请等待任务结束。');
@@ -53,7 +54,7 @@ export async function getDemandManagement(demandId: string, actorId: string) {
     const [record] = await tx.select({ id: demands.id }).from(demands).where(eq(demands.id, demandId));
     if (!record) throw new BatchError('NOT_FOUND', 404, '需求不存在。');
     const management = await managementInTx(tx, demandId, await demandGroupsInTx(tx, demandId));
-    const rows = await tx.select().from(operationAudit).where(and(eq(operationAudit.targetId, demandId), inArray(operationAudit.action, ['demand.revise', 'demand.cancel']))).orderBy(desc(operationAudit.createdAt), desc(operationAudit.id));
+    const rows = await tx.select().from(operationAudit).where(and(eq(operationAudit.targetId, demandId), inArray(operationAudit.action, ['demand.revise', 'demand.cancel', 'shipping_lifecycle.cancel', 'shipping_lifecycle.trash', 'shipping_lifecycle.restore', 'shipping_lifecycle.purge']))).orderBy(desc(operationAudit.createdAt), desc(operationAudit.id));
     const operations: DemandManagementOperation[] = rows.map((row) => ({ action: row.action, reason: row.details?.reason ?? '', createdBy: row.actorUserId, createdAt: row.createdAt.toISOString(), ...(row.details?.version ? { version: Number(row.details.version) } : {}) }));
     return { management, operations };
   }, { isolationLevel: 'repeatable read' });
@@ -101,7 +102,7 @@ async function mutateDemand(demandId: string, actorId: string, input: DemandCanc
     if (changed) {
       const version = record.version + 1;
       await tx.insert(demandRevisions).values({ id: randomUUID(), demandId, version, snapshot, createdBy: actorId });
-      const [updated] = await tx.update(demands).set({ snapshot, version, updatedAt: new Date() }).where(eq(demands.id, demandId)).returning();
+      const [updated] = await tx.update(demands).set({ snapshot, version, updatedAt: new Date(), ...(cancelled ? { lifecycle: 'trashed', lifecycleChangedAt: new Date(), lifecycleChangedBy: actorId, lifecycleReason: input.reason } : {}) }).where(eq(demands.id, demandId)).returning();
       for (const group of groups) await reviseGroupAfterDemandMutationInTx(tx, group, demandId, version, actorId, cancelled, input.reason);
       demand = serializeDemand(updated!);
     }
@@ -112,4 +113,7 @@ async function mutateDemand(demandId: string, actorId: string, input: DemandCanc
   });
 }
 export async function reviseDemand(demandId: string, actorId: string, input: DemandRevisionInput) { return mutateDemand(demandId, actorId, demandRevisionInputSchema.parse(input), false); }
-export async function cancelDemand(demandId: string, actorId: string, input: DemandCancelInput) { return mutateDemand(demandId, actorId, demandCancelInputSchema.parse(input), true); }
+/** Compatibility endpoint: the former UI called deletion "cancel". New cancellation uses /lifecycle/cancel. */
+export async function cancelDemand(demandId: string, actorId: string, raw: DemandCancelInput) {
+  return mutateDemand(demandId, actorId, demandCancelInputSchema.parse(raw), true);
+}

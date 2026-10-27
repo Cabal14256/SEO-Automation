@@ -50,7 +50,7 @@ function mutationReads(value: ReturnType<typeof fixture>, options: { grouped?: b
   if (options.changedMembership) return;
   if (value.group.status === 'frozen' && grouped) { queued.push([]); return; }
   if (options.cancelled) {
-    queued.push([{ targetId: value.record.id, actorUserId: 'admin', createdAt: new Date(), details: { reason: '误导入', version: '3' } }]); return;
+    queued.push([{ id: value.record.id, lifecycle: 'cancelled', lifecycleChangedBy: 'admin', lifecycleChangedAt: new Date(), lifecycleReason: '误导入', version: 3 }]); return;
   }
   policyReads(options.blocker, false, grouped);
 }
@@ -98,13 +98,14 @@ describe('audited demand mutations', () => {
     expect(queued).toEqual([]);
   });
 
-  it('cancels by appending the unchanged snapshot and a permanent audit marker, retaining the demand row', async () => {
+  it('preserves the old cancel endpoint as audited trash while retaining the demand row', async () => {
     const value = fixture(), operation = input(); mutationReads(value); updateRows.set(demands, [{ ...value.record, version: 3 }]);
     expect(await cancelDemand(value.record.id, 'admin', operation)).toMatchObject({ demand: { id: value.record.id, version: 3, snapshot: value.record.snapshot }, replayed: false });
     expect(inserts[0]!.values).toMatchObject({ demandId: value.record.id, version: 3, snapshot: value.record.snapshot });
     expect(state.groupRevision).toHaveBeenCalledExactlyOnceWith(tx, value.group, value.record.id, 3, 'admin', true, '核对原始需求后修改');
     expect(inserts[2]!.values).toMatchObject({ action: 'demand.cancel', targetId: value.record.id, details: { reason: '核对原始需求后修改', version: '3' } });
     expect(writes.map((write) => write.table)).toEqual([demands]);
+    expect(writes[0]!.values).toMatchObject({ lifecycle: 'trashed', lifecycleChangedBy: 'admin', lifecycleReason: '核对原始需求后修改' });
   });
 
   it('replays an operation without new revisions, audits or group changes', async () => {
@@ -152,7 +153,7 @@ describe('audited demand mutations', () => {
 
   it('returns cancellation reason and operation history while keeping the cancelled demand readable', async () => {
     const value = fixture(), now = new Date('2026-10-23T05:00:00Z');
-    queued.push([{ id: value.record.id }], [], [{ targetId: value.record.id, actorUserId: 'admin', createdAt: now, details: { reason: '误导入', version: '3' } }],
+    queued.push([{ id: value.record.id }], [], [{ id: value.record.id, lifecycle: 'cancelled', lifecycleChangedBy: 'admin', lifecycleChangedAt: now, lifecycleReason: '误导入', version: 3 }],
       [{ action: 'demand.cancel', actorUserId: 'admin', createdAt: now, details: { reason: '误导入', version: '3' } }]);
     expect(await getDemandManagement(value.record.id, 'admin')).toEqual({ management: { lifecycle: 'cancelled', canEdit: false, canDelete: false, groupId: null, batchId: null, reason: '需求已取消：误导入' },
       operations: [{ action: 'demand.cancel', reason: '误导入', version: 3, createdBy: 'admin', createdAt: now.toISOString() }] });

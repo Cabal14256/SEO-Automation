@@ -111,9 +111,11 @@ sellerSelections逐项包含sourceShop、sellerMappingId、expectedVersion、con
 
 发货工作台主表统一使用 `GET /api/v1/demands`，浏览独立于正式报表的确认及编码门槛。支持 `month`、周批次 `batchId`、`weekStartDate`、子批次 `groupId`、`grouping=ungrouped`、`sid`、`country`、`channel`、`region=all/US/EU`、`status`、`q`、`page`、`pageSize`。`month` 按首次业务日期筛选，区域复用正式发货表的国家规则，英国归欧洲；省略 `region` 或使用 `all` 不限制区域。归属筛选与数据处理状态分别生效；未建立周批次的需求也可用 `weekStartDate` 筛选。返回 `rows/total/demandTotal/maxBoxes/filters`，其中 `filters.weeks` 提供全部需求周及去重票数，筛选选项不随当前页或条件清空。
 
-新增 `lifecycle=active|cancelled|all`，默认只查询当前需求，与数据处理 `status` 分别筛选；返回行包含 `lifecycle`。已取消需求保留历史占位及来源，可查询但不可分组或导出。`GET /demands/:id` 保留需求、修订和来源，增加 `management`（lifecycle、canEdit、canDelete、reason、groupId、batchId）及 `operations`（action、reason、createdBy、createdAt、version），写入时再次原子复查权限与版本。
+需求使用 `lifecycle=active|cancelled|trashed|all`，默认只查询当前需求，与数据处理 `status` 分别筛选；返回行包含生命周期，`trashed` 记录从统一回收站处理。已取消／删除需求可追溯但不可分组或导出，重新导入不会自动恢复。`GET /demands/:id` 保留需求、修订、来源、`management` 与操作历史，写入时再次原子复查权限及版本。
 
-`POST /demands/:id/revisions` 携带 `operationId`、`expectedVersion`、`reason` 及非空 `fields`；fields 严格仅允许 channel、destinationFc、destinationAddress、referenceQuantity、notes、sourceFilledAt，各值为去首尾空格、最多 2000 字的字符串或 null。店铺、FBA、国家及首次业务日期／归属周不可修改。`POST /demands/:id/cancel` 携带相同操作号、版本与原因字段。原因必填、最多 1000 字；响应为 `{demand,replayed}`。两者保存新版本及操作审计，取消保留原行、所有来源和修订；组内修改同步成员版本并撤回组确认、作废相关旧码，取消移出成员。冻结、有效下游占用或运行中任务返回 409；请求重放不重复增加版本。取消状态复用已有审计记录，无数据库迁移。导入预览将已取消身份标为不可提交，提交、分组及候选采集再次校验，避免同一 sid/FBA 被隐式恢复。
+`POST /demands/:id/revisions` 携带 `operationId`、`expectedVersion`、`reason` 及非空 `fields`；fields 严格仅允许 channel、destinationFc、destinationAddress、referenceQuantity、notes、sourceFilledAt，各值为去首尾空格、最多 2000 字的字符串或 null。店铺、FBA、国家及首次业务日期／归属周不可修改；原因必填、最多 1000 字，响应 `{demand,replayed}`。组内普通修改更新成员版本并撤回确认、作废相关旧码；冻结、有效下游占用或运行中任务仍限制普通编辑。
+
+新界面的取消、删除、恢复和彻底删除统一使用 `GET /demands/:id/lifecycle-impact?action=...` 及 `POST /demands/:id/lifecycle/{cancel|trash|restore|purge}`，携带最新 `impactToken`、版本、操作号与原因，详见[生命周期 API](shipping-lifecycle.md)。新生命周期保存于实体列，不再从取消审计推导。兼容 `POST /demands/:id/cancel` 保留旧请求、原因上限及保护条件，持久化为回收站删除状态。迁移将历史“删除需求”映射为 `trashed`；无安排快照的旧记录恢复为当前未分组需求，新操作按快照恢复并复查占用。
 
 默认仍按商品展开后分页，每页50行。`pageBy=demand` 按完整货件分页；单页发货工作台采用每页20票，以同一份返回数据切换“货件分组、商品平铺、逐箱长表”三种展示，共用筛选、分页、来源和状态，不分别维护需求表与成品表。商品或有效内部箱码关键词匹配到某票时返回该票完整商品明细，不因搜索切掉其余商品；`total` 是完整匹配货件的商品/占位行数，`demandTotal` 是总票数，货件分页使用后者判断末页。无商品的需求保留一条占位；候选数量缺失或无效返回 `null`，合法0保持0。有效确认优先显示确认快照；冻结后保留该快照，不随新需求或候选更新；原确认过期时显示最新候选并提示核对。
 

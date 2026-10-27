@@ -63,9 +63,9 @@ export const importConfirmationContextSchema = z.object({
   catalog: sellerCatalogSettingsSchema,
 });
 export type ImportConfirmationContext = z.infer<typeof importConfirmationContextSchema>;
-export const demandRecordSchema = z.object({ id: z.uuid(), snapshot: demandSnapshotSchema, version: z.number().int().positive(), businessDate: z.iso.date(), weekStartDate: z.iso.date(), weekEndDate: z.iso.date(), createdAt: z.iso.datetime(), updatedAt: z.iso.datetime() });
+export const demandRecordSchema = z.object({ id: z.uuid(), lifecycle: z.enum(['active', 'cancelled', 'trashed']).optional(), lifecyclePending: z.boolean().optional(), snapshot: demandSnapshotSchema, version: z.number().int().positive(), businessDate: z.iso.date(), weekStartDate: z.iso.date(), weekEndDate: z.iso.date(), createdAt: z.iso.datetime(), updatedAt: z.iso.datetime() });
 export type DemandRecord = z.infer<typeof demandRecordSchema>;
-export const demandLifecycleSchema = z.enum(['active', 'cancelled']);
+export const demandLifecycleSchema = z.enum(['active', 'cancelled', 'trashed']);
 export const demandManagementSchema = z.object({
   lifecycle: demandLifecycleSchema, canEdit: z.boolean(), canDelete: z.boolean(), reason: z.string().nullable(),
   groupId: z.uuid().nullable(), batchId: z.uuid().nullable(),
