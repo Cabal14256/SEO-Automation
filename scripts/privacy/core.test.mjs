@@ -83,6 +83,45 @@ test('history inspection catches a private source removed from the current tree'
   assert.deepEqual(await scanFiles(repo, await candidates(repo)), []);
   assert((await scanHistory(repo)).findings.some((finding) => finding.rule === 'private-history-path'));
 }));
+
+async function internalCheckpoint(repo) {
+  await file(repo, 'source.ts', 'export {};'); await commit(repo);
+  const parent = (await git(repo, ['rev-parse', 'HEAD'])).toString().trim();
+  const blob = (await git(repo, ['hash-object', '-w', '--stdin'], `FBA${'1A2B3C4D5E'}\n`)).toString().trim();
+  const tree = (await git(repo, ['mktree'], `100644 blob ${blob}\tsource.ts\n`)).toString().trim();
+  const checkpoint = (await git(repo, ['-c', 'commit.gpgSign=false', 'commit-tree', tree, '-p', parent], 'Synthetic internal checkpoint\n')).toString().trim();
+  await git(repo, ['update-ref', 'refs/codex/turn-diffs/synthetic', checkpoint]);
+  return checkpoint;
+}
+
+test('internal checkpoints and stashes stay local, but every release ref scans the same objects', () => fixture(async (_, repo) => {
+  const checkpoint = await internalCheckpoint(repo);
+  await git(repo, ['update-ref', 'refs/stash', checkpoint]);
+  const clean = await scanHistory(repo);
+  assert.deepEqual(clean.findings, []); assert(clean.scanned > 0);
+  for (const ref of ['refs/heads/review', 'refs/remotes/origin/review', 'refs/tags/synthetic-release']) {
+    await git(repo, ['update-ref', ref, checkpoint]);
+    assert((await scanHistory(repo)).findings.some((finding) => finding.rule === 'shipment-identifier'), ref);
+    await git(repo, ['update-ref', '-d', ref]);
+    assert.deepEqual((await scanHistory(repo)).findings, []);
+  }
+  // The excluded refs remain intact; passing never depends on deleting them.
+  assert.equal((await git(repo, ['rev-parse', 'refs/codex/turn-diffs/synthetic'])).toString().trim(), checkpoint);
+  assert.equal((await git(repo, ['rev-parse', 'refs/stash'])).toString().trim(), checkpoint);
+}));
+
+test('detached HEAD still scans unpublished content outside branch and tag refs', () => fixture(async (_, repo) => {
+  const checkpoint = await internalCheckpoint(repo);
+  assert.deepEqual((await scanHistory(repo)).findings, []);
+  await git(repo, ['update-ref', '--no-deref', 'HEAD', checkpoint]);
+  assert((await scanHistory(repo)).findings.some((finding) => finding.rule === 'shipment-identifier'));
+}));
+
+test('annotated release tag metadata is inspected alongside its reachable history', () => fixture(async (_, repo) => {
+  await file(repo, 'source.ts', 'export {};'); await commit(repo);
+  await git(repo, ['-c', 'tag.gpgSign=false', 'tag', '-a', 'synthetic-release', '-m', `Synthetic FBA${'1A2B3C4D5E'}`]);
+  assert((await scanHistory(repo)).findings.some((finding) => finding.rule === 'shipment-identifier'));
+}));
 test('only the exact previously published private-directory notice is allowed in history', () => fixture(async (_, repo) => {
   // Previously public text only; business examples must never become fixtures.
   const notice = '# 受控业务资料\n\n此目录用于本地受控业务文件，不随公开仓库发布。原始工作簿、SOP、发票、报关、物流资料和图片可能含公司、店铺、商品、地址、联系人、税务及交易数据；目录中除本说明外的内容均由版本控制和公开导出排除。\n\n应用数据应放在项目外的 `DATA_DIR`，凭据放在未跟踪的环境配置中。公开测试和文档仅使用独立编造的示例。不要把真实原件换个名称当成脱敏文件，也不要把原件哈希、截图或解压后的 XML 放入公开目录。\n\n本次处理前的原件已保留在项目外的私有备份目录；具体路径由本地维护记录管理，公开仓库不提供来源文件清单。\n';

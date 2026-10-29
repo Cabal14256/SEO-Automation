@@ -20,7 +20,7 @@ const demandId = uid(), groupId = uid(), shipmentId = uid(), m2 = uid();
 const product = (msku, quantity) => ({ msku, fnsku: `${msku}-FN`, sku: `${msku}-SKU`, name: '手机膜测试商品', quantity, expiration: null, prepOwner: null, labelOwner: null });
 const first = product('A-FIRST', '100'), hidden = product('Z-HIDDEN', '200'), fallback = product('C-FALLBACK', '300');
 const demand = { id: demandId, snapshot: { sid: 101, fba: 'FBAINVOICEV2', shop: '技术美国店', country: '美国', channel: 'HY', destinationFc: 'TEST1', destinationAddress: 'Technical Address', referenceQuantity: '600', notes: 'TECHNICAL FIXTURE', subBatchName: null }, version: 1, businessDate: week, weekStartDate: week, weekEndDate: '2026-10-25', createdAt: now, updatedAt: now };
-const boxes = [[hidden, first], [fallback]].map((items, index) => ({ id: uid(), externalBoxId: null, packageId: null, localBoxId: String(index + 1), name: null, order: index + 1, weight: '1', weightUnit: 'KG', length: '10', width: '10', height: '10', dimensionUnit: 'CM', items }));
+const boxes = [[hidden, first], [fallback]].map((items, index) => ({ id: uid(), externalBoxId: null, packageId: null, localBoxId: String(index + 1), name: null, order: index + 1, weight: String(index + 1), weightUnit: 'KG', length: '10', width: '10', height: '10', dimensionUnit: 'CM', items }));
 const shipment = { id: shipmentId, demandId, version: 1, demandVersion: 1, data: { sid: 101, fba: demand.snapshot.fba, items: [hidden, fallback, first], boxes, observedAt: now, issues: [] }, source: 'manual', snapshotIds: [], reason: 'technical', createdBy: 'fixture', createdAt: now };
 const codes = boxes.map((box, index) => ({ id: uid(), groupId, demandId, boxId: box.id, prefix: 'A', sequence: index + 1, code: `A${index + 1}`, valid: true, createdAt: now }));
 const member = { source: { weekStartDate: week, groupId, groupVersion: 1, m2ConfirmationId: m2, demandId, demandVersion: 1, shipmentRevisionId: shipmentId, physicalConfirmationId: null, m3Version: null, sourceFingerprint: null }, demand, shipment, codes, physical: null };
@@ -102,29 +102,29 @@ try {
   await expect(fallbackRow.getByRole('cell').nth(2)).toHaveText('300'); await expect(fallbackRow.getByRole('cell').nth(4)).toContainText('300'); await expect(fallbackRow).toContainText('来源：全箱实际数量合计'); await expect(fallbackRow).toContainText('已回退实际数量');
   await expect(wizard()).toContainText('F15“亚马逊上架总数量”仍为所有箱内商品的实际总量'); note();
 
-  step = 'calculated-sales-price-is-readonly-and-legacy-overrides-are-ignored';
+  step = 'fixed-unit-price-is-readonly-and-legacy-overrides-are-ignored';
   const adjustments = wizard().locator('.document-product-adjustments'); await openAdjustment('A-FIRST');
   await expect(adjustments.locator('.document-product-adjustment')).toHaveCount(2);
   const editor = adjustments.locator('.document-product-adjustment').filter({ hasText: 'A-FIRST' });
-  await expect(editor.getByLabel('A-FIRST 自动申报单价', { exact: true })).toContainText('19.99 USD'); await expect(editor.getByLabel('A-FIRST 自动申报单价', { exact: true })).toContainText('4.00 USD');
+  await expect(editor.getByLabel('A-FIRST 自动申报单价', { exact: true })).toContainText('2.00 USD');
   await expect(editor.getByLabel('申报单价', { exact: true })).toHaveCount(0); await expect(editor.getByLabel('币种', { exact: true })).toHaveCount(0); await expect(adjustments.getByRole('checkbox')).toHaveCount(0); await expect(editor).not.toContainText('88'); await expect(editor).not.toContainText('99.00');
-  await expect(editor).toContainText('价格由系统保留两位小数'); await expect(editor).toContainText('有效领星售价始终优先'); note();
+  await expect(editor).toContainText('申报单价固定为每件 2.00'); await expect(editor).toContainText('无需补充商品售价'); note();
 
-  step = 'currency-conflict-is-explicit-and-unavailable-price-shows-recovery';
+  step = 'fixed-unit-price-ignores-listing-currency-and-missing-sales-price';
   main.currentRevision.data.productSourceFacts[0].currency = 'EUR'; main.currentRevision.data.productSourceFacts[0].unitPrice = null;
   main.currentRevision.data.productSourceFacts[1].salesPrice = null; main.currentRevision.data.productSourceFacts[1].unitPrice = null;
   await open(main.id); await openAdjustment('A-FIRST');
-  await expect(wizard()).toContainText('售价币种 EUR 与整票币种 USD 不一致');
+  await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'A-FIRST' })).toContainText('2.00 USD');
   await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'A-FIRST' }).getByLabel('人工补充售价（USD）', { exact: true })).toHaveCount(0);
   await openAdjustment('C-FALLBACK');
-  await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'C-FALLBACK' }).getByLabel('人工补充售价（USD）', { exact: true })).toBeVisible();
-  await expect(wizard()).toContainText('领星售价缺失或无效，可补充本票商品售价');
+  await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'C-FALLBACK' }).getByLabel('人工补充售价（USD）', { exact: true })).toHaveCount(0);
+  await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'C-FALLBACK' })).toContainText('2.00 USD');
   main.currentRevision.data.productSourceFacts = structuredClone(facts); note();
 
-  step = 'preview-has-formula-and-permission-guidance-without-price-confirmation';
+  step = 'preview-has-fixed-price-and-permission-guidance-without-price-confirmation';
   await open(main.id); permissionFailure = true; const panel = wizard().locator('.document-lingxing');
   await panel.getByRole('button', { name: '查询领星资料', exact: true }).click(); await expect(panel).toContainText('Listing 售价查询未获授权'); await expect(panel).toContainText('需开通权限：Listing 查询');
-  await expect(panel.getByRole('checkbox')).toHaveCount(0); await expect(panel).toContainText('售价 19.99 × 20%'); await expect(panel).toContainText('箱内其他商品 · 不输出申报资料');
+  await expect(panel.getByRole('checkbox')).toHaveCount(0); await expect(panel).toContainText('固定申报单价 2.00 USD'); await expect(panel).not.toContainText('× 20%'); await expect(panel).toContainText('箱内其他商品 · 不输出申报资料');
   await panel.getByRole('button', { name: '采用领星资料补齐空项', exact: true }).click(); await expect.poll(() => calls.apply.length).toBe(1); assert.equal(calls.apply[0].confirmPrices, false); note();
 
   step = 'legacy-draft-can-query-and-upgrade-without-confirming-old-prices';
@@ -139,7 +139,7 @@ try {
     for (const cell of await quantities().locator('tbody tr').first().locator('td').all()) { const bounds = await cell.boundingBox(); assert(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width, 'every declaration quantity and source fits the viewport'); }
     await page.screenshot({ path: resolve(evidence, `invoice-quantities-${width}.png`) });
     await openAdjustment('A-FIRST');
-    await wizard().locator('.document-invoice-price').first().evaluate((element) => element.scrollIntoView({ block: 'start' })); await page.screenshot({ path: resolve(evidence, `invoice-price-${width}.png`) });
+    await wizard().getByLabel('A-FIRST 自动申报单价', { exact: true }).evaluate((element) => { const body = element.closest('.import-dialog-body'); const navigation = body?.querySelector('.document-details-progress'); if (body) body.scrollTop += element.getBoundingClientRect().top - body.getBoundingClientRect().top - (navigation?.getBoundingClientRect().height ?? 0) - 32; }); await expect(wizard().getByLabel('A-FIRST 自动申报单价', { exact: true })).toBeInViewport(); await page.screenshot({ path: resolve(evidence, `invoice-price-${width}.png`) });
     await wizard().locator('.document-product-adjustment').filter({ hasText: 'A-FIRST' }).locator('summary').click();
     await wizard().locator('.document-product-adjustments > summary').click();
   }

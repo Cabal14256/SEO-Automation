@@ -19,7 +19,7 @@ describe('single-purpose profile XLSX preflight', () => {
     const rows = await parseProfileImport(bytes);
     expect(rows).toHaveLength(3); expect(rows[0]!.errors.join()).toContain('不接受公式'); expect(rows[1]!.errors.join()).toContain('重复'); expect(rows[1]!.errors.join()).toContain('预期版本'); expect(rows[2]!.errors.length).toBeGreaterThan(1);
   });
-  it('keeps the full channel, warehouse-address and shop-party applicability fields for batch maintenance', async () => {
+  it('keeps channel and party imports while rejecting deprecated local address imports', async () => {
     const row = (category: string, key: string, data: Record<string, string>) => [category, key, '', ...PROFILE_IMPORT_FIELDS.map((field) => data[field] ?? '')];
     const data = [
       { category: 'channel', key: 'hy-service', fields: { sid: '12', businessChannel: 'HY', channel: 'HY', country: '美国', service: 'Confirmed service' } },
@@ -28,6 +28,6 @@ describe('single-purpose profile XLSX preflight', () => {
     ];
     const rows = await parseProfileImport(await workbook(data.map((entry) => row(entry.category, entry.key, entry.fields))));
     expect(rows).toHaveLength(3);
-    data.forEach((entry, index) => { expect(rows[index]).toMatchObject({ category: entry.category, key: entry.key, data: entry.fields, errors: [] }); expect(rows[index]!.changes).toEqual(expect.arrayContaining(Object.keys(entry.fields))); });
+    data.forEach((entry, index) => { expect(rows[index]).toMatchObject({ category: entry.category, key: entry.key, data: entry.fields, errors: entry.category === 'address' ? [expect.stringContaining('领星')] : [] }); expect(rows[index]!.changes).toEqual(expect.arrayContaining(Object.keys(entry.fields))); });
   });
 });

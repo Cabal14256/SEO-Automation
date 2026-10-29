@@ -173,13 +173,15 @@ describe('bounded independent Lingxing product queries', () => {
     expect(result.products[0]!.issues).not.toContain('领星未提供可采用的 salesLink，仍需补充。');
     expect(result.products[0]!.issues).not.toContain('领星未提供可采用的图片链接，仍需补充图片。');
   });
-  it('merges compatible missing address fields and refuses mixing an existing contradictory address', async () => {
+  it('merges complete Lingxing list/detail evidence and keeps it authoritative over local defaults', async () => {
     const data = revision(); data.members[0]!.sourceCandidates!.addresses = [
-      { source: 'list', snapshotId: randomUUID(), data: { city: 'Greenwood', countryCode: 'US', addressLine1: null } },
-      { source: 'detail', snapshotId: randomUUID(), data: { city: 'Greenwood', countryCode: 'US', addressLine1: '1151 S GRAHAM RD' } },
+      { source: 'listShipments', snapshotId: randomUUID(), data: { recipientName: 'Receiver', postalCode: '12345', city: 'Greenwood', countryCode: 'US', addressLine1: null } },
+      { source: 'getShipmentDetails', snapshotId: randomUUID(), data: { city: 'Greenwood', countryCode: 'US', addressLine1: '1151 S GRAHAM RD' } },
     ];
     const merged = await collectLingxingDocumentPreview(data, null); expect(merged.fields.addressLine1).toBe('1151 S GRAHAM RD');
     data.fields.addressLine1 = 'Other Road';
+    expect((await collectLingxingDocumentPreview(data, null)).fields.addressLine1).toBe('1151 S GRAHAM RD');
+    data.members[0]!.sourceCandidates!.addresses[0]!.data.addressLine1 = 'Conflicting Source Road';
     const conflict = await collectLingxingDocumentPreview(data, null); expect(conflict.fields).not.toHaveProperty('addressLine1');
     expect(conflict.issues).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'DOCUMENT_ADDRESS_CONFLICT' })]));
   });

@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import ExcelJS from 'exceljs';
+import { unzipSync } from 'fflate';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentExportReference, DocumentRevisionData } from '@scm/contracts';
@@ -56,14 +57,14 @@ beforeEach(async () => {
   const book = new ExcelJS.Workbook(), sheet = book.addWorksheet('清关单'); DOCUMENT_MAIN_HEADERS.forEach((label, index) => { sheet.getCell(17, index + 1).value = label; });
   sheet.getCell('B4').value = 'Receiver'; sheet.getCell('B6').value = '10 Road'; sheet.getCell('B12').value = 'US'; sheet.getCell('F12').value = '美元'; sheet.getCell('B16').value = 1; sheet.getCell('F15').value = 5;
   for (let row = 1; row <= 5; row++) sheet.getCell(`F${row}`).value = '否';
-  sheet.getRow(18).values = ['FBA-BOX', 'PO', 1, 2, 3, 4, 'Product', '商品', 1.25, 5, 'Glass', '123', 'Use', 'Brand', 'Model', null, 'https://example.invalid']; sheet.pageSetup.printArea = 'A1:Q18';
+  sheet.getRow(18).values = ['FBA-BOX', 'PO', 1, 2, 3, 4, 'Product', '商品', 2, 5, 'Glass', '123', 'Use', 'Brand', 'Model', null, 'https://example.invalid']; sheet.pageSetup.printArea = 'A1:Q18';
   bytes = Buffer.from(await book.xlsx.writeBuffer());
   const jobId = randomUUID(), templateId = randomUUID(), templateFile: StoredFile = { id: randomUUID(), originalName: 'template.xlsx', storageKey: 'template.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', byteSize: bytes.length, sha256: 'a'.repeat(64), createdBy: 'admin', createdAt: at };
   const docs = new Map<string, Saved>();
   sources = Array.from({ length: 2 }, () => {
     const documentId = randomUUID(), revisionId = randomUUID(), source = { groupId: randomUUID(), m2ConfirmationId: randomUUID(), demandId: randomUUID() };
     const data = { purpose: 'invoice', generationRulesVersion: 'v2', templateReference: { templateId, version: 1, sha256: templateFile.sha256, fileId: templateFile.id }, members: [{ source, demand: { id: source.demandId, snapshot: { country: 'US' } } }], profileReferences: [], fields: { recipientName: 'Receiver', addressLine1: '10 Road', countryCode: 'US', currency: 'USD' } } as unknown as DocumentRevisionData;
-    const reference: DocumentExportReference = { documentId, revisionId, revisionVersion: 1, templateId, templateVersion: 1, templateSha256: templateFile.sha256, sources: [source] as DocumentExportReference['sources'], generationRulesVersion: 'v2', bundleJobId: jobId };
+    const reference: DocumentExportReference = { documentId, revisionId, revisionVersion: 1, templateId, templateVersion: 1, templateSha256: templateFile.sha256, sources: [source] as DocumentExportReference['sources'], generationRulesVersion: 'v2', pricingRule: 'fixed-2', bundleJobId: jobId };
     docs.set(documentId, { record: { id: documentId, version: 1, status: 'draft', currentRevisionId: revisionId }, revision: { id: revisionId, version: 1, data } });
     return { itemId: randomUUID(), documentId, version: 1, reference, data, file: templateFile, existingExportId: null };
   });
@@ -74,9 +75,9 @@ beforeEach(async () => {
   mocks.locked.mockImplementation(async (_tx, id: string, _actor, expected?: number) => { const saved = state.docs.get(id)!; if (expected !== undefined && expected !== saved.record.version) throw new BatchError('VERSION_CONFLICT', 409, '版本已变化'); return saved; });
   mocks.validate.mockImplementation(async (_tx, id) => ({ documentId: id, version: 1, valid: !invalid.has(id), issues: invalid.has(id) ? [{ code: 'VAT_REQUIRED', severity: 'error', message: 'VAT缺失' }] : [], checkedAt: at.toISOString() }));
   mocks.checked.mockResolvedValue(bytes); mocks.render.mockImplementation(async (_data, value) => value);
-  mocks.publish.mockImplementation(async (input, action) => { const file: StoredFile = { ...templateFile, id: randomUUID(), originalName: input.originalName, storageKey: 'bundle.xlsx', byteSize: input.bytes.length, sha256: 'b'.repeat(64) }; await action(file); return file; });
+  mocks.publish.mockImplementation(async (input, action) => { const file: StoredFile = { ...templateFile, id: randomUUID(), originalName: input.originalName, mimeType: input.mimeType, storageKey: 'bundle.zip', byteSize: input.bytes.length, sha256: 'b'.repeat(64) }; await action(file); return file; });
 });
-describe('whole-batch preflight and atomic XLSX publication', () => {
+describe('whole-batch preflight and atomic ZIP publication', () => {
   it('blocks deleted task downloads and ordinary scope validation while retaining fully validated historic export access', async () => {
     const id = state.job.id; await publishDocumentBundle(structuredClone(state.job), sources); state.job.deletedAt = at;
     await expect(readDocumentBundle(id, 'admin')).rejects.toMatchObject({ code: 'NOT_FOUND' });
@@ -105,6 +106,13 @@ describe('whole-batch preflight and atomic XLSX publication', () => {
     expect(result.items.find((item) => item.documentId === source.documentId)).toMatchObject({ status: 'blocked', error: { code: 'DOCUMENT_GENERATION_UPGRADE_REQUIRED' } });
     expect(mocks.publish).not.toHaveBeenCalled();
   });
+  it('requires a correction before reusing exports made with historical prices', async () => {
+    const source = sources[0]!;
+    state.exports.push({ id: randomUUID(), fileId: source.file.id, status: 'completed', reference: { ...source.reference, pricingRule: undefined, bundleJobId: undefined }, createdAt: at } as typeof documentExports.$inferSelect);
+    const result = await preflightDocumentBundle(state.job);
+    expect(result.items.find((item) => item.documentId === source.documentId)).toMatchObject({ status: 'blocked', error: { code: 'DOCUMENT_PRICING_UPGRADE_REQUIRED' } });
+    expect(mocks.publish).not.toHaveBeenCalled();
+  });
   it('reports every blocked ticket before any rendering or file publication', async () => {
     invalid.add(sources[1]!.documentId);
     const result = await preflightDocumentBundle(state.job);
@@ -116,11 +124,60 @@ describe('whole-batch preflight and atomic XLSX publication', () => {
     const snapshot = structuredClone(state.job); await publishDocumentBundle(snapshot, sources);
     expect(mocks.publish).toHaveBeenCalledOnce(); expect(state.bundles).toHaveLength(1); expect(state.exports).toHaveLength(2);
     expect(new Set(state.exports.map((entry) => entry.fileId)).size).toBe(1); expect(state.exports.every((entry) => entry.reference.bundleJobId === snapshot.id)).toBe(true);
-    expect(state.job).toMatchObject({ status: 'completed', phase: 'completed', bundle: { status: 'completed', sheetCount: 1 } });
+    expect(state.job).toMatchObject({ status: 'completed', phase: 'completed', bundle: { status: 'completed', sheetCount: 2, fileCount: 2 } });
     expect(state.job.items.every((item) => item.status === 'completed')).toBe(true); expect(state.frozen).toHaveLength(2);
-    const buffer = vi.mocked(mocks.publish).mock.calls[0]![0].bytes, book = new ExcelJS.Workbook(); await book.xlsx.load(buffer);
-    expect(book.worksheets).toHaveLength(1); expect(book.worksheets[0]!.getCell('B16').value).toBe(2); expect(book.worksheets[0]!.getCell('F15').value).toBe(10);
+    const published = vi.mocked(mocks.publish).mock.calls[0]![0], entries = unzipSync(published.bytes);
+    expect(published).toMatchObject({ mimeType: 'application/zip', originalName: expect.stringMatching(/\.zip$/) });
+    expect(Object.keys(entries)).toHaveLength(2);
+    for (const entry of state.exports) {
+      const child = entries[entry.reference.invoiceFileName!]!;
+      expect(child).toBeDefined(); expect(entry.reference.invoiceFileSha256).toBe(createHash('sha256').update(child).digest('hex'));
+      expect(state.bundles[0]!.sheets.find((sheet) => sheet.documentIds.includes(entry.reference.documentId))).toMatchObject({ fileName: entry.reference.invoiceFileName, fileSha256: entry.reference.invoiceFileSha256 });
+    }
+    for (const bytes of Object.values(entries)) {
+      const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(bytes) as never);
+      expect(book.worksheets).toHaveLength(1); expect(book.worksheets[0]!.getCell('B16').value).toBe(1); expect(book.worksheets[0]!.getCell('F15').value).toBe(5); expect(book.worksheets[0]!.getCell('I18').value).toBe(2);
+    }
     await expect(publishDocumentBundle(snapshot, sources)).resolves.toBe(false); expect(state.bundles).toHaveLength(1); expect(state.exports).toHaveLength(2);
+  });
+  it('downloads only the requested invoice as XLSX through an archived per-document reference', async () => {
+    const snapshot = structuredClone(state.job); await publishDocumentBundle(snapshot, sources);
+    const archive = vi.mocked(mocks.publish).mock.calls[0]![0].bytes;
+    mocks.checked.mockResolvedValueOnce(archive);
+    const result = await readDocumentBundle(snapshot.id, 'admin', { historicalExport: true, documentId: sources[1]!.documentId });
+    expect(result.file).toMatchObject({ mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', originalName: state.bundles[0]!.sheets[1]!.fileName });
+    expect(result.file.sha256).toBe(sources[1]!.reference.invoiceFileSha256);
+    const book = new ExcelJS.Workbook(); await book.xlsx.load(result.bytes as never);
+    expect(book.worksheets).toHaveLength(1); expect(book.worksheets[0]!.getCell('B16').value).toBe(1);
+    state.bundles[0]!.sheets[1]!.fileName = 'missing.xlsx'; mocks.checked.mockResolvedValueOnce(archive);
+    await expect(readDocumentBundle(snapshot.id, 'admin', { historicalExport: true, documentId: sources[1]!.documentId })).rejects.toMatchObject({ code: 'FILE_UNAVAILABLE' });
+  });
+  it('rejects child files whose digest disagrees with the bound invoice export', async () => {
+    const snapshot = structuredClone(state.job); await publishDocumentBundle(snapshot, sources);
+    const archive = vi.mocked(mocks.publish).mock.calls[0]![0].bytes, source = sources[0]!;
+    state.bundles[0]!.sheets[0]!.fileSha256 = '0'.repeat(64); mocks.checked.mockResolvedValueOnce(archive);
+    await expect(readDocumentBundle(snapshot.id, 'admin', { historicalExport: true, documentId: source.documentId })).rejects.toMatchObject({ code: 'FILE_UNAVAILABLE' });
+    state.bundles[0]!.sheets[0]!.fileSha256 = source.reference.invoiceFileSha256;
+    // Preserve the publication/reference equality while simulating a damaged pinned child hash.
+    source.reference.invoiceFileSha256 = 'f'.repeat(64); mocks.checked.mockResolvedValueOnce(archive);
+    await expect(readDocumentBundle(snapshot.id, 'admin', { historicalExport: true, documentId: source.documentId })).rejects.toMatchObject({ code: 'FILE_UNAVAILABLE' });
+  });
+  it('does not reuse an archive whose child mapping disagrees with its pinned export digest', async () => {
+    await publishDocumentBundle(structuredClone(state.job), sources);
+    state.bundles[0]!.sheets[0]!.fileSha256 = '0'.repeat(64);
+    const result = await preflightDocumentBundle(state.job);
+    expect(result.items.find((item) => item.documentId === sources[0]!.documentId)).toMatchObject({ status: 'blocked', error: { code: 'DOCUMENT_EXPORT_STALE' } });
+  });
+  it('publishes complete references for reused invoices without resetting their review state', async () => {
+    const source = sources[0]!, previousExportId = randomUUID(); source.existingExportId = previousExportId;
+    state.docs.get(source.documentId)!.record.status = 'reviewed';
+    state.exports.push({ id: previousExportId, fileId: source.file.id, status: 'completed', reference: { ...source.reference, bundleJobId: undefined }, createdAt: at } as typeof documentExports.$inferSelect);
+    await publishDocumentBundle(structuredClone(state.job), sources);
+    expect(state.exports).toHaveLength(3); expect(state.docs.get(source.documentId)!.record.status).toBe('reviewed');
+    const reused = state.job.items.find((item) => item.documentId === source.documentId)!;
+    expect(reused.exportId).not.toBe(previousExportId); expect(reused.fileId).toBe(state.job.bundle!.fileId);
+    expect(state.exports.filter((entry) => entry.fileId === state.job.bundle!.fileId)).toHaveLength(2);
+    await expect(readDocumentBundle(state.job.id, 'admin')).resolves.toHaveProperty('file.id', state.job.bundle!.fileId);
   });
   it('does not publish a partial workbook or freeze any source when a late member validation fails', async () => {
     invalid.add(sources[1]!.documentId);

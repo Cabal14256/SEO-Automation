@@ -7,6 +7,7 @@ import { BatchError, requireBatchActor, type BatchTx } from '../batches/service.
 import { documentOperation, documentDependencyValidityInTx, lockedDocument, documentCandidatesInTx } from '../documents/service.js';
 import { documentDigest, memberFromCandidate } from '../documents/domain.js';
 import { documents, documentExports, documentReviews } from '../documents/schema.js';
+import { checkedDocumentExportFile, documentExportFileSha256 } from '../documents/export-file.js';
 import { checkedFileBytes, ImportError } from '../imports/service.js';
 import { workflowAttachments, workflowClaims, workflowExports, workflowRecords, workflowRevisions } from './schema.js';
 import type { WorkflowPolicy } from './policy.js';
@@ -29,8 +30,9 @@ export async function getWorkflowSourceInTx(tx: BatchTx, documentId: string, act
   for (const item of exports) {
     if (!item.fileId) continue;
     const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, item.fileId));
-    const [review] = await tx.select().from(documentReviews).where(and(eq(documentReviews.exportId, item.id), eq(documentReviews.decision, 'approve'), eq(documentReviews.fileSha256, file?.sha256 ?? ''))).orderBy(desc(documentReviews.reviewedAt)).limit(1);
-    if (file && review) { await checkedFileBytes(file); return { documentId, documentRevisionId: revision.id, documentVersion: record.version, exportId: item.id, fileId: file.id, fileSha256: file.sha256, title: revision.data.title, weekStartDate: revision.data.weekStartDate, ...(revision.data.shippingRunId ? { shippingRunId: revision.data.shippingRunId, shippingRunMonth: revision.data.shippingRunMonth, shippingRunSequence: revision.data.shippingRunSequence } : {}), fields: revision.data.fields, members: revision.data.members }; }
+    const fileSha256 = documentExportFileSha256(item.reference, file?.sha256 ?? null);
+    const [review] = await tx.select().from(documentReviews).where(and(eq(documentReviews.exportId, item.id), eq(documentReviews.decision, 'approve'), eq(documentReviews.fileSha256, fileSha256 ?? ''))).orderBy(desc(documentReviews.reviewedAt)).limit(1);
+    if (file && review && fileSha256) { await checkedDocumentExportFile(file, item.reference); return { documentId, documentRevisionId: revision.id, documentVersion: record.version, exportId: item.id, fileId: file.id, fileSha256, title: revision.data.title, weekStartDate: revision.data.weekStartDate, ...(revision.data.shippingRunId ? { shippingRunId: revision.data.shippingRunId, shippingRunMonth: revision.data.shippingRunMonth, shippingRunSequence: revision.data.shippingRunSequence } : {}), fields: revision.data.fields, members: revision.data.members }; }
   }
   throw new BatchError('SOURCE_REVIEW_REQUIRED', 422, '来源单据没有已复核的有效文件。');
 }

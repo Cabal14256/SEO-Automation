@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { allocationCodeSchema, shipmentRevisionSchema } from './batches.js';
 import { demandRecordSchema } from './demands.js';
-import { physicalBoxSchema, physicalConfirmationSchema } from './physical.js';
+import { physicalBoxSchema, physicalConfirmationSchema, type PhysicalBox } from './physical.js';
 import { DOCUMENT_PRODUCT_IMAGE_MAX_BYTES, DOCUMENT_PRODUCT_IMAGES_MAX_BYTES, documentProductImageInfo } from './document-images.js';
 export * from './document-images.js';
 
@@ -161,7 +161,7 @@ export const documentCandidateListSchema = z.object({ items: z.array(documentCan
 export const documentSchema = z.object({ id: z.uuid(), purpose: documentPurposeSchema, status: documentStatusSchema, version: z.number().int().positive(), currentRevision: documentRevisionSchema, createdBy: z.string(), createdAt: z.iso.datetime(), updatedAt: z.iso.datetime() });
 export const documentProfileSchema = z.object({ id: z.uuid(), category: documentProfileCategorySchema, key: z.string(), version: z.number().int().positive(), status: z.enum(['active', 'retired']), data: z.record(z.string(), z.unknown()), createdBy: z.string(), createdAt: z.iso.datetime() });
 export const documentTemplateSchema = z.object({ id: z.uuid(), purpose: documentPurposeSchema, name: z.string(), version: z.number().int().positive(), mimeType: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/), fileId: z.uuid(), status: z.enum(['active', 'retired']), createdBy: z.string(), createdAt: z.iso.datetime() });
-export const documentExportReferenceSchema = z.object({ documentId: z.uuid(), revisionId: z.uuid(), revisionVersion: z.number().int().positive(), templateId: z.uuid(), templateVersion: z.number().int().positive(), templateSha256: z.string().regex(/^[a-f0-9]{64}$/), sources: z.array(documentSourceReferenceSchema).min(1), generationRulesVersion: documentGenerationRulesVersionSchema.optional(), bundleJobId: z.uuid().optional() }).strict();
+export const documentExportReferenceSchema = z.object({ documentId: z.uuid(), revisionId: z.uuid(), revisionVersion: z.number().int().positive(), templateId: z.uuid(), templateVersion: z.number().int().positive(), templateSha256: z.string().regex(/^[a-f0-9]{64}$/), sources: z.array(documentSourceReferenceSchema).min(1), generationRulesVersion: documentGenerationRulesVersionSchema.optional(), pricingRule: z.literal('fixed-2').optional(), bundleJobId: z.uuid().optional(), invoiceFileName: z.string().min(1).max(200).optional(), invoiceFileSha256: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
 export const documentExportSchema = z.object({ id: z.uuid(), status: documentExportStatusSchema, reference: documentExportReferenceSchema, fileId: z.uuid().nullable(), fileSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(), error: z.string().nullable(), createdAt: z.iso.datetime(), completedAt: z.iso.datetime().nullable(), valid: z.boolean(), invalidReason: z.string().nullable() });
 export const documentValidationSchema = z.object({ documentId: z.uuid(), version: z.number().int().positive(), valid: z.boolean(), issues: z.array(documentValidationIssueSchema), checkedAt: z.iso.datetime() });
 
@@ -179,6 +179,7 @@ export const documentAutomationSupplementSchema = z.object({ descriptors: z.arra
 export const documentAutomationBundleSchema = z.object({
   status: z.enum(['pending', 'running', 'completed', 'failed']), fileId: z.uuid().nullable(), fileName: z.string().nullable(),
   sheetCount: z.number().int().positive().nullable(), completedAt: z.iso.datetime().nullable(), error: documentAutomationErrorSchema.nullable(),
+  fileCount: z.number().int().positive().nullable().optional(),
 }).strict();
 export const documentAutomationItemSchema = z.object({
   id: z.uuid(), demandIds: z.array(z.uuid()).min(1).max(500), fbas: z.array(z.string()).min(1),
@@ -211,16 +212,19 @@ export const documentAutomationSupplementInputSchema = z.object({
 });
 export const documentAutomationResponseSchema = z.object({ job: documentAutomationJobSchema, replayed: z.boolean().optional() }).strict();
 export const documentAutomationListSchema = z.object({ items: z.array(documentAutomationJobSchema) }).strict();
+export const documentAutomationDeleteResponseSchema = z.object({
+  automationId: z.uuid(), version: z.number().int().positive(), deleted: z.literal(true), deletedAt: z.iso.datetime(),
+  cancelledDocumentIds: z.array(z.uuid()), preservedDocumentIds: z.array(z.uuid()), replayed: z.boolean(),
+}).strict();
 
 export const documentCreateInputSchema = z.object({ operationId: z.uuid(), purpose: documentPurposeSchema.default('invoice'), weekStartDate: z.iso.date().optional(), shippingRunId: z.uuid().optional(), demandIds: z.array(z.uuid()).min(1).max(500), title: z.string().trim().min(1).max(200), fields: documentFieldsSchema.default({}) }).strict().superRefine((value, context) => {
   if (new Set(value.demandIds).size !== value.demandIds.length) context.addIssue({ code: 'custom', path: ['demandIds'], message: '货件范围不能重复。' });
 });
 export const documentRevisionInputSchema = z.object({ operationId: z.uuid(), expectedVersion: z.number().int().positive(), reason: z.string().trim().min(1).max(1000), title: z.string().trim().min(1).max(200).optional(), fields: documentFieldsSchema.optional(), confirmAddress: z.boolean().optional(), demandIds: z.array(z.uuid()).min(1).max(500).optional(), profileReferences: z.array(documentProfileReferenceSchema).optional(), templateReference: documentTemplateReferenceSchema.nullable().optional(), manualSalesPrices: z.array(documentManualSalesPriceInputSchema).max(5000).optional() }).strict();
 export const documentProfileWriteSchema = z.object({ operationId: z.uuid(), profileId: z.uuid().optional(), expectedVersion: z.number().int().positive().optional(), category: documentProfileCategorySchema, key: z.string().trim().min(1).max(200), data: z.record(z.string(), z.unknown()), reason: z.string().trim().min(1).max(1000) }).strict().superRefine((value, context) => {
-  if (value.profileId && (value.category !== 'address' || value.expectedVersion === undefined)) context.addIssue({ code: 'custom', path: ['profileId'], message: '地址编辑须指定预期版本；其他资料仍按原分类与标识维护。' });
+  if (value.profileId) context.addIssue({ code: 'custom', path: ['profileId'], message: '本地地址簿已停用；其他资料请按原分类与标识维护。' });
   if (value.category === 'address') {
-    const result = documentAddressDataSchema.safeParse(value.data);
-    if (!result.success) for (const issue of result.error.issues) context.addIssue({ code: 'custom', path: ['data', ...issue.path], message: issue.message });
+    context.addIssue({ code: 'custom', path: ['category'], message: '收件地址以领星货件资料为准，不再维护本地地址簿。' });
   }
 });
 export const documentTemplateWriteSchema = z.object({ operationId: z.uuid(), expectedVersion: z.coerce.number().int().positive().optional(), purpose: documentPurposeSchema.default('invoice'), name: z.string().trim().min(1).max(200), reason: z.string().trim().min(1).max(1000) }).strict();
@@ -251,6 +255,7 @@ export type DocumentAutomationStartInput = z.infer<typeof documentAutomationStar
 export type DocumentAutomationRetryInput = z.infer<typeof documentAutomationRetryInputSchema>;
 export type DocumentAutomationResponse = z.infer<typeof documentAutomationResponseSchema>;
 export type DocumentAutomationList = z.infer<typeof documentAutomationListSchema>;
+export type DocumentAutomationDeleteResponse = z.infer<typeof documentAutomationDeleteResponseSchema>;
 export type DocumentAutomationFieldTarget = z.infer<typeof documentAutomationFieldTargetSchema>;
 export type DocumentAutomationFieldDescriptor = z.infer<typeof documentAutomationFieldDescriptorSchema>;
 export type DocumentAutomationSupplement = z.infer<typeof documentAutomationSupplementSchema>;
@@ -270,6 +275,17 @@ export function documentRepresentativeProduct<T extends DocumentProductIdentity>
     }
     return first;
   }, undefined);
+}
+
+/** Invoice v2 keeps one representative across a complete FBA with matching physical values. */
+export function documentInvoiceBoxGroups(boxes: readonly PhysicalBox[]) {
+  const signature = (box: PhysicalBox) => JSON.stringify([box.po, box.values.weight, box.values.length, box.values.width, box.values.height]);
+  const combine = boxes.length > 0 && boxes.every((box, index) => box.order === index + 1 && signature(box) === signature(boxes[0]!));
+  return (combine ? [[...boxes]] : boxes.map((box) => [box])).map((selected) => {
+    const representative = documentRepresentativeProduct(selected.flatMap((box) => box.items));
+    const box = selected.find((candidate) => representative && candidate.items.includes(representative)) ?? selected[0]!;
+    return { boxes: selected, box, representative };
+  });
 }
 export function documentProductSourceFact(data: Pick<DocumentRevisionData, 'productSourceFacts'>, sid: number, item: DocumentProductIdentity): DocumentProductSourceFact | undefined {
   const matches = data.productSourceFacts?.filter((fact) => fact.sid === sid && fact.msku === item.msku && fact.fnsku === item.fnsku && fact.sku === item.sku) ?? [];
@@ -335,6 +351,11 @@ export function documentTicketCurrency(members: ReadonlyArray<Pick<DocumentMembe
   const currencies = members.map((member) => documentCurrencyForCountry(member.demand.snapshot.country));
   return currencies.length && currencies.every((currency) => currency && currency === currencies[0]) ? currencies[0] : undefined;
 }
+export const DOCUMENT_INVOICE_UNIT_PRICE = '2.00';
+/** Current invoice declarations use a fixed amount in the ticket's currency. */
+export function documentInvoicePrice(data: Pick<DocumentRevisionData, 'members' | 'fields'>): { unitPrice: string; currency: string } {
+  return { unitPrice: DOCUMENT_INVOICE_UNIT_PRICE, currency: documentTicketCurrency(data.members) ?? data.fields.currency?.trim() ?? '' };
+}
 export function withDocumentInvoiceDefaults(fields: Readonly<Record<string, string | null>>, members: ReadonlyArray<Pick<DocumentMemberSnapshot, 'demand'>>): Record<string, string | null> {
   const result = withDocumentDefaults(fields);
   for (const key of DOCUMENT_BLANK_OUTPUT_FIELDS) result[key] = null;
@@ -365,6 +386,26 @@ export function hasDocumentAddressConflict(addresses: ReadonlyArray<Record<strin
   const normalize = (value: string | null | undefined) => value?.normalize('NFKC').trim().replace(/\s+/g, ' ').toUpperCase() ?? '';
   return ['addressLine1', 'addressLine2', 'addressLine3', 'city', 'state', 'postalCode', 'countryCode']
     .some((key) => new Set(addresses.map((address) => normalize(address[key])).filter(Boolean)).size > 1);
+}
+
+/** Adopt only complete, compatible Lingxing shipment evidence covering every member. */
+export function resolveDocumentLingxingAddress(members: ReadonlyArray<DocumentAddressMember>): Record<string, string | null> | null {
+  const sources = members.map((member) => (member.sourceCandidates?.addresses ?? []).filter((candidate) => ['listShipments', 'getShipmentDetails'].includes(candidate.source)));
+  if (!sources.length || sources.some((entries) => !entries.length)) return null;
+  // Each FBA must establish its own complete address before cross-FBA comparison.
+  const completeMembers = sources.every((entries) => DOCUMENT_ADDRESS_REQUIRED_FIELDS.every((key) => entries.some((entry) => Boolean(addressText(entry.data[key])))));
+  if (!completeMembers) return null;
+  const addresses = sources.flat().map((entry) => entry.data);
+  if (hasDocumentAddressConflict(addresses)) return null;
+  const merged: Record<string, string | null> = {};
+  const completeFirst = [...addresses].sort((left, right) => DOCUMENT_ADDRESS_FIELDS.filter((key) => Boolean(right[key]?.trim())).length - DOCUMENT_ADDRESS_FIELDS.filter((key) => Boolean(left[key]?.trim())).length);
+  for (const key of DOCUMENT_ADDRESS_FIELDS) merged[key] = completeFirst.find((address) => address[key]?.trim())?.[key]?.trim() ?? '';
+  merged.countryCode = addressText(merged.countryCode);
+  if (!hasCompleteDocumentAddress(merged) || members.some((member) => {
+    const expected = documentCountryCode(member.demand.snapshot.country);
+    return expected && expected !== merged.countryCode;
+  })) return null;
+  return merged;
 }
 
 // A preview is bound to the saved invoice version. Apply accepts only its

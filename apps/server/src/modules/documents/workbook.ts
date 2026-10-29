@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import ExcelJS from 'exceljs';
+import { createFbaRowFill } from '../../xlsx-fba-fill.js';
 import { Decimal } from 'decimal.js';
-import { DOCUMENT_BLANK_OUTPUT_FIELDS, DOCUMENT_FIELD_OPTIONS, DOCUMENT_REQUIRED_FIELDS, DOCUMENT_PRODUCT_FIELDS, calculateDocumentInvoiceUnitPrice, documentEffectiveSalesPrice, documentBoxes, documentCurrencyForCountry, documentProductCurrency, documentProductImageInfo, documentProductSourceFact, documentRepresentativeProduct, withDocumentDefaults, withDocumentInvoiceDefaults, type DocumentMemberSnapshot, type DocumentRevisionData, type PhysicalBox } from '@scm/contracts';
+import { DOCUMENT_BLANK_OUTPUT_FIELDS, DOCUMENT_FIELD_OPTIONS, DOCUMENT_REQUIRED_FIELDS, DOCUMENT_PRODUCT_FIELDS, calculateDocumentInvoiceUnitPrice, documentInvoicePrice, documentBoxes, documentCurrencyForCountry, documentInvoiceBoxGroups, documentProductCurrency, documentProductImageInfo, documentProductSourceFact, withDocumentDefaults, withDocumentInvoiceDefaults, type DocumentMemberSnapshot, type DocumentRevisionData, type PhysicalBox } from '@scm/contracts';
 export { DOCUMENT_REQUIRED_FIELDS, DOCUMENT_PRODUCT_FIELDS } from '@scm/contracts';
 import { validateImportArchive } from '../imports/zip-preflight.js';
 import { documentBoxFieldIssues } from './domain.js';
@@ -21,7 +22,7 @@ export const DOCUMENT_HEADER_LABELS = [
 type Issue = { code: string; severity: 'error' | 'warning'; message: string; demandId?: string };
 type Product = { msku: string; fnsku: string; sku: string };
 type Declaration = Record<string, string>;
-type Line = { member: DocumentMemberSnapshot; box: PhysicalBox; boxIds: string[]; range: string; count: number; product: Product & { quantity: string }; actualQuantity: string; declaredQuantity: string; declaration: Declaration };
+type Line = { member: DocumentMemberSnapshot; box: PhysicalBox; boxIds: string[]; range: string; count: number; product: Product & { quantity: string }; actualQuantity: string; actualTotalQuantity: string; declaredQuantity: string; declaration: Declaration };
 const Exact = Decimal.clone({ precision: 100, rounding: Decimal.ROUND_HALF_UP });
 const scalar = (value: unknown) => typeof value === 'string' ? value.trim() : typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
 const productKey = (item: Product) => JSON.stringify([item.msku, item.fnsku, item.sku]);
@@ -29,7 +30,7 @@ export const documentProductOverrideKey = (sid: number, item: Product) => create
 const positive = (value: string) => /^\d+(?:\.\d+)?$/.test(value) && new Exact(value).gt(0) && new Exact(value).lte(Number.MAX_SAFE_INTEGER);
 const integer = (value: string | null) => value !== null && /^\d+$/.test(value) && BigInt(value) <= BigInt(Number.MAX_SAFE_INTEGER);
 const price = (value: string) => /^\d+(?:\.\d{1,2})?$/.test(value) && positive(value) && new Exact(String(Number(value))).equals(value);
-/** The invoice price is exactly 20% of the archived ordinary Listing price. */
+/** Retained for reading historical Listing price observations and manual entries. */
 export const calculateInvoiceUnitPrice = calculateDocumentInvoiceUnitPrice;
 const currencyLabels: Record<string, string> = { USD: '美元', EUR: '欧元', GBP: '英镑' };
 const mixedCurrencyMessage = '本票 FBA 所属国家对应多个币种，请按币种拆分出单；系统不自动换汇。';
@@ -59,7 +60,7 @@ function declaration(data: DocumentRevisionData, member: DocumentMemberSnapshot,
   const prefix = `product.${documentProductOverrideKey(member.demand.snapshot.sid, item)}.`;
   for (const [key, value] of Object.entries(data.fields)) if (key.startsWith(prefix) && value !== null) values[key.slice(prefix.length)] = scalar(value);
   if (data.generationRulesVersion === 'v2') {
-    const effective = documentEffectiveSalesPrice(data, member.demand.snapshot.sid, item);
+    const effective = documentInvoicePrice(data);
     values.unitPrice = effective.unitPrice;
     values.currency = effective.currency;
     values.unitPriceConfirmed = 'true';
@@ -127,7 +128,9 @@ export function validateWorkbookData(data: DocumentRevisionData): Issue[] {
     const boxes = sourceBoxes(member, data.fields), expected = member.shipment.data.boxes;
     if (!boxes.length || boxes.length !== expected.length || new Set(boxes.map((box) => box.boxId)).size !== boxes.length || expected.some((box) => !boxes.some((actual) => actual.boxId === box.id))) add('DOCUMENT_BOX_SET_MISMATCH', '发票箱清单须完整匹配本票已确认的实际箱。', member);
     if (new Set(boxes.map((box) => box.order)).size !== boxes.length || boxes.some((box) => !Number.isSafeInteger(box.order) || box.order < 1)) add('BOX_ORDER_INVALID', '箱序必须采用已确认且唯一的正整数。', member);
-    const representativeKeys = new Set<string>();
+    const groups = v2 ? documentInvoiceBoxGroups(boxes) : [];
+    const boxGroups = new Map(groups.flatMap((group) => group.boxes.map((box) => [box.boxId, group] as const)));
+    const representativeKeys = new Set(groups.flatMap(({ representative }) => representative ? [productKey(representative)] : []));
     const counts = new Map<string, bigint>();
     for (const box of boxes) {
       if (!box.po?.trim() || box.po.length > 200 || Array.from(box.po).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) || Object.values(box.values).some((value) => !value || !positive(value))) add('DOCUMENT_BOX_VALUES_REQUIRED', 'PO、KG 毛重和 CM 尺寸必须完整有效，可在本票逐箱补齐或修改。', member);
@@ -138,13 +141,12 @@ export function validateWorkbookData(data: DocumentRevisionData): Issue[] {
         identities.add(key); counts.set(key, (counts.get(key) ?? 0n) + BigInt(item.quantity!)); totalQuantity += BigInt(item.quantity!);
       }
       if (v2) {
-        const representative = documentRepresentativeProduct(box.items);
-        if (!representative) { add('BOX_PRODUCT_INVALID', '箱内必须有可用于申报的商品。', member); continue; }
-        representativeKeys.add(productKey(representative));
-        const quantities = boxDeclarationQuantity(data, member, box, representative), label = `${box.fba} 第 ${box.order} 箱`;
+        const group = boxGroups.get(box.boxId), representative = group?.representative;
+        if (!representative || !box.items.length) { add('BOX_PRODUCT_INVALID', '箱内必须有可用于申报的商品。', member); continue; }
+        const quantities = boxDeclarationQuantity(data, member, group!.box, representative), actualQuantity = boxDeclarationQuantity(data, member, box, representative).actualQuantity, label = `${box.fba} 第 ${box.order} 箱`;
         if (box.items.length > 1) add('DOCUMENT_MIXED_CARTON', `${label}为混装箱，仅显示代表商品 ${representative.sku}；默认申报数量为 ${quantities.declaredQuantity}，请导出后手动核对修改。`, member, 'warning');
-        if (!quantities.fromCartonSpec) add('DOCUMENT_CARTON_QUANTITY_FALLBACK', `${label}代表商品缺少有效箱规装量，申报数量默认使用全箱实际数量合计 ${quantities.actualQuantity}。`, member, 'warning');
-        else if (quantities.declaredQuantity !== quantities.actualQuantity) add('DOCUMENT_CARTON_QUANTITY_DIFFERENCE', `${label}箱规默认申报数量 ${quantities.declaredQuantity} 与全箱实际数量 ${quantities.actualQuantity} 不同，请导出后手动核对修改。`, member, 'warning');
+        if (!quantities.fromCartonSpec) add('DOCUMENT_CARTON_QUANTITY_FALLBACK', `${label}代表商品缺少有效箱规装量，申报数量默认使用代表商品所在箱实际数量合计 ${quantities.declaredQuantity}。`, member, 'warning');
+        if (quantities.declaredQuantity !== actualQuantity) add('DOCUMENT_CARTON_QUANTITY_DIFFERENCE', `${label}默认申报数量 ${quantities.declaredQuantity} 与全箱实际数量 ${actualQuantity} 不同，请导出后手动核对修改。`, member, 'warning');
       }
     }
     const products = new Set<string>();
@@ -161,13 +163,7 @@ export function validateWorkbookData(data: DocumentRevisionData): Issue[] {
       try { values = declaration(data, member, item); } catch (error) { add('DECLARATION_AMBIGUOUS', (error as Error).message, member); continue; }
       const missingFields = DOCUMENT_PRODUCT_FIELDS.filter((field) => (!v2 || field !== 'unitPrice' && field !== 'currency') && !values[field] && (field !== 'currency' || validInvoiceCurrency));
       if (missingFields.length) add('DECLARATION_REQUIRED', `商品 ${item.sku} 缺少 ${missingFields.join('、')}。`, member);
-      if (v2 && !values.unitPrice) add('DECLARATION_SALES_PRICE_INVALID', `商品 ${item.sku} 售价缺失或无效；请查询并采用有效的领星资料，或按本票币种人工补充售价和原因。售价的20%保留两位小数后须为有效申报单价。`, member);
-      if (v2) {
-        const effective = documentEffectiveSalesPrice(data, member.demand.snapshot.sid, item);
-        if (effective.issue) add(effective.issue, `商品 ${item.sku} 的人工售价或来源、币种绑定已失效，请核对并重新补充。`, member);
-        if (effective.source === 'manual') add('DOCUMENT_MANUAL_SALES_PRICE_USED', `商品 ${item.sku} 使用人工补充售价 ${effective.salesPrice} ${effective.currency}（${effective.manual!.reason}），申报单价仍按20%计算。`, member, 'warning');
-      }
-      if (v2 && !(DOCUMENT_FIELD_OPTIONS.currency as readonly string[]).includes(values.currency ?? '')) add('DECLARATION_CURRENCY_UNSUPPORTED', `商品 ${item.sku} 的领星 Listing 售价币种缺失或不受支持，仅可采用 USD、EUR、GBP。`, member);
+      if (v2 && !(DOCUMENT_FIELD_OPTIONS.currency as readonly string[]).includes(values.currency ?? '')) add('DECLARATION_CURRENCY_UNSUPPORTED', `商品 ${item.sku} 的发票币种缺失或不受支持，仅可采用 USD、EUR、GBP。`, member);
       if (values.unitPrice && !price(values.unitPrice)) add('DECLARATION_PRICE_INVALID', `商品 ${item.sku} 申报单价须为可安全写入 XLSX、最多两位小数的有效正数。`, member);
       const validCurrency = (DOCUMENT_FIELD_OPTIONS.currency as readonly string[]).includes(values.currency ?? '') && values.currency === data.fields.currency;
       if (!v2 && price(values.unitPrice ?? '') && validCurrency && values.unitPriceConfirmed !== 'true') add('DECLARATION_PRICE_UNCONFIRMED', `商品 ${item.sku} 申报单价与币种尚未人工确认。`, member);
@@ -203,16 +199,16 @@ export function projectDocumentLines(data: DocumentRevisionData) {
       for (const item of box.items) { const quantity = BigInt(item.quantity ?? '0'); totalQuantity += quantity; const key = JSON.stringify([member.demand.id, item.msku, item.fnsku, item.sku]); perProduct[key] = (BigInt(perProduct[key] ?? '0') + quantity).toString(); }
     }
     const compress = boxes.length > 0 && boxes.every((box) => signature(box) === signature(boxes[0]!)) && boxes.every((box, index) => box.order === index + 1);
-    for (const box of compress ? [boxes[0]!] : boxes) {
-      const selected = compress ? boxes : [box];
-      const number = `${box.fba}U${String(box.order).padStart(6, '0')}`;
-      const range = compress && boxes.length > 1 ? `${number}-${boxes.length}` : number;
-      const representative = v2 ? documentRepresentativeProduct(box.items) : undefined;
+    const groups = v2 ? documentInvoiceBoxGroups(boxes) : (compress ? [boxes] : boxes.map((box) => [box])).map((selected) => ({ boxes: selected, box: selected[0]!, representative: undefined }));
+    for (const { boxes: selected, box, representative } of groups) {
+      const number = `${box.fba}U${String(selected[0]!.order).padStart(6, '0')}`;
+      const range = selected.length > 1 ? `${number}-${selected.length}` : number;
+      const actualTotalQuantity = selected.reduce((sum, entry) => sum + entry.items.reduce((quantity, item) => quantity + BigInt(item.quantity ?? '0'), 0n), 0n).toString();
       for (const item of v2 ? representative ? [representative] : [] : box.items) {
         const values = declaration(data, member, item), count = selected.length;
         const quantities = v2 ? boxDeclarationQuantity(data, member, box, item) : { actualQuantity: item.quantity ?? '0', declaredQuantity: item.quantity ?? '0' };
         totalValue = totalValue.plus(new Exact(values.unitPrice || '0').times(quantities.declaredQuantity).times(count));
-        lines.push({ member, box, boxIds: selected.map((entry) => entry.boxId), range, count, product: { ...item, quantity: item.quantity ?? '0' }, ...quantities, declaration: values });
+        lines.push({ member, box, boxIds: selected.map((entry) => entry.boxId), range, count, product: { ...item, quantity: item.quantity ?? '0' }, ...quantities, actualTotalQuantity, declaration: values });
       }
     }
   }
@@ -223,6 +219,64 @@ const text = (cell: ExcelJS.Cell) => {
   const value = cell.value;
   return typeof value === 'string' ? value : typeof value === 'number' ? String(value) : value && typeof value === 'object' && 'richText' in value ? value.richText.map((part) => part.text).join('') : '';
 };
+const addressLayoutError = '发票收件地址及表头过高，无法在每页完整打印。请核对并合理拆分到地址二、地址三，或调整模板列宽后重新生成。';
+const fontSize = (cell: ExcelJS.Cell) => Number.isFinite(cell.font?.size) && cell.font.size! > 0 ? cell.font.size! : 11;
+function glyphWidth(character: string, size: number) {
+  if (/\p{Mark}/u.test(character)) return 0;
+  const em = character.codePointAt(0)! > 0x024f ? 1.05 : /[MWmw@%]/.test(character) ? 1 : /[ilI.,'`:;!|\s]/.test(character) ? 0.35 : /[A-Z0-9]/.test(character) ? 0.75 : 0.65;
+  return em * size * 4 / 3;
+}
+function wrappedLines(value: string, width: number, size: number) {
+  let lines = 0;
+  for (const paragraph of value.replace(/\t/g, '    ').split(/\r\n|\r|\n/)) {
+    let used = 0; lines++;
+    for (const token of paragraph.trimEnd().match(/\s+|\S+/gu) ?? []) {
+      const characters = Array.from(token), tokenWidth = characters.reduce((sum, character) => sum + glyphWidth(character, size), 0);
+      if (tokenWidth <= width) {
+        if (used && used + tokenWidth > width) { lines++; used = 0; }
+        used += tokenWidth;
+      } else {
+        if (used) { lines++; used = 0; }
+        for (const character of characters) {
+          const next = glyphWidth(character, size);
+          if (used && used + next > width) { lines++; used = 0; }
+          used += next;
+        }
+      }
+    }
+  }
+  return lines;
+}
+function headerCellHeight(sheet: ExcelJS.Worksheet, cell: ExcelJS.Cell, firstColumn: number, lastColumn: number) {
+  const value = text(cell); if (!value) return 0;
+  const size = fontSize(cell);
+  // Excel column widths use the default font's digit width. Keep padding and a
+  // conservative glyph estimate because merged cells cannot reliably auto-fit.
+  let width = -8 - (cell.alignment?.indent ?? 0) * size * 4;
+  for (let column = firstColumn; column <= lastColumn; column++) {
+    const source = sheet.getColumn(column);
+    if (!source.hidden) width += (source.width ?? sheet.properties.defaultColWidth ?? 8.43) * 7 + 5;
+  }
+  if (!Number.isFinite(width) || width < size * 4 / 3) throw new DocumentWorkbookError('发票地址列宽不足，请调整模板列宽后重新生成。');
+  const lines = cell.alignment?.wrapText ? wrappedLines(value, width, size) : value.split(/\r\n|\r|\n/).length;
+  return Math.ceil((lines * size * 1.25 + 3) * 4) / 4;
+}
+/** Apply to fresh invoices and reused historical sheets without changing values. */
+export function applyDocumentAddressLayout(sheet: ExcelJS.Worksheet) {
+  const defaultHeight = sheet.properties.defaultRowHeight || 15;
+  for (let row = 3; row <= 14; row++) {
+    const address = sheet.getCell(row, 2), other = sheet.getCell(row, 6);
+    address.alignment = { ...address.alignment, horizontal: 'left', vertical: 'middle', wrapText: true, shrinkToFit: false, textRotation: 0, indent: 0 };
+    const height = Math.max(sheet.getRow(row).height ?? defaultHeight, headerCellHeight(sheet, address, 2, 4), headerCellHeight(sheet, other, 6, 8));
+    if (height > 409) throw new DocumentWorkbookError(`${addressLayoutError}（Excel 单行高度上限 409 磅。）`);
+    sheet.getRow(row).height = height;
+  }
+  // The controlled layout uses landscape A4/Letter defaults. Reserve space
+  // below the repeated header for margins and at least one 64 pt detail row.
+  const headerHeight = Array.from({ length: 17 }, (_, row) => sheet.getRow(row + 1).height ?? defaultHeight).reduce((sum, height) => sum + height, 0);
+  if (headerHeight > 360) throw new DocumentWorkbookError(`${addressLayoutError}（重复表头高度上限 360 磅。）`);
+  sheet.pageSetup.printTitlesRow = '1:17';
+}
 async function templateSheet(bytes: Buffer) {
   if (!bytes.length || bytes.length > 10 * 1024 * 1024) throw new DocumentWorkbookError('单据模板必须是不超过 10 MiB 的 XLSX。');
   await validateImportArchive(bytes);
@@ -257,7 +311,7 @@ export async function cleanDocumentTemplate(bytes: Buffer) {
     sheet.getCell(DOCUMENT_HEADER_FIELDS[key]).dataValidation = { type: 'list', allowBlank: key === 'clearanceMode' || key === 'deliveryStation', formulae: [`"${values.join(',')}"`] };
   }
   sheet.views = [{ state: 'frozen', ySplit: 17, showGridLines: false }];
-  sheet.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, printArea: 'A1:Q18', printTitlesRow: '17:17' };
+  sheet.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, printArea: 'A1:Q18', printTitlesRow: '1:17' };
   return Buffer.from(await book.xlsx.writeBuffer());
 }
 export async function createWorkbook(data: DocumentRevisionData, templateBytes: Buffer, _exportId?: string): Promise<Buffer> {
@@ -269,6 +323,7 @@ export async function createWorkbook(data: DocumentRevisionData, templateBytes: 
   const projection = projectDocumentLines(data), book = new ExcelJS.Workbook();
   await book.xlsx.load(await cleanDocumentTemplate(templateBytes) as unknown as Parameters<typeof book.xlsx.load>[0]);
   const sheet = book.worksheets[0]!;
+  const fillFba = createFbaRowFill(projection.lines.map((line) => line.box.fba));
   for (const [key, address] of Object.entries(DOCUMENT_HEADER_FIELDS)) sheet.getCell(address).value = (DOCUMENT_BLANK_OUTPUT_FIELDS as readonly string[]).includes(key) ? null : data.fields[key] ?? null;
   sheet.getCell('F12').value = currencyLabels[data.fields.currency!] ?? null;
   sheet.getCell('B16').value = projection.boxCount;
@@ -283,6 +338,7 @@ export async function createWorkbook(data: DocumentRevisionData, templateBytes: 
       cell.border = { top: { style: 'thin', color: { argb: 'FFD4D4D4' } }, bottom: { style: 'thin', color: { argb: 'FFD4D4D4' } }, left: { style: 'thin', color: { argb: 'FFD4D4D4' } }, right: { style: 'thin', color: { argb: 'FFD4D4D4' } } };
       cell.numFmt = [3, 4, 5, 6, 9].includes(column) ? '0.00' : column === 10 ? '0' : '@';
     });
+    fillFba(row, line.box.fba, 17);
     const productImage = image(p);
     if (productImage) {
       const id = book.addImage({ buffer: productImage.bytes as unknown as ExcelJS.Image['buffer'], extension: productImage.extension });
@@ -291,9 +347,11 @@ export async function createWorkbook(data: DocumentRevisionData, templateBytes: 
     }
   });
   sheet.pageSetup.printArea = `A1:Q${17 + projection.lines.length}`;
+  applyDocumentAddressLayout(sheet);
   const bytes = Buffer.from(await book.xlsx.writeBuffer()), verify = new ExcelJS.Workbook();
   await verify.xlsx.load(bytes as unknown as Parameters<typeof verify.xlsx.load>[0]);
   const written = verify.worksheets[0]!;
+  if (written.pageSetup.printTitlesRow !== '1:17') throw new DocumentWorkbookError('发票收件地址未完整设为每页重复打印表头。');
   if (DOCUMENT_BLANK_OUTPUT_FIELDS.some((key) => written.getCell(DOCUMENT_HEADER_FIELDS[key]).value !== null)) throw new DocumentWorkbookError('发票订单编号、参考号和贸易条款必须留空。');
   const expanded = new Map<string, bigint>(), coveredBoxes = new Set<string>();
   const v2 = data.generationRulesVersion === 'v2';
@@ -310,7 +368,7 @@ export async function createWorkbook(data: DocumentRevisionData, templateBytes: 
         if (coveredBoxes.has(boxKey)) throw new DocumentWorkbookError('发票输出重复包含同一个实际箱。');
         coveredBoxes.add(boxKey);
       }
-      expandedActualQuantity += BigInt(line.actualQuantity) * BigInt(line.count);
+      expandedActualQuantity += BigInt(line.actualTotalQuantity);
     } else expanded.set(key, (expanded.get(key) ?? 0n) + BigInt(String(row.getCell(10).value)) * BigInt(line.count));
   });
   const writtenImages = written.getImages();

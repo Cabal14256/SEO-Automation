@@ -6,7 +6,7 @@
 
 其他真实资料存放在受控私有 `DATA_DIR` 或被忽略的本地目录。`docs/research/` 和 `docs/acceptance/evidence/` 只发布各自的通用说明；`docs/templates/`、`.env`、`.local/`、运行数据、构建输出和发布包不作为源码上传。公开示例使用 `EXAMPLE-DE`、`EXAMPLE-US` 等虚构名称，不能从实际店铺列表批量替换名称后保留真实商品和交易明细。
 
-运行以下命令检查当前允许提交的文件、根仓库全部历史和检查器自身：
+运行以下命令检查当前允许提交的文件、根仓库全部发布引用的历史和检查器自身：
 
 ```powershell
 corepack pnpm privacy:check
@@ -16,6 +16,8 @@ corepack pnpm privacy:install-hook
 ```
 
 `privacy:install-hook` 为当前根仓库安装本地推送前检查；新克隆须再次执行安装命令。检查器用于识别已知风险模式和本地私有标识，无法自动理解所有新的业务字段。新增测试夹具应从空白编造，业务验收的结果和截图保持私有。检查输出也不要包含原始敏感值。
+
+历史扫描包含所有本地分支（`refs/heads/`）、远端跟踪分支（`refs/remotes/`）、标签（`refs/tags/`）及 `HEAD` 可达的完整对象，包括已删除文件、提交信息与附注标签内容；分离的 `HEAD` 同样检查。工具内部检查点（例如 `refs/codex/`）、`refs/stash` 和其他内部引用不属于发布范围，因此不扫描，也不删除。对象只要同时被任一发布引用或 `HEAD` 引用，仍须通过全部历史检查，不能用内部引用隐藏主分支、其他分支或标签中的敏感资料。内部引用必须保持本地，不可显式推送或通过 `git push --mirror` 发布。
 
 忽略规则不会自动取消已跟踪文件。维护者应确认 `git ls-files -- docs/private` 无输出，`git ls-files -ci --exclude-standard` 也无输出。发现误跟踪时，使用 `git rm --cached -- <具体文件>` 仅取消跟踪并保留本地文件，再核对暂存差异；不要使用 `git add -f` 将业务示例加入仓库。
 

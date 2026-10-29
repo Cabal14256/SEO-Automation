@@ -1,17 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
-import { documentSchema, documentRevisionInputSchema, documentManualSalesPriceInputSchema, documentManualSalesPriceSchema, documentAutomationJobSchema, documentAutomationSupplementInputSchema,
-  calculateDocumentInvoiceUnitPrice, documentCanManuallySupplySalesPrice, documentEffectiveSalesPrice, documentManualSalesPriceSources, documentProductSourceFact, documentTicketCurrency, withDocumentInvoiceDefaults } from '../../packages/contracts/dist/index.js';
-import { buildDocumentAutomationRequirements, planDocumentAutomationSupplement } from '../../apps/server/dist/modules/documents/automation-supplement.js';
+import { documentSchema, documentRevisionInputSchema, documentAutomationJobSchema, documentManualSalesPriceSchema, documentManualSalesPriceSources, documentInvoicePrice, withDocumentInvoiceDefaults } from '../../packages/contracts/dist/index.js';
+import { buildDocumentAutomationRequirements } from '../../apps/server/dist/modules/documents/automation-supplement.js';
 
-// Local memory fixtures use the real pure descriptor/planning/decimal helpers.
+// Local memory fixtures use the real pure requirement and fixed-price helpers.
 // Archive references below are technical fixtures; no database or real API is used.
 const root = resolve(import.meta.dirname, '../..');
 const evidence = resolve(process.env.MANUAL_PRICE_EVIDENCE_DIR || resolve(root, '.local/m4/manual-selling-price'));
@@ -22,6 +21,7 @@ const valid = { sid: 202, msku: 'VALID-MSKU', fnsku: 'VALID-FNSKU', sku: 'VALID-
 const checks = [], browserErrors = [], unexpectedRequests = [], externalRequests = [], writes = [];
 let browser, page, viteProcess, baseURL, failed = false, step = 'setup';
 const note = () => { checks.push({ name: step, passed: true }); console.log('PASS ' + step); };
+const documentProductOverrideKey = (sid, item) => createHash('sha256').update(JSON.stringify([sid, item.msku, item.fnsku, item.sku])).digest('hex');
 function fixture() {
   const run = { id: uid(), version: 1, status: 'ready', stage: 'ready', numberingDate: '2026-10-25', month: '2026-10', sequence: 1, importId: null, parseRunId: null, origin: 'manual', membershipFrozenAt: now, error: null, createdAt: now, updatedAt: now };
   const template = { id: uid(), purpose: 'invoice', name: 'Technical manual price template', version: 1, mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', sha256: 'a'.repeat(64), fileId: uid(), status: 'active', createdBy: actor, createdAt: now };
@@ -61,147 +61,108 @@ function refresh(state) {
     item.status = item.issues.some((issue) => issue.severity === 'error') ? 'blocked' : 'ready'; item.stage = item.status === 'ready' ? 'ready' : 'validate'; counts[item.status] += 1; }
   state.job.counts = counts; state.job.phase = counts.blocked ? 'needs_input' : 'preparing'; state.job.status = counts.blocked ? 'blocked' : 'running'; state.job.version += 1; documentAutomationJobSchema.parse(state.job);
 }
-function manualData(state, data, commands = []) {
-  let stored = [...data.manualSalesPrices ?? []];
-  for (const raw of commands) { const change = documentManualSalesPriceInputSchema.parse(raw), match = (entry) => entry.sid === change.sid && entry.msku === change.msku && entry.fnsku === change.fnsku && entry.sku === change.sku;
-    const fact = documentProductSourceFact(data, change.sid, change), sources = documentManualSalesPriceSources(data, change.sid, change); assert(sources.length, 'Manual commands must match exact ticket identities'); stored = stored.filter((entry) => !match(entry));
-    if (change.salesPrice === null) continue;
-    if (!documentCanManuallySupplySalesPrice(data, change.sid, change) || calculateDocumentInvoiceUnitPrice(state.archivePrices.get(fact.sourceFileId))) throw Object.assign(new Error('领星已有有效售价，不能人工替代；请核对售价币种。'), { code: 'DOCUMENT_REMOTE_SALES_PRICE_AVAILABLE', status: 422 });
-    stored.push(documentManualSalesPriceSchema.parse({ ...change, currency: documentTicketCurrency(data.members), recordedBy: actor, recordedAt: now, sourceFileId: fact.sourceFileId, sourceSha256: fact.sourceSha256, memberSources: structuredClone(sources) }));
-  }
-  return { ...data, manualSalesPrices: stored };
-}
+
 function revise(state, record, input) {
-  assert.equal(input.expectedVersion, record.version); const data = manualData(state, { ...record.currentRevision.data, fields: input.fields ?? record.currentRevision.data.fields }, input.manualSalesPrices);
-  record.version += 1; record.currentRevision = { ...record.currentRevision, id: uid(), version: record.version, reason: input.reason || 'Technical selling price save', createdBy: actor, data: { ...data, title: input.title ?? data.title } }; documentSchema.parse(record);
+  assert.equal(input.expectedVersion, record.version);
+  assert.equal(input.manualSalesPrices, undefined, 'Fixed-price edits never submit manual sales prices');
+  record.version += 1; record.currentRevision = { ...record.currentRevision, id: uid(), version: record.version, reason: input.reason, data: { ...record.currentRevision.data, fields: input.fields ?? record.currentRevision.data.fields, title: input.title ?? record.currentRevision.data.title } };
+  documentSchema.parse(record);
 }
-function conflict(state, record, currency = false) {
-  record.version += 1; record.currentRevision = { ...record.currentRevision, id: uid(), version: record.version, data: { ...record.currentRevision.data, fields: { ...record.currentRevision.data.fields, remarks: 'OTHER-OPERATION-NOTE' } } };
-  if (currency) { const data = record.currentRevision.data; data.members[0].demand.snapshot.country = '英国'; data.members[0].demand.version += 1; data.members[0].source.demandVersion += 1; data.members[0].shipment.demandVersion += 1; data.fields.currency = 'GBP'; data.fields.countryCode = 'GB'; data.productSourceFacts[0].currency = 'GBP'; }
+function conflict(state, record) {
+  record.version += 1; record.currentRevision = { ...record.currentRevision, id: uid(), version: record.version, data: { ...record.currentRevision.data, fields: { ...record.currentRevision.data.fields, remarks: 'OTHER-OPERATION-NOTE', currency: 'GBP', countryCode: 'GB' } } };
+  const data = record.currentRevision.data; data.members[0].demand.snapshot.country = '英国'; data.members[0].demand.version += 1; data.members[0].source.demandVersion += 1; data.members[0].shipment.demandVersion += 1;
   refresh(state);
 }
 function publish(state) {
   assert.equal(state.job.supplement.descriptors.length, 0); assert.equal(state.job.counts.ready, 4); state.bundleGenerations += 1;
-  state.job.phase = 'completed'; state.job.status = 'completed'; state.job.bundle = { status: 'completed', fileId: uid(), fileName: 'technical-manual-prices.xlsx', sheetCount: 4, completedAt: now, error: null };
+  state.job.phase = 'completed'; state.job.status = 'completed'; state.job.bundle = { status: 'completed', fileId: uid(), fileName: 'technical-fixed-prices.zip', fileCount: 4, sheetCount: 4, completedAt: now, error: null };
   for (const item of state.job.items) { item.status = 'completed'; item.stage = 'done'; state.records.find((record) => record.id === item.documentId).status = 'pending_review'; }
   state.job.counts.ready = 0; state.job.counts.completed = 4; state.job.completedAt = now; state.job.version += 1;
 }
 async function setup(state) {
   const context = await browser.newContext({ baseURL, locale: 'zh-CN', timezoneId: 'Asia/Shanghai', viewport: { width: 1440, height: 1000 } });
-  await context.route('**/*', async (route) => { const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
-    if (url.origin !== baseURL) { externalRequests.push(method + ' ' + url.href); return route.abort('blockedbyclient'); } if (!path.startsWith('/api/')) return route.continue();
-    const json = (value, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) }); if (method !== 'GET') writes.push({ path, method, input: request.postDataJSON() });
-    if (path === '/api/v1/session') return json({ user: { id: actor, name: 'Manual selling price fixture', email: 'price@fixture.invalid', role: 'admin' } });
+  await context.route('**/*', async (route) => {
+    const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
+    if (url.origin !== baseURL) { externalRequests.push(method + ' ' + url.href); return route.abort('blockedbyclient'); }
+    if (!path.startsWith('/api/')) return route.continue();
+    const json = (value, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
+    if (method !== 'GET') writes.push({ path, method, input: request.postDataJSON() });
+    if (path === '/api/v1/session') return json({ user: { id: actor, name: 'Fixed invoice price fixture', email: 'price@fixture.invalid', role: 'admin' } });
     if (path === '/api/v1/documents/field-options') return json({ services: ['TECH SERVICE'] });
-    if (path === '/api/v1/document-profiles') return json({ items: state.profiles }); if (path === '/api/v1/document-templates') return json({ items: [state.template] });
+    if (path === '/api/v1/document-profiles') return json({ items: state.profiles });
+    if (path === '/api/v1/document-templates') return json({ items: [state.template] });
     if (path === '/api/v1/documents' && method === 'GET') return json({ items: state.records, total: 4, page: 1, pageSize: 20 });
     const base = '/api/v1/documents/automations';
     if (path === base && method === 'GET') return json({ items: [state.job] });
-    if ([base + '/' + state.job.id, base + '/' + state.job.id + '/requirements'].includes(path) && method === 'GET') return json({ job: state.job });
-    if (path === base + '/' + state.job.id + '/download' && method === 'GET') { assert.equal(state.job.phase, 'completed'); state.downloads += 1; return route.fulfill({ status: 200, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers: { 'content-disposition': 'attachment; filename="technical-manual-prices.xlsx"' }, body: Buffer.from('Local manual price workbook fixture only') }); }
+    if (path === base + '/' + state.job.id && method === 'GET' || path === base + '/' + state.job.id + '/requirements' && method === 'GET') return json({ job: state.job });
+    if (path === base + '/' + state.job.id + '/download' && method === 'GET') { assert.equal(state.job.phase, 'completed'); state.downloads += 1; return route.fulfill({ status: 200, contentType: 'application/zip', headers: { 'content-disposition': 'attachment; filename="technical-fixed-prices.zip"' }, body: Buffer.from('Local fixed price ZIP fixture only') }); }
     const detail = path.match(/^\/api\/v1\/documents\/([^/]+)(?:\/(.*))?$/), record = state.records.find((record) => record.id === detail?.[1]), action = detail?.[2] || '';
-    if (record && method === 'GET' && !action) return json({ document: record, validation: null, exports: [] });
+    if (record && method === 'GET' && !action) return json({ document: record, validation: null, exports: state.exports?.[record.id] ?? [] });
     if (record && method === 'GET' && action === 'history') return json({ revisions: [record.currentRevision], reviews: [], validations: [] });
-    if (path === base + '/' + state.job.id + '/supplement' && method === 'POST' || record && action === 'revisions' && method === 'POST') {
-      const batch = path.endsWith('/supplement'), raw = request.postDataJSON(); (batch ? state.supplementInputs : state.revisionInputs).push(raw);
-      const mode = state.modes.shift(); if (mode === '409' || mode === 'currency409') conflict(state, batch ? state.records[0] : record, mode === 'currency409');
-      if (['503', '409', 'currency409'].includes(mode)) return json({ error: { code: mode === '503' ? 'FIXTURE_PRICE_SAVE_FAILED' : 'DOCUMENT_VERSION_CONFLICT', message: mode === '503' ? '技术夹具：售价保存失败，填写已保留。' : '技术夹具：售价版本冲突，填写已保留。' } }, mode === '503' ? 503 : 409);
-      try {
-        const ledgerKey = raw.operationId; if (state.ledger.has(ledgerKey)) return json(state.ledger.get(ledgerKey));
-        if (batch) {
-          const input = documentAutomationSupplementInputSchema.parse(raw); assert.equal(input.expectedVersion, state.job.version); const plans = planDocumentAutomationSupplement(tickets(state), state.profiles, [state.template], input), staged = structuredClone(state.records);
-          for (const plan of plans) revise(state, staged.find((record) => record.id === plan.documentId), plan); state.records = staged; state.plans.push(plans); state.acceptedSupplements.push(input); refresh(state);
-          const result = { job: state.job, replayed: false }; state.ledger.set(ledgerKey, structuredClone(result)); return json(result);
-        }
-        const input = documentRevisionInputSchema.parse(raw); revise(state, record, input); state.acceptedRevisions.push(input); const result = { document: record, replayed: false }; state.ledger.set(ledgerKey, structuredClone(result)); return json(result);
-      } catch (error) { return json({ error: { code: error.code || 'VALIDATION_ERROR', message: error.message } }, error.status || 422); }
+    if (record && action === 'revisions' && method === 'POST') {
+      const raw = request.postDataJSON(); state.revisionInputs.push(raw); const mode = state.modes.shift();
+      if (mode === '409') conflict(state, record);
+      if (mode === '503' || mode === '409') return json({ error: { code: mode === '503' ? 'FIXTURE_SAVE_FAILED' : 'DOCUMENT_VERSION_CONFLICT', message: mode === '503' ? '技术夹具：资料保存失败，填写已保留。' : '技术夹具：资料版本冲突，填写已保留。' } }, Number(mode));
+      const input = documentRevisionInputSchema.parse(raw); revise(state, record, input); state.acceptedRevisions.push(input); return json({ document: record, replayed: false });
     }
     unexpectedRequests.push(method + ' ' + path); return json({ error: { code: 'UNEXPECTED_FIXTURE_ROUTE', message: method + ' ' + path } }, 500);
   });
   page = await context.newPage(); page.setDefaultTimeout(15_000); page.on('pageerror', (error) => browserErrors.push(error.message)); return context;
 }
-const jobDialog = () => page.getByRole('dialog', { name: '整批检查与合并出单', exact: true });
+const jobDialog = () => page.getByRole('dialog', { name: '整批检查与打包出单', exact: true });
 const wizard = () => page.getByRole('dialog', { name: '发票与单据向导', exact: true });
-const form = () => jobDialog().getByRole('region', { name: '统一补充资料', exact: true });
-const group = (currency) => form().getByRole('group', { name: new RegExp(' · ' + currency + '$') });
-const price = (currency) => group(currency).getByLabel('售价（' + currency + '）（待补）', { exact: true });
-const reason = (currency) => group(currency).getByLabel('手工售价原因（待补）', { exact: true });
-const save = () => jobDialog().getByRole('button', { name: '保存并统一检查', exact: true });
-const legacySave = () => wizard().getByRole('button', { name: '保存草稿', exact: true });
+const save = () => wizard().getByRole('button', { name: '保存草稿', exact: true });
 const pricePanel = (identity = shared) => wizard().getByLabel(identity.msku + ' 自动申报单价', { exact: true });
-const legacyPrice = (currency = 'USD') => pricePanel().getByLabel('人工补充售价（' + currency + '）', { exact: true });
-const legacyReason = () => pricePanel().getByLabel('售价补充依据', { exact: true });
-async function openJob() { await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 30_000 }); await page.getByRole('region', { name: '最近自动出单任务', exact: true }).getByRole('button', { name: '查看进度', exact: true }).click(); await expect(form()).toBeVisible(); }
-async function openLegacy(record, identity = shared) {
-  await page.goto('/shipping?view=documents&documentId=' + record.id, { waitUntil: 'domcontentloaded', timeout: 30_000 }); await wizard().getByRole('navigation', { name: '单据制作步骤', exact: true }).getByRole('button', { name: '单票资料', exact: true }).click();
+const material = () => wizard().getByLabel('材质', { exact: true });
+async function openJob() { await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 30_000 }); await page.getByRole('region', { name: '最近自动出单任务', exact: true }).getByRole('button', { name: '查看进度', exact: true }).click(); await expect(jobDialog()).toBeVisible(); }
+async function openDocument(record, identity = shared) {
+  await page.goto('/shipping?view=documents&documentId=' + record.id, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await wizard().getByRole('navigation', { name: '单据制作步骤', exact: true }).getByRole('button', { name: '单票资料', exact: true }).click();
   const section = wizard().locator('details[data-section-editor="products"]'); if (await section.getAttribute('open') === null) await section.locator(':scope > summary').click();
   const product = section.locator('.document-product-adjustment').filter({ hasText: identity.msku }); await expect(product).toHaveCount(1); if (await product.getAttribute('open') === null) await product.locator(':scope > summary').click(); await expect(pricePanel(identity)).toBeVisible();
 }
-async function enter(currency, amount, explanation) { await price(currency).fill(amount); if (explanation !== undefined) await reason(currency).fill(explanation); }
-async function noOutput(state) { assert.equal(state.bundleGenerations, 0); assert.equal(state.downloads, 0); await expect(jobDialog().getByRole('button', { name: '下载合并发票 XLSX', exact: true })).toHaveCount(0); }
 async function shot(name) { await page.screenshot({ path: resolve(evidence, name), animations: 'disabled' }); }
-function commandsAreExact(commands) { for (const command of commands) assert.deepEqual(Object.keys(command).sort(), ['fnsku', 'msku', 'reason', 'salesPrice', 'sid', 'sku'].sort()); }
-
 try {
   await mkdir(evidence, { recursive: true }); const socket = createServer(); await new Promise((done) => socket.listen(0, '127.0.0.1', done)); const port = socket.address().port; await new Promise((done) => socket.close(done)); baseURL = 'http://127.0.0.1:' + port;
   viteProcess = spawn(process.execPath, [resolve(dirname(requireWeb.resolve('vite/package.json')), 'bin/vite.js'), '--host', '127.0.0.1', '--port', String(port), '--strictPort'], { cwd: resolve(root, 'apps/web'), stdio: 'ignore', windowsHide: true });
   await expect.poll(async () => { try { return (await fetch(baseURL)).status; } catch { return 0; } }, { timeout: 30_000 }).toBe(200); browser = await chromium.launch({ headless: true, channel: process.env.IMPORT_BROWSER_CHANNEL || 'chrome' });
 
-  step = 'missing-and-invalid-remote-prices-share-exact-usd-targets-and-separate-gbp';
-  const batch = fixture(); let context = await setup(batch); await openJob(); await expect(price('USD')).toHaveCount(1); await expect(price('GBP')).toHaveCount(1);
-  const usd = batch.job.supplement.descriptors.find((descriptor) => descriptor.label === '售价（USD）'), gbp = batch.job.supplement.descriptors.find((descriptor) => descriptor.label === '售价（GBP）');
-  assert.equal(usd.targets.length, 2); assert.equal(gbp.targets.length, 1); assert(usd.targets.every((target) => target.fieldKey.startsWith('@sellingPrice.USD.'))); assert(gbp.targets.every((target) => target.fieldKey.startsWith('@sellingPrice.GBP.')));
-  assert(!batch.job.supplement.descriptors.some((descriptor) => descriptor.targets.some((target) => target.documentId === batch.records[3].id))); await expect(form()).toContainText('售价的 20%'); await noOutput(batch); note();
+  step = 'missing-invalid-and-valid-sales-prices-never-create-price-supplement-requirements';
+  const batch = fixture(); batch.records[1].currentRevision.data.productSourceFacts = []; refresh(batch);
+  assert.equal(batch.job.supplement.descriptors.length, 0); assert.equal(batch.job.counts.ready, 4); assert(!batch.job.supplement.issues.some((issue) => issue.severity === 'error'));
+  let context = await setup(batch); const writesBefore = writes.length; await openJob(); await expect(jobDialog().getByLabel(/售价/)).toHaveCount(0); assert.equal(writes.length, writesBefore); await context.close(); note();
 
-  step = 'selling-price-save-503-retains-both-typed-values-and-replays-the-same-operation';
-  const factsBefore = JSON.stringify(batch.records.map((record) => record.currentRevision.data.productSourceFacts)); await enter('USD', '19.99', 'USD price checked against technical sales evidence'); await expect(group('USD').getByRole('status')).toContainText('4.00 USD'); batch.modes.push('503'); await save().click();
-  await expect(jobDialog()).toContainText('售价保存失败'); await expect(price('USD')).toHaveValue('19.99'); await expect(reason('USD')).toHaveValue('USD price checked against technical sales evidence'); assert.equal(batch.acceptedSupplements.length, 0); assert(batch.records.every((record) => !record.currentRevision.data.manualSalesPrices));
-  await save().click(); await expect.poll(() => batch.acceptedSupplements.length).toBe(1); assert.deepEqual(batch.supplementInputs[1], batch.supplementInputs[0]); note();
+  step = 'fixed-price-keeps-each-invoice-currency-and-product-readiness-without-manual-input';
+  context = await setup(batch);
+  for (const [index, record] of batch.records.entries()) { const identity = index === 3 ? valid : shared; await openDocument(record, identity); const currency = index === 2 ? 'GBP' : 'USD'; await expect(pricePanel(identity)).toContainText('2.00 ' + currency); await expect(wizard().getByRole('button', { name: '商品申报 已填齐', exact: true })).toBeVisible(); await expect(pricePanel(identity).locator('input')).toHaveCount(0); assert.equal(documentInvoicePrice(record.currentRevision.data).currency, currency); }
+  await context.close(); note();
 
-  step = 'partial-usd-fallback-writes-authenticated-provenance-only-to-the-two-matching-documents';
-  await expect(price('USD')).toHaveCount(0); await expect(price('GBP')).toBeVisible(); assert.equal(batch.job.phase, 'needs_input');
-  for (const [index, record] of batch.records.entries()) { const stored = record.currentRevision.data.manualSalesPrices; if (index > 1) { assert.equal(stored, undefined); continue; } assert.equal(stored.length, 1); assert.equal(stored[0].currency, 'USD'); assert.equal(stored[0].recordedBy, actor); assert.equal(stored[0].recordedAt, now); assert.deepEqual(stored[0].memberSources, record.currentRevision.data.members.map((member) => member.source)); assert.equal(documentEffectiveSalesPrice(record.currentRevision.data, shared.sid, shared).unitPrice, '4.00'); }
-  for (const plan of batch.plans[0]) { commandsAreExact(plan.manualSalesPrices); assert(!Object.keys(plan.fields).some((key) => key.startsWith('@sellingPrice'))); }
-  assert.equal(JSON.stringify(batch.records.map((record) => record.currentRevision.data.productSourceFacts)), factsBefore); await noOutput(batch); note();
+  step = 'stale-saved-manual-prices-and-old-product-overrides-cannot-change-fixed-price';
+  const stale = fixture(), data = stale.records[0].currentRevision.data, fact = data.productSourceFacts[0];
+  const saved = documentManualSalesPriceSchema.parse({ ...shared, salesPrice: '17.55', currency: 'USD', reason: 'Historical manual sales price', recordedBy: actor, recordedAt: now, sourceFileId: fact.sourceFileId, sourceSha256: fact.sourceSha256, memberSources: documentManualSalesPriceSources(data, shared.sid, shared) });
+  saved.memberSources[0].demandVersion += 100; data.manualSalesPrices = [saved]; const prefix = 'product.' + documentProductOverrideKey(shared.sid, shared) + '.'; data.fields[prefix + 'unitPrice'] = '89.00'; data.fields[prefix + 'currency'] = 'EUR';
+  context = await setup(stale); await openDocument(stale.records[0]); await expect(pricePanel()).toContainText('2.00 USD'); await expect(pricePanel()).not.toContainText('17.55'); await expect(pricePanel()).not.toContainText('89.00'); await expect(pricePanel().locator('input')).toHaveCount(0); await expect(wizard().getByRole('button', { name: '商品申报 已填齐', exact: true })).toBeVisible(); await context.close(); note();
 
-  step = 'gbp-full-precision-fallback-derives-positive-half-up-unit-price-before-one-bundle';
-  await enter('GBP', '0.025', 'GBP price checked independently without currency conversion'); await expect(group('GBP').getByRole('status')).toContainText('0.01 GBP'); await save().click(); await expect.poll(() => batch.acceptedSupplements.length).toBe(2);
-  const effective = documentEffectiveSalesPrice(batch.records[2].currentRevision.data, shared.sid, shared); assert.equal(effective.salesPrice, '0.025'); assert.equal(effective.currency, 'GBP'); assert.equal(effective.unitPrice, '0.01'); assert.equal(batch.records[2].currentRevision.data.manualSalesPrices[0].currency, 'GBP');
-  assert.equal(batch.job.supplement.descriptors.length, 0); publish(batch); await expect(jobDialog().getByRole('button', { name: '下载合并发票 XLSX', exact: true })).toHaveCount(1);
-  const download = page.waitForEvent('download'); await jobDialog().getByRole('button', { name: '下载合并发票 XLSX', exact: true }).click(); await download; assert.equal(batch.downloads, 1); assert.equal(batch.bundleGenerations, 1); await context.close(); note();
+  step = 'ordinary-product-save-retains-input-and-idempotency-after-503-without-price-commands';
+  const retry = fixture(); context = await setup(retry); await openDocument(retry.records[0]); await material().fill('Checked Glass'); retry.modes.push('503'); await save().click(); await expect(wizard()).toContainText('资料保存失败'); await expect(material()).toHaveValue('Checked Glass'); await save().click(); await expect.poll(() => retry.acceptedRevisions.length).toBe(1); assert.deepEqual(retry.revisionInputs[1], retry.revisionInputs[0]); assert.equal(retry.acceptedRevisions[0].manualSalesPrices, undefined); await expect(pricePanel()).toContainText('2.00 USD'); await context.close(); note();
 
-  step = 'invalid-scientific-negative-and-round-zero-manual-prices-remain-blocking-and-retain-input';
-  const invalid = fixture(); context = await setup(invalid); await openJob(); for (const amount of ['abc', '-1', '1e3', '0.01']) { await enter('USD', amount, 'Technical invalid input boundary'); await save().click(); await expect(jobDialog()).toContainText('20%'); await expect(price('USD')).toHaveValue(amount); assert.equal(invalid.acceptedSupplements.length, 0); }
-  await noOutput(invalid); await context.close(); note();
+  step = 'version-recovery-preserves-edits-and-adopts-new-ticket-currency-without-price-confirmation';
+  const recovery = fixture(); context = await setup(recovery); await openDocument(recovery.records[0]); await material().fill('Retained Material'); recovery.modes.push('409'); await save().click(); await expect(wizard()).toContainText('资料版本冲突'); await wizard().getByRole('button', { name: '重新读取最新版本', exact: true }).click(); await wizard().getByRole('button', { name: '恢复未保存输入', exact: true }).click();
+  const section = wizard().locator('details[data-section-editor="products"]'); if (await section.getAttribute('open') === null) await section.locator(':scope > summary').click(); const product = section.locator('.document-product-adjustment'); if (await product.getAttribute('open') === null) await product.locator(':scope > summary').click();
+  await expect(material()).toHaveValue('Retained Material'); await expect(pricePanel()).toContainText('2.00 GBP'); await expect(save()).toBeEnabled(); await save().click(); await expect.poll(() => recovery.acceptedRevisions.length).toBe(1); assert.equal(recovery.acceptedRevisions[0].expectedVersion, 2); assert.equal(recovery.records[0].currentRevision.data.fields.remarks, 'OTHER-OPERATION-NOTE'); assert.equal(recovery.acceptedRevisions[0].manualSalesPrices, undefined); await context.close(); note();
 
-  step = 'manual-price-and-real-reason-must-be-submitted-in-the-same-save';
-  const noReason = fixture(); context = await setup(noReason); await openJob(); await enter('USD', '12.345'); await save().click(); await expect(jobDialog()).toContainText('同次填写'); await expect(price('USD')).toHaveValue('12.345'); assert.equal(noReason.acceptedSupplements.length, 0); await noOutput(noReason); await context.close(); note();
+  step = 'batch-with-missing-sales-prices-downloads-one-zip-with-four-invoice-files';
+  context = await setup(batch); publish(batch); await openJob(); await expect(jobDialog()).toContainText('4 个 Excel 文件'); const downloadEvent = page.waitForEvent('download'); await jobDialog().getByRole('button', { name: '下载发票压缩包 ZIP', exact: true }).click(); const download = await downloadEvent; assert(download.suggestedFilename().endsWith('.zip')); assert.equal(batch.downloads, 1); assert.equal(batch.bundleGenerations, 1); await context.close(); note();
 
-  step = '409-refetch-keeps-price-and-reason-after-descriptor-version-changes';
-  const changed = fixture(); context = await setup(changed); await openJob(); await enter('USD', '17.55', 'Version conflict price evidence'); changed.modes.push('409'); await save().click(); await expect(jobDialog()).toContainText('售价版本冲突');
-  await jobDialog().getByRole('button', { name: '刷新自动出单进度', exact: true }).click(); await expect(jobDialog().getByRole('button', { name: '已核对新版，保留填写继续', exact: true })).toBeVisible(); await expect(price('USD')).toHaveValue('17.55'); await expect(reason('USD')).toHaveValue('Version conflict price evidence'); await expect(save()).toBeDisabled();
-  await jobDialog().getByRole('button', { name: '已核对新版，保留填写继续', exact: true }).click(); await save().click(); await expect.poll(() => changed.acceptedSupplements.length).toBe(1); assert.equal(changed.records[0].currentRevision.data.fields.remarks, 'OTHER-OPERATION-NOTE'); await noOutput(changed); await context.close(); note();
+  step = 'historical-files-explicitly-retain-their-original-declaration-price';
+  const historical = fixture(), record = historical.records[0], reference = record.currentRevision.data.templateReference;
+  record.status = 'pending_review'; historical.exports = { [record.id]: [{ id: uid(), status: 'completed', reference: { documentId: record.id, revisionId: record.currentRevision.id, revisionVersion: record.version, templateId: reference.templateId, templateVersion: reference.version, templateSha256: reference.sha256, sources: record.currentRevision.data.members.map((member) => member.source), generationRulesVersion: 'v2' }, fileId: uid(), fileSha256: 'c'.repeat(64), error: null, createdAt: now, completedAt: now, valid: true, invalidReason: null }] };
+  context = await setup(historical); await openDocument(record); await expect(wizard()).toContainText('历史文件保留生成时的申报价格'); await expect(wizard()).toContainText('需建立更正单据后生成新文件'); await context.close(); note();
 
-  step = 'known-valid-archived-remote-amount-cannot-be-hidden-behind-an-old-null-fact';
-  const protectedPrice = fixture(); protectedPrice.archivePrices.set(protectedPrice.records[0].currentRevision.data.productSourceFacts[0].sourceFileId, '25.00'); context = await setup(protectedPrice); await openJob(); await enter('USD', '19.99', 'Cannot replace a known valid remote amount'); await save().click(); await expect(jobDialog()).toContainText('领星已有有效售价'); assert.equal(protectedPrice.acceptedSupplements.length, 0); assert(protectedPrice.records.every((record) => !record.currentRevision.data.manualSalesPrices)); await noOutput(protectedPrice); await context.close(); note();
-
-  step = 'old-document-link-saves-explicit-manual-commands-without-price-fields-or-implicit-writes';
-  const legacy = fixture(); context = await setup(legacy); const writesBefore = writes.length; await openLegacy(legacy.records[0]); assert.equal(writes.length, writesBefore); await legacyPrice().fill('12.345'); await legacyReason().fill('Legacy detail price evidence'); legacy.modes.push('503'); await legacySave().click(); await expect(wizard()).toContainText('售价保存失败'); await expect(legacyPrice()).toHaveValue('12.345'); await expect(legacyReason()).toHaveValue('Legacy detail price evidence');
-  await legacySave().click(); await expect(legacySave()).toBeDisabled(); assert.deepEqual(legacy.revisionInputs[1], legacy.revisionInputs[0]); const command = legacy.acceptedRevisions[0]; commandsAreExact(command.manualSalesPrices); assert.equal(command.manualSalesPrices[0].salesPrice, '12.345'); assert(!Object.keys(command.fields).some((key) => /^product\..*\.(unitPrice|currency|salesPrice)$/.test(key))); assert.equal(command.manualSalesPrices[0].enteredCurrency, undefined); await expect(pricePanel()).toContainText('2.47 USD'); await expect(pricePanel()).toContainText('人工补充'); await context.close(); note();
-
-  step = 'legacy-409-recovery-keeps-usd-input-and-requires-acknowledgement-before-using-gbp';
-  const recovery = fixture(); context = await setup(recovery); await openLegacy(recovery.records[0]); await legacyPrice().fill('21.00'); await legacyReason().fill('Keep evidence while explicitly reviewing new GBP scope'); recovery.modes.push('currency409'); await legacySave().click(); await expect(wizard()).toContainText('售价版本冲突'); await wizard().getByRole('button', { name: '重新读取最新版本', exact: true }).click(); await wizard().getByRole('button', { name: '恢复未保存输入', exact: true }).click();
-  await expect(legacyPrice('GBP')).toHaveValue('21.00'); await expect(legacyReason()).toHaveValue('Keep evidence while explicitly reviewing new GBP scope'); await expect(pricePanel()).toContainText('原填写币种为 USD'); await expect(legacySave()).toBeDisabled(); await pricePanel().getByRole('button', { name: '已核对，按 GBP 采用此售价', exact: true }).click(); await legacySave().click(); await expect(legacySave()).toBeDisabled(); assert.equal(recovery.acceptedRevisions[0].expectedVersion, 2); assert.equal(recovery.records[0].currentRevision.data.fields.remarks, 'OTHER-OPERATION-NOTE'); assert.equal(recovery.records[0].currentRevision.data.manualSalesPrices[0].currency, 'GBP'); commandsAreExact(recovery.acceptedRevisions[0].manualSalesPrices); await context.close(); note();
-
-  step = 'valid-remote-price-always-wins-and-currency-conflicts-never-enable-fallback';
-  const remote = fixture(); remote.records[0].currentRevision.data = manualData(remote, remote.records[0].currentRevision.data, [{ ...shared, salesPrice: '19.99', reason: 'Previous missing-price fallback' }]); const fact = remote.records[0].currentRevision.data.productSourceFacts[0]; fact.salesPrice = '30.00'; fact.unitPrice = '6.00'; fact.sourceFileId = uid(); refresh(remote);
-  context = await setup(remote); await openLegacy(remote.records[0]); await expect(pricePanel()).toContainText('6.00 USD'); await expect(legacyPrice()).toHaveCount(0);
-  remote.records[3].currentRevision.data.productSourceFacts[0].currency = 'EUR'; await openLegacy(remote.records[3], valid); await expect(pricePanel(valid)).toContainText('售价币种 EUR 与整票币种 USD 不一致'); await expect(pricePanel(valid).getByLabel('人工补充售价（USD）', { exact: true })).toHaveCount(0); await context.close(); note();
-
-  step = 'manual-price-areas-fit-desktop-and-narrow-screens-with-fixed-modal-headings';
-  const layout = fixture(); context = await setup(layout); await openLegacy(layout.records[0]); await legacyPrice().fill('19.99'); await legacyReason().fill('Visible technical selling-price evidence');
-  for (const width of [1440, 390, 320]) { await page.setViewportSize({ width, height: 1000 }); await pricePanel().evaluate((node) => { const body = node.closest('.import-dialog-body'); if (body) body.scrollTop += node.getBoundingClientRect().top - body.getBoundingClientRect().top - (body.querySelector('.document-details-progress')?.getBoundingClientRect().height || 0) - 16; }); await expect(wizard().getByRole('heading', { name: '发票与单据向导', exact: true })).toBeInViewport(); assert.equal(await wizard().evaluate((node) => node.scrollTop), 0); for (const input of [legacyPrice(), legacyReason()]) { const bounds = await input.boundingBox(); assert(bounds && bounds.x >= -1 && bounds.x + bounds.width <= width + 1); } assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)); await shot('manual-selling-price-' + width + '.png'); }
+  step = 'fixed-price-display-fits-desktop-and-narrow-screens';
+  const layout = fixture(); context = await setup(layout); await openDocument(layout.records[0]);
+  for (const width of [1440, 390, 320]) { await page.setViewportSize({ width, height: 1000 }); await pricePanel().evaluate((node) => { const body = node.closest('.import-dialog-body'); if (body) body.scrollTop += node.getBoundingClientRect().top - body.getBoundingClientRect().top - (body.querySelector('.document-details-progress')?.getBoundingClientRect().height || 0) - 16; }); await expect(wizard().getByRole('heading', { name: '发票与单据向导', exact: true })).toBeInViewport(); await expect(pricePanel()).toBeInViewport(); assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)); await shot('fixed-invoice-price-' + width + '.png'); }
   await context.close(); note(); assert.deepEqual(browserErrors, []); assert.deepEqual(unexpectedRequests, []); assert.deepEqual(externalRequests, []);
 } catch (error) { failed = true; checks.push({ name: step, passed: false, message: error.message }); console.error(error.stack || error); if (page && !page.isClosed()) await page.screenshot({ path: resolve(evidence, 'failure.png'), fullPage: true }).catch(() => {}); }
-finally { await browser?.close(); if (viteProcess && viteProcess.exitCode === null) { viteProcess.kill(); await Promise.race([new Promise((done) => viteProcess.once('exit', done)), delay(5000)]); } await mkdir(evidence, { recursive: true }); await writeFile(resolve(evidence, 'result.json'), JSON.stringify({ kind: 'fixture-only-manual-selling-price-browser', passed: !failed, checks, browserErrors, unexpectedRequests, externalRequests, writes, realBusinessWrites: 0 }, null, 2) + '\n'); }
+finally { await browser?.close(); if (viteProcess && viteProcess.exitCode === null) { viteProcess.kill(); await Promise.race([new Promise((done) => viteProcess.once('exit', done)), delay(5000)]); } await mkdir(evidence, { recursive: true }); await writeFile(resolve(evidence, 'result.json'), JSON.stringify({ kind: 'fixture-only-fixed-invoice-price-browser', passed: !failed, checks, browserErrors, unexpectedRequests, externalRequests, writes, realBusinessWrites: 0 }, null, 2) + '\n'); }
 if (failed) process.exitCode = 1;

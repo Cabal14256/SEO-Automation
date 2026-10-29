@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { fileIndex } from '../../db/schema.js';
 import { batchOperations } from '../batches/schema.js';
@@ -10,8 +10,7 @@ import { checkedFileBytes } from '../imports/service.js';
 import { documentDigest } from './domain.js';
 import { documentReferenceDatasets } from './reference-schema.js';
 import { parseReferenceWorkbook, REFERENCE_WORKBOOK_PARSER_VERSION, type ReferenceWorkbookPlan } from './reference-workbook.js';
-import { documentProfiles } from './schema.js';
-import { documentOperation, writeDocumentProfileInTx } from './service.js';
+import { documentOperation } from './service.js';
 
 export type ReferenceImportResult = {
   sourceFileId: string;
@@ -22,9 +21,9 @@ export type ReferenceImportResult = {
   summary: Record<string, unknown>;
 };
 
-/** Import source catalogs as immutable evidence. Only unambiguous addresses
- * become selectable profiles; service/tax choices and delivery dates are never
- * inferred from a catalog. Existing profiles are never overwritten. */
+/** Archive reference catalogs as immutable evidence. Address sheets remain
+ * historical evidence and never create local address profiles; service/tax
+ * choices and delivery dates are never inferred from a catalog. */
 export async function importReferenceWorkbook(input: {
   actorId: string; operationId: string; bytes: Buffer; originalName: string; expectedSha256: string;
 }): Promise<ReferenceImportResult & { replayed: boolean }> {
@@ -75,22 +74,5 @@ async function savePlan(tx: BatchTx, input: { actorId: string; operationId: stri
     if (!old) await tx.insert(documentReferenceDatasets).values({ id, kind: entry.kind, sourceFileId, sourceSha256: sha256, sheetName: entry.sheetName, sourceRange: entry.sourceRange, parserVersion: REFERENCE_WORKBOOK_PARSER_VERSION, data: entry.data, contentSha256, createdBy: input.actorId });
     datasets.push({ id, kind: entry.kind, rowCount: Array.isArray(entry.data.rows) ? entry.data.rows.length : 0, reused: Boolean(old) });
   }
-  const addressDataset = datasets.find((entry) => entry.kind === 'address_catalog');
-  const existing = plan.addresses.length ? await tx.select().from(documentProfiles).where(and(eq(documentProfiles.category, 'address'), inArray(documentProfiles.key, plan.addresses.map((entry) => entry.key)))) : [];
-  const byKey = new Map(existing.map((entry) => [entry.key, entry]));
-  const addressProfiles: ReferenceImportResult['addressProfiles'] = [];
-  for (const entry of [...plan.addresses].sort((a, b) => a.key.localeCompare(b.key))) {
-    const data = { ...entry.data, _source: { fileId: sourceFileId, sha256, originalName: basename(input.originalName), sheet: '地址库', rows: entry.sourceRows, parserVersion: REFERENCE_WORKBOOK_PARSER_VERSION, datasetId: addressDataset?.id }, _referenceStatus: 'source_imported_requires_ticket_confirmation' };
-    const old = byKey.get(entry.key);
-    if (old) {
-      const sourceData = Object.fromEntries(Object.entries(old.data).filter(([key]) => key !== '_addressBook'));
-      if (old.status !== 'active' || documentDigest(sourceData) !== documentDigest(data)) throw new BatchError('REFERENCE_PROFILE_CONFLICT', 409, '同名地址档案已由其他操作维护，本次导入不覆盖，请人工核对。');
-      addressProfiles.push({ id: old.id, key: old.key, version: old.version, reused: true });
-      continue;
-    }
-    const profile = await writeDocumentProfileInTx(tx, input.actorId, { operationId: input.operationId, category: 'address', key: entry.key, data,
-      reason: '从丰信原工作簿导入无冲突地址参考，出单时仍须核对本票地址' });
-    addressProfiles.push({ id: profile.id, key: profile.key, version: profile.version, reused: false });
-  }
-  return { sourceFileId, sourceSha256: sha256, parserVersion: REFERENCE_WORKBOOK_PARSER_VERSION, datasets, addressProfiles, summary: plan.summary };
+  return { sourceFileId, sourceSha256: sha256, parserVersion: REFERENCE_WORKBOOK_PARSER_VERSION, datasets, addressProfiles: [], summary: { ...plan.summary, addressProfileCount: 0 } };
 }

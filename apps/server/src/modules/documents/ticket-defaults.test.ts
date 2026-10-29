@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { documentCurrencyForCountry, documentMemberAddressCode, documentTicketCurrency, matchDocumentAddressProfiles, withDocumentInvoiceDefaults, type DocumentMemberSnapshot } from '@scm/contracts';
+import { documentCurrencyForCountry, documentMemberAddressCode, documentTicketCurrency, matchDocumentAddressProfiles, resolveDocumentLingxingAddress, withDocumentInvoiceDefaults, type DocumentMemberSnapshot } from '@scm/contracts';
 
 function member(country = '美国', destinationFc = 'TEST1', codes: string[] = []): DocumentMemberSnapshot {
   return { demand: { snapshot: { country, destinationFc } }, sourceCandidates: { addresses: codes.map((addressCode) => ({ data: { addressCode } })) } } as DocumentMemberSnapshot;
@@ -9,6 +9,26 @@ function profile(addressCode: string, destinationFc = 'TEST1') {
 }
 
 describe('country currency and shipment address-code defaults', () => {
+  it('merges sparse Lingxing list/detail addresses within the same FBA', () => {
+    const shipment = member('US'), address = profile('ADDR-1').data;
+    shipment.sourceCandidates = { products: [], issues: [], addresses: [
+      { source: 'listShipments', snapshotId: '00000000-0000-4000-8000-000000000001', data: { ...address, addressLine1: null } },
+      { source: 'getShipmentDetails', snapshotId: '00000000-0000-4000-8000-000000000002', data: { addressLine1: address.addressLine1 } },
+    ] };
+    expect(resolveDocumentLingxingAddress([shipment])).toMatchObject({ addressLine1: address.addressLine1, countryCode: 'US', recipientName: 'Receiver' });
+    const sparse = structuredClone(shipment); sparse.sourceCandidates!.addresses = [{ ...shipment.sourceCandidates.addresses[0]!, data: { addressCode: 'ADDR-1', countryCode: 'US' } }];
+    expect(resolveDocumentLingxingAddress([shipment, sparse])).toBeNull();
+    sparse.sourceCandidates!.addresses = [];
+    expect(resolveDocumentLingxingAddress([shipment, sparse])).toBeNull();
+  });
+  it('rejects conflicts and country mismatch without consulting local profiles', () => {
+    const shipment = member('US'), address = profile('ADDR-1').data;
+    shipment.sourceCandidates = { products: [], issues: [], addresses: [{ source: 'getShipmentDetails', snapshotId: '00000000-0000-4000-8000-000000000001', data: address }] };
+    const other = structuredClone(shipment); other.sourceCandidates!.addresses[0]!.data.city = 'Different City';
+    expect(resolveDocumentLingxingAddress([shipment, other])).toBeNull();
+    shipment.demand.snapshot.country = 'UK';
+    expect(resolveDocumentLingxingAddress([shipment])).toBeNull();
+  });
   it.each([['美国', 'USD'], [' us ', 'USD'], ['USA', 'USD'], ['UNITED STATES', 'USD'], ['英国', 'GBP'], ['UK', 'GBP'], ['gb', 'GBP'], ['United Kingdom', 'GBP'], ['德国', 'EUR'], ['DE', 'EUR'], ['France', 'EUR'], ['FR', 'EUR'], ['西班牙', 'EUR'], ['ES', 'EUR'], ['意大利', 'EUR'], ['IT', 'EUR']])('maps %s to %s', (country, currency) => {
     expect(documentCurrencyForCountry(country)).toBe(currency);
   });

@@ -23,7 +23,7 @@ function fakeTx(results: unknown[][], current = record()) {
 }
 beforeEach(() => { mocks.transaction.mockReset(); mocks.requireActor.mockReset(); mocks.requireActor.mockResolvedValue({}); });
 
-describe('address book revisions and soft deletion', () => {
+describe('Lingxing-only addresses and historical profile compatibility', () => {
   it('rejects invalid new product images before writes while preserving unchanged legacy images during unrelated profile edits', async () => {
     const invalid = fakeTx([[]]);
     await expect(writeDocumentProfileInTx(invalid.tx, 'admin', documentProfileWriteSchema.parse({ operationId: randomUUID(), category: 'product', key: 'Product', reason: 'Image', data: { imageBase64: 'not an image' } }))).rejects.toMatchObject({ code: 'DOCUMENT_IMAGE_INVALID' });
@@ -33,46 +33,19 @@ describe('address book revisions and soft deletion', () => {
     await expect(writeDocumentProfileInTx(legacy.tx, 'admin', documentProfileWriteSchema.parse({ operationId: randomUUID(), category: 'product', key: previous.key, expectedVersion: previous.version, reason: 'Name only', data: { ...previous.data, englishName: 'Updated name' } }))).resolves.toMatchObject({ data: { imageBase64: 'legacy invalid', englishName: 'Updated name' } });
     expect(previous.data.imageBase64).toBe('legacy invalid');
   });
-  it('creates a complete normalized address with an immutable version', async () => {
-    const { tx, writes } = fakeTx([[]]);
-    const profile = await writeDocumentProfileInTx(tx, 'admin', documentProfileWriteSchema.parse({ operationId: randomUUID(), category: 'address', key: 'New address', reason: 'Create', data: { ...address, destinationFc: ' ind9 ', countryCode: ' us ' } }));
-    expect(profile).toMatchObject({ category: 'address', key: 'New address', version: 1, data: { ...address, _addressBook: { key: 'New address', status: 'active' } } });
-    expect(writes.filter((write) => write.table === documentProfileVersions)).toEqual([expect.objectContaining({ data: expect.objectContaining({ profileId: profile.id, version: 1, reason: 'Create' }) })]);
+  it('rejects address creation and editing before any mutation', async () => {
+    const previous = record(), input = { operationId: randomUUID(), category: 'address' as const, key: 'Address', reason: 'Create', data: address };
+    expect(documentProfileWriteSchema.safeParse(input).success).toBe(false);
+    const fixture = fakeTx([]);
+    await expect(writeDocumentProfileInTx(fixture.tx, 'admin', input)).rejects.toMatchObject({ code: 'DOCUMENT_ADDRESS_SOURCE_ONLY' });
+    await expect(writeDocumentProfileInTx(fixture.tx, 'admin', { ...input, profileId: previous.id, expectedVersion: 1 })).rejects.toMatchObject({ code: 'DOCUMENT_ADDRESS_SOURCE_ONLY' });
+    expect(fixture.writes).toEqual([]);
   });
-
-  it('renames an address in the same ID and leaves its old version untouched', async () => {
-    const previous = record(), before = structuredClone(previous), { tx, writes } = fakeTx([[previous], []], previous);
-    const updated = await writeDocumentProfileInTx(tx, 'admin', { operationId: randomUUID(), profileId: previous.id, expectedVersion: 1, category: 'address', key: 'Renamed label', reason: 'Correct label', data: { ...address, city: 'New City' } });
-    expect(updated).toMatchObject({ id: previous.id, key: 'Renamed label', version: 2, data: { city: 'New City', _addressBook: { previousKey: 'Original label' } } });
-    expect(previous).toEqual(before);
-    expect(writes.filter((write) => write.table === documentProfileVersions)).toHaveLength(1);
-    expect(writes.find((write) => write.table === documentProfileVersions)?.data.version).toBe(2);
-  });
-
-  it('rejects stale edits, duplicate labels and editing deleted addresses before mutation', async () => {
-    const previous = record(), input = { operationId: randomUUID(), profileId: previous.id, expectedVersion: 1, category: 'address' as const, key: 'Renamed label', reason: 'Edit', data: address };
-    const stale = fakeTx([[previous]], previous);
-    await expect(writeDocumentProfileInTx(stale.tx, 'admin', { ...input, expectedVersion: 2 })).rejects.toMatchObject({ code: 'VERSION_CONFLICT' });
-    expect(stale.writes).toEqual([]);
-    const duplicate = fakeTx([[previous], [{ id: randomUUID() }]], previous);
-    await expect(writeDocumentProfileInTx(duplicate.tx, 'admin', input)).rejects.toMatchObject({ code: 'DOCUMENT_PROFILE_KEY_CONFLICT' });
-    expect(duplicate.writes).toEqual([]);
-    const deleted = fakeTx([[{ ...previous, status: 'retired' }]], previous);
-    await expect(writeDocumentProfileInTx(deleted.tx, 'admin', input)).rejects.toMatchObject({ code: 'DOCUMENT_PROFILE_RETIRED' });
-    expect(deleted.writes).toEqual([]);
-  });
-
-  it('soft deletes and restores with new versions while preserving the saved address snapshot', async () => {
-    const previous = record(), before = structuredClone(previous), deleted = fakeTx([[], [previous]], previous);
-    mocks.transaction.mockImplementationOnce((action: (tx: BatchTx) => unknown) => action(deleted.tx));
-    const removed = await changeDocumentProfileStatus(previous.id, 'admin', { operationId: randomUUID(), expectedVersion: 1, reason: 'Remove obsolete choice' }, 'retired');
-    expect(removed).toMatchObject({ profile: { id: previous.id, version: 2, status: 'retired', data: { addressLine1: '10 Road' } } });
-    expect(deleted.writes.filter((write) => write.table === documentProfileVersions)).toEqual([expect.objectContaining({ data: expect.objectContaining({ profileId: previous.id, version: 2, reason: 'Remove obsolete choice' }) })]);
-    expect(previous).toEqual(before);
-    const retired = { ...previous, status: 'retired', version: 2 }, restored = fakeTx([[], [retired]], retired);
-    mocks.transaction.mockImplementationOnce((action: (tx: BatchTx) => unknown) => action(restored.tx));
-    expect(await changeDocumentProfileStatus(previous.id, 'admin', { operationId: randomUUID(), expectedVersion: 2, reason: 'Restore reviewed address' }, 'active')).toMatchObject({ profile: { id: previous.id, version: 3, status: 'active' } });
-    expect(mocks.requireActor).toHaveBeenCalledWith(expect.anything(), 'admin');
+  it.each(['retired', 'active'] as const)('rejects %s mutations of historical local addresses', async (status) => {
+    const previous = record(), fixture = fakeTx([[], [previous]], previous);
+    mocks.transaction.mockImplementationOnce((action: (tx: BatchTx) => unknown) => action(fixture.tx));
+    await expect(changeDocumentProfileStatus(previous.id, 'admin', { operationId: randomUUID(), expectedVersion: 1, reason: 'Attempt change' }, status)).rejects.toMatchObject({ code: 'DOCUMENT_ADDRESS_SOURCE_ONLY' });
+    expect(fixture.writes).toEqual([]);
   });
 
   it('keeps saved deleted address references traceable but rejects adopting them into another document', async () => {
@@ -81,7 +54,7 @@ describe('address book revisions and soft deletion', () => {
     const saved = fakeTx([[profile], [{ version: 1, data: address }]], profile);
     expect(await resolveDocumentReferencesInTx(saved.tx, { profileReferences: [reference] }, previous)).toEqual({ profileReferences: [reference], templateReference: null });
     const fresh = fakeTx([[profile], [{ version: 1, data: address }]], profile);
-    await expect(resolveDocumentReferencesInTx(fresh.tx, { profileReferences: [reference] }, { ...previous, profileReferences: [] })).rejects.toMatchObject({ code: 'DOCUMENT_PROFILE_UNAVAILABLE' });
+    await expect(resolveDocumentReferencesInTx(fresh.tx, { profileReferences: [reference] }, { ...previous, profileReferences: [] })).rejects.toMatchObject({ code: 'DOCUMENT_ADDRESS_SOURCE_ONLY' });
   });
 
   it('retains the retirement behavior of other profile categories', async () => {

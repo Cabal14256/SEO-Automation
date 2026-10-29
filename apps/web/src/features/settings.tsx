@@ -1,5 +1,5 @@
 import { Link, Navigate } from '@tanstack/react-router';
-import { Files, MapPin, Store } from 'lucide-react';
+import { Files, Store } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { User } from '../api';
 import { AppShell } from '../pages';
@@ -17,9 +17,6 @@ export function SettingsLayout({ user, children }: { user: User; children: React
         <nav className="settings-navigation" aria-label="设置分类">
           <Link to="/settings/seller-mappings" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
             <Store size={18} aria-hidden="true" /><span>店铺映射</span>
-          </Link>
-          <Link to="/settings/addresses" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
-            <MapPin size={18} aria-hidden="true" /><span>收件地址</span>
           </Link>
           <Link to="/settings/document-profiles" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
             <Files size={18} aria-hidden="true" /><span>单据资料</span>

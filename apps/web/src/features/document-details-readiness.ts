@@ -1,5 +1,5 @@
 import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_ADDRESS_REQUIRED_FIELDS, DOCUMENT_FIELD_OPTIONS, DOCUMENT_PRODUCT_FIELDS, DOCUMENT_REQUIRED_FIELDS,
-  calculateDocumentInvoiceUnitPrice, documentBoxes, documentBoxFieldKey, documentCanManuallySupplySalesPrice, documentCurrencyForCountry, documentEffectiveSalesPrice, documentProductCurrency, documentTicketCurrency, hasCompleteDocumentAddress, type DocumentRevisionData } from '@scm/contracts';
+  documentBoxes, documentBoxFieldKey, documentCurrencyForCountry, documentInvoicePrice, documentProductCurrency, hasCompleteDocumentAddress, type DocumentRevisionData } from '@scm/contracts';
 
 export type DetailSection = 'basic' | 'address' | 'products' | 'boxes';
 export type DetailIssue = { field: string; message: string };
@@ -7,7 +7,7 @@ export type DetailProgress = { section: DetailSection; label: string; issues: De
 export type DetailProduct = { sid: number; msku: string; fnsku: string; sku: string; prefix: string };
 const text = (value: unknown) => value === null || value === undefined ? '' : String(value).trim();
 
-export function documentDetailsReadiness({ data, fields, title, templateId, products, profiles, productKeyError, productsLoading, manualSalesPriceInputs = {} }: {
+export function documentDetailsReadiness({ data, fields, title, templateId, products, profiles, productKeyError, productsLoading }: {
   data: DocumentRevisionData; fields: Record<string, string | null>; title: string; templateId: string;
   products: DetailProduct[]; profiles: DocumentRevisionData['profileReferences']; productKeyError?: string; productsLoading: boolean;
   manualSalesPriceInputs?: Record<string, { salesPrice: string | null; reason: string; enteredCurrency: string }>;
@@ -32,14 +32,11 @@ export function documentDetailsReadiness({ data, fields, title, templateId, prod
   for (const product of products) {
     const profile = profiles.find((reference) => reference.category === 'product' && Number(reference.data.sid) === product.sid && ['msku', 'fnsku', 'sku'].every((key) => text(reference.data[key]) === product[key as 'msku' | 'fnsku' | 'sku']));
     const value = (key: string) => text(fields[product.prefix + key] ?? profile?.data[key]);
-    const effective = v2 ? documentEffectiveSalesPrice({ ...data, fields }, product.sid, product) : undefined;
-    const fallback = v2 && documentCanManuallySupplySalesPrice({ ...data, fields }, product.sid, product);
-    const manual = fallback ? manualSalesPriceInputs[product.prefix] : undefined;
-    const price = v2 ? manual ? manual.enteredCurrency === documentTicketCurrency(data.members) ? calculateDocumentInvoiceUnitPrice(manual.salesPrice) ?? '' : '' : text(effective?.unitPrice) : value('unitPrice');
-    const currency = v2 ? manual ? documentTicketCurrency(data.members) ?? '' : text(effective?.currency) : documentProductCurrency(value('currency'), fields.currency);
+    const fixedPrice = documentInvoicePrice({ ...data, fields });
+    const price = v2 ? fixedPrice.unitPrice : value('unitPrice');
+    const currency = v2 ? fixedPrice.currency : documentProductCurrency(value('currency'), fields.currency);
     for (const key of DOCUMENT_PRODUCT_FIELDS) if ((!v2 || !['unitPrice', 'currency'].includes(key)) && !(key === 'currency' ? currency : value(key))) add('products', product.prefix + key, `${product.msku || product.sku}：请补齐申报资料`);
-    if (!/^\d+(?:\.\d{1,2})?$/.test(price) || Number(price) <= 0 || !Number.isFinite(Number(price)) || Number(price) > Number.MAX_SAFE_INTEGER) add('products', product.prefix + (fallback ? 'manualSalesPrice' : 'unitPrice'), fallback ? '请补充有效售价或重新查询领星资料' : '请核对有效申报单价或查询领星资料');
-    if (manual?.salesPrice && !manual.reason.trim()) add('products', product.prefix + 'manualSalesPriceReason', '请填写售价补充依据');
+    if (!/^\d+(?:\.\d{1,2})?$/.test(price) || Number(price) <= 0 || !Number.isFinite(Number(price)) || Number(price) > Number.MAX_SAFE_INTEGER) add('products', product.prefix + 'unitPrice', '请核对有效申报单价');
     if (!(DOCUMENT_FIELD_OPTIONS.currency as readonly string[]).includes(currency) || currency !== fields.currency) add('products', product.prefix + 'currency', '请核对商品与整票币种');
     if (!v2 && value('unitPriceConfirmed') !== 'true') add('products', product.prefix + 'unitPriceConfirmed', '请确认商品单价和币种');
     if (value('salesLink')) try { if (!/^https?:$/.test(new URL(value('salesLink')).protocol)) throw new Error(); } catch { add('products', product.prefix + 'salesLink', '请填写有效销售链接'); }

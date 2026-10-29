@@ -5,6 +5,7 @@ import { Decimal } from 'decimal.js';
 import { IMPORT_MAX_BYTES, PHYSICAL_RULE_VERSION, type PhysicalConfirmation, type PhysicalEntry, type PhysicalSource } from '@scm/contracts';
 import { validateImportArchive } from '../imports/zip-preflight.js';
 import { PhysicalValidationError, validatePhysicalEntries } from './domain.js';
+import { createFbaRowFill } from '../../xlsx-fba-fill.js';
 
 export const PHYSICAL_TEMPLATE_VERSION = 'physical-intake/v1';
 export type PhysicalTemplateManifest = { source: PhysicalSource; entries: PhysicalEntry[]; version: number; m2ConfirmationId: string; templateId: string };
@@ -37,6 +38,7 @@ const delta = (measured: string | undefined, adopted: string | null) => measured
 export async function createPhysicalWorkbook(confirmations: PhysicalConfirmation[]): Promise<Buffer> {
   if (!confirmations.length) throw new PhysicalValidationError('PHYSICAL_EXPORT_EMPTY', '导出至少需要一份有效实物确认。');
   const book = new ExcelJS.Workbook(); book.creator = 'SCM';
+  const fillFba = createFbaRowFill(confirmations.flatMap((confirmation) => confirmation.snapshot.source.boxes.map((box) => box.fba)));
   const boxes = book.addWorksheet('实物箱明细'), items = book.addWorksheet('箱内商品'), versions = book.addWorksheet('版本与核对记录');
   style(boxes, ['子批次ID', 'FBA货件号', 'sid', 'PO Number', '范围箱号', '内部箱ID', '内部码', '箱序', '采用毛重(KG)', '采用长(CM)', '采用宽(CM)', '采用高(CM)', '领星原毛重', '重量单位', '领星原长', '领星原宽', '领星原高', '尺寸单位', '核对结果', '实测毛重(KG)', '实测长(CM)', '实测宽(CM)', '实测高(CM)', '毛重差(KG)', '长差(CM)', '宽差(CM)', '高差(CM)', '原因', '来源时间', '确认人', '确认时间', 'M3确认ID']);
   style(items, ['子批次ID', 'FBA货件号', '内部箱ID', '内部码', '箱序', 'MSKU', 'FNSKU', 'SKU', '箱内数量', '有效期', '预处理责任方', '贴标责任方', '货件修订ID']);
@@ -51,11 +53,12 @@ export async function createPhysicalWorkbook(confirmations: PhysicalConfirmation
     const checked = validatePhysicalEntries(source, confirmation.snapshot.entries, true), byBox = new Map(checked.map((entry) => [entryKey(entry), entry]));
     for (const box of source.boxes) {
       const entry = byBox.get(entryKey(box))!;
-      add(boxes, [confirmation.groupId, box.fba, box.sid, box.po, box.range, box.boxId, box.code, box.order,
+      const row = add(boxes, [confirmation.groupId, box.fba, box.sid, box.po, box.range, box.boxId, box.code, box.order,
         ...fields.map((field) => numeric(box.values[field])), box.raw.weight, box.raw.weightUnit, box.raw.length, box.raw.width, box.raw.height, box.raw.dimensionUnit,
         entry.status === 'consistent' ? '一致' : '有差异', ...fields.map((field) => numeric(entry.measured[field])), ...fields.map((field) => delta(entry.measured[field], box.values[field])), entry.reason, box.sourceObservedAt, confirmation.createdBy, confirmation.createdAt, confirmation.id], [9, 10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27]);
+      fillFba(row, box.fba, boxes.columnCount);
       boxCount++;
-      for (const item of box.items) { add(items, [confirmation.groupId, box.fba, box.boxId, box.code, box.order, item.msku, item.fnsku, item.sku, numeric(item.quantity), item.expiration ?? null, item.prepOwner ?? null, item.labelOwner ?? null, box.shipmentRevisionId]); itemCount++; }
+      for (const item of box.items) { const row = add(items, [confirmation.groupId, box.fba, box.boxId, box.code, box.order, item.msku, item.fnsku, item.sku, numeric(item.quantity), item.expiration ?? null, item.prepOwner ?? null, item.labelOwner ?? null, box.shipmentRevisionId]); fillFba(row, box.fba, items.columnCount); itemCount++; }
     }
     add(versions, [confirmation.groupId, confirmation.m2ConfirmationId, confirmation.id, confirmation.m3Version, source.id, source.fingerprint, [...new Set(source.boxes.map((box) => box.sourceObservedAt))].sort().join('\n'), confirmation.snapshot.ruleVersion, confirmation.createdBy, confirmation.createdAt, source.snapshotIds.join('\n')]);
   }
@@ -77,10 +80,12 @@ export async function createPhysicalTemplate(manifest: PhysicalTemplateManifest)
   if (manifest.source.m2ConfirmationId !== manifest.m2ConfirmationId) throw new PhysicalValidationError('PHYSICAL_TEMPLATE_VERSION_CONFLICT', '模板来源与 M2 确认不一致。');
   const book = new ExcelJS.Workbook(); book.creator = 'SCM';
   const sheet = book.addWorksheet(LIST_SHEET); style(sheet, PHYSICAL_TEMPLATE_HEADERS);
+  const fillFba = createFbaRowFill(manifest.source.boxes.map((box) => box.fba));
   const immutable = readonlyRows(manifest.source);
   manifest.source.boxes.forEach((box, index) => {
     const entry = byBox.get(entryKey(box))!;
     const row = add(sheet, [...immutable[index]!, entry.status === 'pending' ? '待核对' : entry.status === 'consistent' ? '一致' : '有差异', ...fields.map((field) => entry.measured[field] ?? null), entry.reason], [16, 17, 18, 19, 23, 24, 25, 26]);
+    fillFba(row, box.fba, PHYSICAL_TEMPLATE_HEADERS.length);
     for (let column = READONLY_HEADERS.length + 1; column <= PHYSICAL_TEMPLATE_HEADERS.length; column++) row.getCell(column).protection = { locked: false };
     row.getCell(READONLY_HEADERS.length + 1).dataValidation = { type: 'list', allowBlank: false, formulae: ['"待核对,一致,有差异"'] };
   });

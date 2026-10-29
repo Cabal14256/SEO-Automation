@@ -32,9 +32,16 @@ const descriptors = (tickets: DocumentAutomationSupplementTicket[], profiles: Do
 function field(tickets: DocumentAutomationSupplementTicket[], key: string, profiles: DocumentProfile[] = [], templates: DocumentTemplate[] = []) { return descriptors(tickets, profiles, templates).find((entry) => entry.targets.some((target) => target.fieldKey === key))!; }
 function missingSellingPrice(value: DocumentAutomationSupplementTicket, salesPrice: string | null = null) { const fact = data(value).productSourceFacts![0]!; fact.salesPrice = salesPrice; fact.unitPrice = null; }
 const sellingPriceFields = (tickets: DocumentAutomationSupplementTicket[]) => descriptors(tickets).filter((entry) => entry.targets[0]!.fieldKey.startsWith('@sellingPrice.'));
-function sellingPriceInput(tickets: DocumentAutomationSupplementTicket[], value = '9.99', reason = '已核对商品实际售价') { const price = sellingPriceFields(tickets)[0]!, key = price.targets[0]!.fieldKey.replace('@sellingPrice.', '@sellingPriceReason.'); return input(tickets, [{ id: price.id, value }, { id: field(tickets, key).id, value: reason }]); }
 
 describe('central automatic document requirements', () => {
+  it('requires a pending B3 code together with explicit human address confirmation', () => {
+    const value = ticket(); Object.assign(fields(value), { addressCode: '', addressCodeStatus: 'needs_review', addressCodeReason: 'Special warehouse needs verification', addressConfirmed: 'false' });
+    expect(field([value], 'addressCode').required).toBe(true);
+    const values = [{ id: field([value], 'addressConfirmationReason').id, value: 'Carrier reference version and row checked' }, { id: field([value], 'addressConfirmed').id, value: true }];
+    expect(() => planDocumentAutomationSupplement([value], [], [], input([value], values))).toThrow('B3');
+    const plan = planDocumentAutomationSupplement([value], [], [], input([value], [...values, { id: field([value], 'addressCode').id, value: 'VERIFIED-CODE' }]));
+    expect(plan[0]!.fields).toMatchObject({ addressCode: 'VERIFIED-CODE', addressSelectionMode: 'manual', addressConfirmed: 'true' });
+  });
   it('merges missing common fields only for the same member scope and current value', () => {
     const first = ticket(), second = ticket(), otherShop = ticket(); fields(first).customsMode = ''; fields(second).customsMode = ''; fields(otherShop).customsMode = ''; data(otherShop).members[0]!.demand.snapshot.sid = 999;
     const result = descriptors([first, second, otherShop]).filter((entry) => entry.targets[0]!.fieldKey === 'customsMode');
@@ -47,6 +54,28 @@ describe('central automatic document requirements', () => {
     for (const value of [first, second, other]) data(value).members[0]!.boxSource![0]!.values.weight = null;
     const result = descriptors([first, second, other]); const materials = result.filter((entry) => entry.targets[0]!.fieldKey.endsWith('.material')), weights = result.filter((entry) => entry.targets[0]!.fieldKey.endsWith('.weight'));
     expect(materials).toHaveLength(2); expect(materials.map((entry) => entry.targets.length).sort()).toEqual([1, 2]); expect(weights).toHaveLength(3); expect(weights.every((entry) => entry.targets.length === 1 && entry.scope === 'box')).toBe(true);
+  });
+  it('requests product supplements only for the global representative while inspecting every actual box', () => {
+    const value = ticket(), member = data(value).members[0]!, hidden = { ...product, msku: 'Z', fnsku: 'Z', sku: 'Z' };
+    const first = member.boxSource![0]!, second = { ...structuredClone(first), boxId: randomUUID(), order: 2, code: 'A2' };
+    first.items = [{ ...hidden }]; member.boxSource!.push(second);
+    member.shipment.data.boxes[0]!.items = [{ ...hidden }];
+    member.shipment.data.boxes.push({ ...structuredClone(member.shipment.data.boxes[0]!), id: second.boxId, order: 2, items: [{ ...product }] });
+    member.shipment.data.items.push(hidden);
+    member.codes.push({ ...member.codes[0]!, id: randomUUID(), boxId: second.boxId, code: 'A2', sequence: 2 });
+    missingSellingPrice(value);
+    const key = documentProductOverrideKey(101, product), hiddenKey = documentProductOverrideKey(101, hidden);
+    const hiddenProfiles = [profile('product', { sid: 101, ...hidden }), profile('product', { sid: 101, ...hidden })];
+    const before = structuredClone(value), result = descriptors([value], hiddenProfiles);
+    const productFields = result.filter((entry) => entry.scope === 'product');
+    expect(productFields.length).toBeGreaterThan(0);
+    expect(productFields.every((entry) => entry.targets.every((target) => target.fieldKey.endsWith(key) || target.fieldKey.startsWith(`product.${key}.`)))).toBe(true);
+    expect(result.some((entry) => entry.targets.some((target) => target.fieldKey.includes(hiddenKey)))).toBe(false);
+    expect(value).toEqual(before);
+    second.values.weight = null;
+    const expanded = descriptors([value], hiddenProfiles);
+    expect(expanded.some((entry) => entry.targets.some((target) => target.fieldKey === `box.${second.boxId}.weight`))).toBe(true);
+    expect(expanded.some((entry) => entry.targets.some((target) => target.fieldKey === `@profile.product.${hiddenKey}`))).toBe(true);
   });
   it('binds stable field identifiers to every current target version and candidate set', () => {
     const value = ticket(); fields(value).taxMode = ''; const first = field([value], 'taxMode'); expect(field([value], 'taxMode').id).toBe(first.id);
@@ -66,10 +95,10 @@ describe('central automatic document requirements', () => {
     const result = planDocumentAutomationSupplement([value], channels, templates, input([value], [{ id: field([value], '@profile.channel', channels, templates).id, value: `${channels[1]!.id}:1` }, { id: templateField.id, value: `${templates[1]!.id}:1` }]));
     expect(result[0]!.profileReferences.map((entry) => entry.profileId)).toContain(channels[1]!.id); expect(result[0]!.fields.service).toBe('B'); expect(result[0]!.templateReference?.templateId).toBe(templates[1]!.id);
   });
-  it('does not fabricate price, currency, quantity or source inputs and retains warning severity', () => {
+  it('keeps fixed pricing independent of Listing currency without fabricating source inputs', () => {
     const value = ticket(); data(value).productSourceFacts![0]!.currency = 'EUR'; fields(value).currency = 'EUR'; value.item.issues = [{ code: 'DOCUMENT_SOURCE_STALE', severity: 'error', message: '来源已变化' }];
     const result = buildDocumentAutomationRequirements([value], [], []); expect(result.descriptors.some((entry) => entry.targets.some((target) => /unitPrice|currency|quantity|SourceFact|^source/.test(target.fieldKey)))).toBe(false);
-    expect(result.issues.some((issue) => issue.code === 'CURRENCY_CONFLICT')).toBe(true); expect(result.issues.some((issue) => issue.code === 'DOCUMENT_SOURCE_STALE')).toBe(true); expect(result.issues.find((issue) => issue.code === 'PRODUCT_IMAGE_MISSING')?.severity).toBe('warning');
+    expect(result.issues.some((issue) => issue.code === 'CURRENCY_CONFLICT')).toBe(false); expect(result.issues.some((issue) => issue.code === 'DOCUMENT_SOURCE_STALE')).toBe(true); expect(result.issues.find((issue) => issue.code === 'PRODUCT_IMAGE_MISSING')?.severity).toBe('warning');
   });
   it('offers a manual currency only when the country cannot supply one', () => {
     const value = ticket(); data(value).members[0]!.demand.snapshot.country = 'XX'; fields(value).currency = '';
@@ -91,10 +120,12 @@ describe('central automatic document requirements', () => {
     const result = planDocumentAutomationSupplement([value], [], [], input([value], [{ id: field([value], 'city').id, value: 'New City' }]));
     expect(result[0]!.fields).toMatchObject({ city: 'New City', addressConfirmed: 'false', addressConfirmationReason: '' }); expect(result[0]!.confirmAddress).toBe(false);
   });
-  it('permits an explicit address book choice with a genuine final-address confirmation', () => {
-    const value = ticket(); fields(value).addressConfirmed = 'false'; fields(value).addressConfirmationReason = ''; const profiles = [profile('address', address), profile('address', { ...address, recipientName: 'Other Receiver' })];
-    const result = planDocumentAutomationSupplement([value], profiles, [], input([value], [{ id: field([value], '@profile.address', profiles).id, value: `${profiles[1]!.id}:1` }, { id: field([value], 'addressConfirmationReason', profiles).id, value: '已核对选定地址' }, { id: field([value], 'addressConfirmed', profiles).id, value: true }]));
-    expect(result[0]!.fields.recipientName).toBe('Other Receiver'); expect(result[0]!.confirmAddress).toBe(true); expect(result[0]!.profileReferences[0]!.profileId).toBe(profiles[1]!.id);
+  it('offers ticket address confirmation without any local address profile choice', () => {
+    const value = ticket(); fields(value).addressConfirmed = 'false'; fields(value).addressConfirmationReason = '';
+    const profiles = [profile('address', address), profile('address', { ...address, recipientName: 'Other Receiver' })];
+    expect(descriptors([value], profiles).some((entry) => entry.targets.some((target) => target.fieldKey === '@profile.address'))).toBe(false);
+    const result = planDocumentAutomationSupplement([value], profiles, [], input([value], [{ id: field([value], 'addressConfirmationReason', profiles).id, value: '已核对领星货件地址' }, { id: field([value], 'addressConfirmed', profiles).id, value: true }]));
+    expect(result[0]!.fields.recipientName).toBe('Receiver'); expect(result[0]!.confirmAddress).toBe(true); expect(result[0]!.profileReferences).toEqual([]);
   });
   it('rejects forged descriptors, types, choices and invalid numbers before any target can be saved', () => {
     const value = ticket(); fields(value).taxMode = ''; data(value).members[0]!.boxSource![0]!.values.weight = null; const tax = field([value], 'taxMode'), weight = descriptors([value]).find((entry) => entry.targets[0]!.fieldKey.endsWith('.weight'))!;
@@ -143,82 +174,70 @@ describe('central supplement transaction boundary', () => {
     const first = ticket(), other = ticket(); fields(first).taxMode = ''; state([first]); const request = input([first, other], [{ id: field([first], 'taxMode').id, value: '包税' }]);
     await expect(applyDocumentAutomationSupplementInTx(tx as never, 'admin', { shippingRunId: runId, items: [first.item] }, request)).rejects.toMatchObject({ code: 'VERSION_CONFLICT' }); expect(service.reviseDocumentInTx).not.toHaveBeenCalled();
   });
-  it('passes only explicit exact-identity manual selling-price commands through the authenticated revision gate', async () => {
+  it('saves missing declaration material without requiring or writing a manual sales price', async () => {
     const value = ticket(); missingSellingPrice(value); state([value]);
-    const request = sellingPriceInput([value], '12.345', '以实际商品销售记录为依据');
+    const material = field([value], `product.${documentProductOverrideKey(101, product)}.material`);
+    const request = input([value], [{ id: material.id, value: 'Glass' }]);
     await applyDocumentAutomationSupplementInTx(tx as never, 'admin', { shippingRunId: runId, items: [value.item] }, request);
-    expect(service.reviseDocumentInTx).toHaveBeenCalledWith(tx, value.document.id, 'admin', expect.objectContaining({ operationId: request.operationId, expectedVersion: 2, manualSalesPrices: [{ sid: 101, msku: 'M1', fnsku: 'F1', sku: 'S1', salesPrice: '12.345', reason: '以实际商品销售记录为依据' }] }));
-    const revision = service.reviseDocumentInTx.mock.calls[0]![3]; expect(revision).not.toHaveProperty('productSourceFacts'); expect(revision.manualSalesPrices[0]).not.toHaveProperty('recordedBy'); expect(revision.manualSalesPrices[0]).not.toHaveProperty('currency'); expect(Object.keys(revision.fields).some((key) => key.startsWith('@sellingPrice'))).toBe(false);
+    const revision = service.reviseDocumentInTx.mock.calls[0]![3];
+    expect(revision.fields[material.targets[0]!.fieldKey]).toBe('Glass');
+    expect(revision).not.toHaveProperty('manualSalesPrices'); expect(revision).not.toHaveProperty('productSourceFacts');
+    expect(Object.keys(revision.fields).some((key) => key.startsWith('@sellingPrice'))).toBe(false);
   });
-  it('performs no target writes when one selling-price pair is invalid in an otherwise valid batch', async () => {
+  it('rejects removed selling-price virtual fields before writing an otherwise valid batch', async () => {
     const first = ticket(), second = ticket(); missingSellingPrice(first); fields(second).customsMode = ''; state([first, second]);
-    const request = sellingPriceInput([first, second], '0'); request.values.push({ id: field([first, second], 'customsMode').id, value: '9810' });
-    await expect(applyDocumentAutomationSupplementInTx(tx as never, 'admin', { shippingRunId: runId, items: [first.item, second.item] }, request)).rejects.toMatchObject({ code: 'DOCUMENT_MANUAL_SALES_PRICE_INVALID', status: 422 }); expect(service.reviseDocumentInTx).not.toHaveBeenCalled();
+    const request = input([first, second], [{ id: field([first, second], 'customsMode').id, value: '9810' }, { id: `@sellingPrice.USD.${documentProductOverrideKey(101, product)}`, value: '19.99' }]);
+    await expect(applyDocumentAutomationSupplementInTx(tx as never, 'admin', { shippingRunId: runId, items: [first.item, second.item] }, request)).rejects.toMatchObject({ code: 'DOCUMENT_SUPPLEMENT_STALE', status: 409 }); expect(service.reviseDocumentInTx).not.toHaveBeenCalled();
   });
 });
 
-describe('manual selling-price fallback in the unified missing form', () => {
-  it('exposes selling price and reason only for unavailable prices and never exposes a declaration-price or currency override', () => {
-    const value = ticket(); expect(sellingPriceFields([value])).toHaveLength(0);
-    missingSellingPrice(value);
-    const price = sellingPriceFields([value])[0]!; expect(price).toMatchObject({ label: '售价（USD）', kind: 'number', value: '', scope: 'product', required: true }); expect(price.help).toContain('20%'); expect(price.help).toContain('不换汇');
-    expect(field([value], price.targets[0]!.fieldKey.replace('@sellingPrice.', '@sellingPriceReason.'))).toMatchObject({ label: '手工售价原因', kind: 'text', required: true });
-    expect(descriptors([value]).some((entry) => entry.targets.some((target) => /unitPrice|^currency$|\.currency$/.test(target.fieldKey)))).toBe(false);
+describe('fixed invoice pricing in the unified missing form', () => {
+  it.each([null, '', '0', '-1', 'abc', '1e3', '0.001'])('does not request a selling price or reason when Listing price is %s', (salesPrice) => {
+    const value = ticket(); missingSellingPrice(value, salesPrice); const before = structuredClone(value);
+    const result = buildDocumentAutomationRequirements([value], [], []);
+    expect(result.descriptors.some((entry) => entry.targets.some((target) => /^@sellingPrice|unitPrice|\.currency$/.test(target.fieldKey)))).toBe(false);
+    expect(result.issues.some((issue) => /SALES_PRICE|MANUAL_SALES|CURRENCY_CONFLICT/.test(issue.code))).toBe(false);
+    expect(value).toEqual(before);
   });
-  it('keeps a valid remote price immutable even when its currency conflicts with the ticket', () => {
-    const value = ticket(); data(value).productSourceFacts![0]!.currency = 'EUR'; expect(sellingPriceFields([value])).toHaveLength(0);
-    expect(buildDocumentAutomationRequirements([value], [], []).issues.some((issue) => issue.code === 'CURRENCY_CONFLICT')).toBe(true);
+  it('keeps complete invoice requirements ready without any archived sales price', () => {
+    const value = ticket(), currentTemplate = template(), current = data(value);
+    const key = `product.${documentProductOverrideKey(101, product)}.`;
+    for (const [name, entry] of Object.entries({ englishName: 'Glass cover', chineseName: '玻璃保护片', material: 'Glass', hsCode: '700719', use: 'Screen protection', brand: 'TEST', model: 'T1', salesLink: 'https://example.invalid/product' })) fields(value)[key + name] = entry;
+    current.templateReference = { templateId: currentTemplate.id, version: currentTemplate.version, sha256: currentTemplate.sha256, fileId: currentTemplate.fileId };
+    current.productSourceFacts = [];
+    const result = buildDocumentAutomationRequirements([value], [], [currentTemplate]);
+    expect(result.descriptors).toEqual([]);
+    expect(result.issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(result.issues.some((issue) => issue.code === 'PRODUCT_IMAGE_MISSING' && issue.severity === 'warning')).toBe(true);
   });
-  it('omits a selling-price input after an audited manual fallback has already supplied the missing value', () => {
-    const value = ticket(); missingSellingPrice(value); const fact = data(value).productSourceFacts![0]!;
-    data(value).manualSalesPrices = [{ sid: 101, msku: 'M1', fnsku: 'F1', sku: 'S1', salesPrice: '12.34', currency: 'USD', reason: '已核对', recordedBy: 'admin', recordedAt: now, sourceFileId: fact.sourceFileId, sourceSha256: fact.sourceSha256, memberSources: data(value).members.map((member) => member.source) }];
+  it('ignores mismatched Listing currency while keeping invoice currency derived from its country', () => {
+    const value = ticket(); data(value).productSourceFacts![0]!.currency = 'EUR';
+    const result = buildDocumentAutomationRequirements([value], [], []);
     expect(sellingPriceFields([value])).toHaveLength(0);
+    expect(result.issues.some((issue) => issue.code === 'CURRENCY_CONFLICT')).toBe(false);
+    expect(fields(value).currency).toBe('USD');
   });
-  it('requires unique archived facts and a known country currency rather than inventing a price source', () => {
+  it('does not revive manual-price inputs or stale-record errors from historical audit data', () => {
+    const value = ticket(); missingSellingPrice(value); const fact = data(value).productSourceFacts![0]!;
+    data(value).manualSalesPrices = [{ sid: 101, msku: 'M1', fnsku: 'F1', sku: 'S1', salesPrice: '12.34', currency: 'GBP', reason: '旧价', recordedBy: 'admin', recordedAt: now, sourceFileId: fact.sourceFileId, sourceSha256: fact.sourceSha256, memberSources: [] }];
+    const before = structuredClone(value), result = buildDocumentAutomationRequirements([value], [], []);
+    expect(result.descriptors.some((entry) => entry.targets.some((target) => target.fieldKey.startsWith('@sellingPrice')))).toBe(false);
+    expect(result.issues.some((issue) => issue.code.startsWith('DOCUMENT_MANUAL_SALES_PRICE'))).toBe(false);
+    expect(value).toEqual(before);
+  });
+  it('does not create price inputs for missing or ambiguous source facts or an unknown country', () => {
     const value = ticket(); missingSellingPrice(value); data(value).productSourceFacts!.push(structuredClone(data(value).productSourceFacts![0]!)); expect(sellingPriceFields([value])).toHaveLength(0);
     data(value).productSourceFacts = []; expect(sellingPriceFields([value])).toHaveLength(0);
     const unknown = ticket(); missingSellingPrice(unknown); data(unknown).members[0]!.demand.snapshot.country = 'UNKNOWN'; expect(sellingPriceFields([unknown])).toHaveLength(0);
   });
-  it('merges only equal complete identities and currencies and applies to exactly those targets', () => {
-    const first = ticket(), second = ticket(), otherIdentity = ticket(), otherCurrency = ticket();
-    for (const value of [first, second, otherIdentity, otherCurrency]) missingSellingPrice(value);
-    for (const item of [data(otherIdentity).members[0]!.shipment.data.items[0]!, data(otherIdentity).members[0]!.boxSource![0]!.items[0]!, data(otherIdentity).productSourceFacts![0]!]) item.fnsku = 'OTHER-FNSKU';
-    data(otherCurrency).members[0]!.demand.snapshot.country = 'GB'; fields(otherCurrency).currency = 'GBP'; data(otherCurrency).productSourceFacts![0]!.currency = 'GBP';
-    const tickets = [first, second, otherIdentity, otherCurrency], prices = sellingPriceFields(tickets); expect(prices).toHaveLength(3);
-    const shared = prices.find((entry) => entry.targets.length === 2)!; expect(shared.label).toBe('售价（USD）'); expect(prices.find((entry) => entry.label === '售价（GBP）')?.targets).toHaveLength(1);
-    const reason = field(tickets, shared.targets[0]!.fieldKey.replace('@sellingPrice.', '@sellingPriceReason.'));
-    const revisions = planDocumentAutomationSupplement(tickets, [], [], input(tickets, [{ id: shared.id, value: '19.995' }, { id: reason.id, value: '同一商品已核对售价' }]));
-    expect(revisions).toHaveLength(2); expect(revisions.map((revision) => revision.documentId)).toEqual(expect.arrayContaining([first.document.id, second.document.id])); expect(revisions.every((revision) => revision.manualSalesPrices?.[0]?.salesPrice === '19.995')).toBe(true);
-  });
-  it.each(['0', '-1', 'abc', '1e3', 'Infinity', '0.001', '0.024'])('rejects an invalid or round-to-zero selling price: %s', (price) => {
-    const value = ticket(); missingSellingPrice(value);
-    expect(() => planDocumentAutomationSupplement([value], [], [], sellingPriceInput([value], price))).toThrow('20%');
-  });
-  it('retains full entered precision for core derivation and requires the reason in the same save', () => {
-    const value = ticket(); missingSellingPrice(value); const before = structuredClone(value);
-    const result = planDocumentAutomationSupplement([value], [], [], sellingPriceInput([value], ' 0.025 ', ' 实际销售记录 '));
-    expect(result[0]!.manualSalesPrices).toEqual([{ sid: 101, msku: 'M1', fnsku: 'F1', sku: 'S1', salesPrice: '0.025', reason: '实际销售记录' }]); expect(value).toEqual(before);
-    for (const [price, reason] of [['9.99', ''], ['', '已有依据'], ['9.99', '长'.repeat(1001)]]) expect(() => planDocumentAutomationSupplement([value], [], [], sellingPriceInput([value], price, reason))).toThrow('同次填写');
-  });
-  it('invalidates a formerly missing-price descriptor as soon as a valid remote price or new revision appears', () => {
-    const value = ticket(); missingSellingPrice(value); const request = sellingPriceInput([value]); data(value).productSourceFacts![0]!.salesPrice = '20';
-    expect(() => planDocumentAutomationSupplement([value], [], [], request)).toThrow('补充字段或适用范围已变化');
-    missingSellingPrice(value); value.document.version++; expect(() => planDocumentAutomationSupplement([value], [], [], request)).toThrow('整批单据版本已变化');
-  });
-  it('changes both virtual field identities across currency revisions and rejects the former amount and reason descriptors', () => {
-    const value = ticket(); missingSellingPrice(value); const original = sellingPriceInput([value], '19.99', '美元销售记录');
-    const usdPrice = sellingPriceFields([value])[0]!, usdReason = field([value], usdPrice.targets[0]!.fieldKey.replace('@sellingPrice.', '@sellingPriceReason.'));
-    data(value).members[0]!.demand.snapshot.country = 'GB'; fields(value).currency = 'GBP'; data(value).productSourceFacts![0]!.currency = 'GBP'; value.document.version++;
-    const gbpPrice = sellingPriceFields([value])[0]!, gbpReason = field([value], gbpPrice.targets[0]!.fieldKey.replace('@sellingPrice.', '@sellingPriceReason.'));
-    expect(usdPrice.targets[0]!.fieldKey).toMatch(/^@sellingPrice\.USD\./); expect(gbpPrice.targets[0]!.fieldKey).toMatch(/^@sellingPrice\.GBP\./);
-    expect(usdPrice.targets[0]!.fieldKey).not.toBe(gbpPrice.targets[0]!.fieldKey); expect(usdReason.targets[0]!.fieldKey).not.toBe(gbpReason.targets[0]!.fieldKey);
-    const restoredKeys = new Set([usdPrice, usdReason].flatMap((descriptor) => descriptor.targets.map((target) => `${target.documentId}:${target.fieldKey}`)));
-    expect([gbpPrice, gbpReason].some((descriptor) => descriptor.targets.some((target) => restoredKeys.has(`${target.documentId}:${target.fieldKey}`)))).toBe(false);
-    original.documentVersions[value.document.id] = value.document.version;
-    expect(() => planDocumentAutomationSupplement([value], [], [], original)).toThrow('补充字段或适用范围已变化');
+  it('rejects former price and reason descriptor identifiers rather than treating them as ordinary fields', () => {
+    const value = ticket(); missingSellingPrice(value); const before = structuredClone(value), key = documentProductOverrideKey(101, product);
+    for (const id of [`@sellingPrice.USD.${key}`, `@sellingPriceReason.USD.${key}`, 'field-removed-selling-price']) {
+      expect(() => planDocumentAutomationSupplement([value], [], [], input([value], [{ id, value: '19.99' }]))).toThrow('补充字段或适用范围已变化');
+    }
+    expect(value).toEqual(before);
   });
 });
-
 describe('central supplement contracts', () => {
   it('accepts partial scalar edits while rejecting duplicate identifiers and forged targets', () => {
     const request = input([ticket()], [{ id: 'field-test', value: '' }]); expect(documentAutomationSupplementInputSchema.safeParse(request).success).toBe(true);

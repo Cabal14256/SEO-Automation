@@ -23,7 +23,7 @@ const note = () => { checks.push({ name: step, passed: true }); console.log('PAS
 const countryCode = { 美国: 'US', 英国: 'GB', 德国: 'DE', 法国: 'FR', 西班牙: 'ES', 意大利: 'IT', 加拿大: 'CA' };
 const currencyLabel = { USD: '美元（USD）', GBP: '英镑（GBP）', EUR: '欧元（EUR）' };
 const addressLabels = { addressCode: '地址代码', recipientName: '收件人', recipientCompany: '收件公司', addressLine1: '地址第 1 行', addressLine2: '地址第 2 行', addressLine3: '地址第 3 行', city: '城市', state: '州 / 省', postalCode: '邮编', countryCode: '国家代码', phone: '电话', email: '邮箱' };
-const completeAddress = { addressCode: 'ADDR-ONLY', recipientName: 'Technical Receiver', recipientCompany: 'Technical Company', addressLine1: '1 Address Code Road', addressLine2: '', addressLine3: '', city: 'Profile City', state: 'CA', postalCode: '90001', countryCode: 'US', phone: '10000000000', email: '' };
+const completeAddress = { addressCode: 'ADDR-ONLY', recipientName: 'Technical Receiver', recipientCompany: 'Technical Company', addressLine1: '1 Lingxing Source Road', addressLine2: '', addressLine3: '', city: 'Lingxing City', state: 'CA', postalCode: '90001', countryCode: 'US', phone: '10000000000', email: '' };
 function member(country = '美国', addressCode = 'ADDR-ONLY', index = 1) {
   const demandId = uid(), groupId = uid(), shipmentId = uid(), boxId = uid();
   const item = { msku: 'DEFAULT-' + index, fnsku: 'FN-' + index, sku: 'SKU-' + index, name: '技术商品', quantity: '100', expiration: null, prepOwner: null, labelOwner: null };
@@ -47,6 +47,9 @@ function record({ countries = ['美国'], rawCurrency, emptyAddress = false, cod
 }
 function profile(data = {}, extra = {}) { return { id: uid(), category: 'address', key: 'TECH-ADDRESS-' + uid().slice(0, 6), version: 1, status: 'active', data: { destinationFc: 'FC-DIFFERENT', ...completeAddress, ...data }, createdBy: 'fixture', createdAt: now, ...extra }; }
 function fixture(options) { return { document: record(options), exports: [], profiles: [], profileMode: 'ready', holdProfiles: false, releaseProfiles: null, profileReads: 0, revisions: [], validations: [], exportCalls: 0 }; }
+function setLingxingAddress(state, data = completeAddress) {
+  for (const member of state.document.currentRevision.data.members) member.sourceCandidates.addresses = [{ source: 'getShipmentDetails', snapshotId: uid(), data: { ...data } }];
+}
 async function setup(state) {
   const context = await browser.newContext({ baseURL, locale: 'zh-CN', timezoneId: 'Asia/Shanghai', viewport: { width: 1440, height: 1000 } });
   await context.route('**/*', async (route) => {
@@ -62,7 +65,7 @@ async function setup(state) {
     if (path === '/api/v1/document-profiles') {
       state.profileReads += 1;
       if (state.holdProfiles) await new Promise((done) => { state.releaseProfiles = () => { state.holdProfiles = false; done(); }; releases.push(state.releaseProfiles); });
-      return state.profileMode === 'error' ? json({ error: { code: 'FIXTURE_ADDRESS_DIRECTORY_FAILED', message: '技术夹具：地址簿读取失败。' } }, 503) : json({ items: state.profiles });
+      return state.profileMode === 'error' ? json({ error: { code: 'FIXTURE_PROFILES_FAILED', message: '技术夹具：单据资料读取失败。' } }, 503) : json({ items: state.profiles });
     }
     const base = '/api/v1/documents/' + state.document.id;
     if (path === base && method === 'GET') return json({ document: state.document, validation: null, exports: state.exports });
@@ -138,29 +141,35 @@ try {
   await expect(wizard().locator('.document-issues')).toContainText('按币种拆分出单'); await expect(wizard().getByRole('button', { name: '生成待复核发票', exact: true })).toBeDisabled();
   assert.equal(mixed.revisions.length, 0); assert.equal(mixed.validations.length, 1); assert.equal(mixed.exportCalls, 0); await context.close(); note();
 
-  step = 'unique-active-complete-address-code-match-fills-the-whole-address-independently-of-fc';
-  const unique = fixture({ emptyAddress: true }), chosen = profile();
-  unique.profiles = [profile({ addressCode: 'OTHER-CODE', destinationFc: 'FC-LEGACY', city: 'Wrong FC Match' }), profile({}, { status: 'retired' }), profile({ postalCode: '' }), chosen];
+  step = 'lingxing-source-replaces-the-whole-address-without-using-a-local-profile';
+  const unique = fixture({ emptyAddress: true }); setLingxingAddress(unique);
+  unique.profiles = [profile({ city: 'Wrong Local Profile City' })];
   context = await setup(unique); await open(unique);
-  for (const [key, label] of Object.entries(addressLabels)) await expect(addressField(label)).toHaveValue(chosen.data[key] || '');
+  await expect(addressSection().getByRole('button', { name: /管理地址簿|保存到地址簿|在地址簿补全/ })).toHaveCount(0);
+  await expect(addressField('地址来源')).toContainText('领星');
+  await addressSection().getByRole('button', { name: '采用地址', exact: true }).click();
+  for (const [key, label] of Object.entries(addressLabels)) await expect(addressField(label)).toHaveValue(completeAddress[key] || '');
   await expect(addressField('已核对并确认本票采用的完整收件地址')).not.toBeChecked(); await expect(addressField('地址核对 / 冲突处理原因')).toHaveValue('');
   await expect(addressSection().getByRole('status', { name: '地址确认状态', exact: true })).toHaveText('待核对确认'); assert.equal(unique.revisions.length, 0);
-  await addressField('地址核对 / 冲突处理原因').fill('Explicitly checked automatic address'); await addressField('已核对并确认本票采用的完整收件地址').check(); await save().click(); await expect(save()).toBeDisabled();
-  assert(unique.revisions[0].profileReferences.some((reference) => reference.profileId === chosen.id && reference.version === chosen.version)); assert.equal(unique.revisions[0].confirmAddress, true); await context.close(); note();
+  await addressField('地址核对 / 冲突处理原因').fill('Explicitly checked Lingxing source address'); await addressField('已核对并确认本票采用的完整收件地址').check(); await save().click(); await expect(save()).toBeDisabled();
+  assert(!unique.revisions[0].profileReferences.some((reference) => reference.category === 'address')); assert.equal(unique.revisions[0].fields.addressSelectionMode, 'lingxing'); assert.equal(unique.revisions[0].confirmAddress, true); await context.close(); note();
 
-  step = 'unmatched-ambiguous-and-incomplete-address-profiles-do-not-fill-or-pick-one';
-  for (const kind of ['unmatched', 'ambiguous', 'incomplete']) {
-    const state = fixture({ emptyAddress: true }); state.profiles = kind === 'unmatched' ? [profile({ addressCode: 'OTHER', destinationFc: 'FC-LEGACY' })]
-      : kind === 'ambiguous' ? [profile(), profile({ city: 'Another Matching City' })] : [profile({ postalCode: '' })];
+  step = 'local-address-profiles-never-fill-an-empty-ticket-or-appear-as-a-source';
+  for (const kind of ['unique', 'ambiguous', 'incomplete']) {
+    const state = fixture({ emptyAddress: true }); state.document.currentRevision.data.members[0].sourceCandidates.addresses = [];
+    state.profiles = kind === 'unique' ? [profile()] : kind === 'ambiguous' ? [profile(), profile({ city: 'Another Matching City' })] : [profile({ postalCode: '' })];
     context = await setup(state); await open(state); await expect.poll(() => state.profileReads).toBe(1); await expect(addressField('地址来源')).toBeEnabled();
-    await expect(addressField('城市')).toHaveValue(''); await expect(addressField('收件人')).toHaveValue(''); assert.equal(state.revisions.length, 0); await context.close();
+    await expect(addressField('城市')).toHaveValue(''); await expect(addressField('收件人')).toHaveValue(''); await expect(addressSection()).toContainText('当前货件尚无领星地址');
+    await addressField('地址来源').click(); await expect(page.getByRole('option')).toHaveCount(1); await page.keyboard.press('Escape');
+    assert.equal(state.revisions.length, 0); await context.close();
   }
   note();
 
-  step = 'address-directory-failure-keeps-input-and-retry-can-resolve-a-unique-match';
-  const network = fixture({ emptyAddress: true }); network.profiles = [profile()]; network.profileMode = 'error'; context = await setup(network); await open(network);
-  await expect(addressSection().getByRole('alert')).toContainText('地址簿读取失败'); await expect(addressField('城市')).toHaveValue('');
-  network.profileMode = 'ready'; await addressSection().getByRole('button', { name: '重试', exact: true }).click(); await expect(addressField('城市')).toHaveValue('Profile City'); assert.equal(network.revisions.length, 0); await context.close(); note();
+  step = 'unrelated-profile-request-failure-does-not-block-lingxing-address-adoption';
+  const network = fixture({ emptyAddress: true }); setLingxingAddress(network); network.profileMode = 'error'; context = await setup(network); await open(network);
+  await expect(addressField('地址来源')).toBeEnabled(); await expect(addressSection().getByRole('alert')).toHaveCount(0);
+  await addressSection().getByRole('button', { name: '采用地址', exact: true }).click(); await expect(addressField('城市')).toHaveValue('Lingxing City');
+  await expect(addressField('城市')).toBeEnabled(); assert.equal(network.revisions.length, 0); await context.close(); note();
 
   step = 'manual-input-and-confirmation-are-not-replaced-when-a-delayed-profile-request-finishes';
   const manual = fixture({ emptyAddress: true }); manual.profiles = [profile()]; manual.holdProfiles = true; context = await setup(manual); await open(manual); await expect.poll(() => typeof manual.releaseProfiles).toBe('function');
@@ -170,7 +179,7 @@ try {
   await expect(addressField('已核对并确认本票采用的完整收件地址')).toBeChecked(); await expect(addressField('地址核对 / 冲突处理原因')).toHaveValue('Manually checked before directory response');
   assert.equal(manual.revisions.length, 0); await save().click(); await expect(save()).toBeDisabled(); assert(!manual.revisions[0].profileReferences.some((reference) => reference.category === 'address')); await context.close(); note();
 
-  step = 'existing-manual-confirmed-and-versioned-addresses-survive-directory-refresh';
+  step = 'existing-manual-confirmed-and-historical-addresses-survive-profile-refresh';
   for (const kind of ['manual', 'unconfirmed-existing', 'confirmed', 'reference', 'empty-manual']) {
     const state = fixture(), current = profile({ city: 'Updated Directory City' }); state.profiles = [current]; state.document.currentRevision.data.fields.city = 'Saved Manual City';
     if (kind === 'manual') { state.document.currentRevision.data.fields.addressConfirmed = 'false'; state.document.currentRevision.data.fields.addressConfirmationReason = ''; }
@@ -182,7 +191,7 @@ try {
   }
   note();
 
-  step = 'generated-files-keep-their-saved-snapshot-and-do-not-reapply-directory-or-currency-defaults';
+  step = 'generated-files-keep-their-saved-snapshot-and-do-not-reapply-address-or-currency-defaults';
   const frozen = fixture({ rawCurrency: 'GBP', emptyAddress: true, retired: true }); frozen.document.status = 'pending_review'; frozen.profiles = [profile()];
   frozen.exports = [documentExportSchema.parse({ id: uid(), status: 'completed', reference: { documentId: frozen.document.id, revisionId: frozen.document.currentRevision.id, revisionVersion: frozen.document.version, templateId: uid(), templateVersion: 1, templateSha256: 'a'.repeat(64), generationRulesVersion: 'v2', sources: frozen.document.currentRevision.data.members.map((member) => member.source) }, fileId: uid(), fileSha256: 'b'.repeat(64), error: null, createdAt: now, completedAt: now, valid: true, invalidReason: null })];
   context = await setup(frozen); await open(frozen); await expect(currency()).toHaveAttribute('data-value', 'GBP'); await expect(currency()).toHaveText('英镑（GBP）'); await expect(currency()).toBeDisabled();
@@ -191,7 +200,8 @@ try {
   }
 
   step = 'readonly-currency-and-automatic-address-fit-desktop-and-narrow-viewports';
-  const narrow = fixture({ emptyAddress: true }); narrow.profiles = [profile()]; context = await setup(narrow); await open(narrow); await expect(addressField('城市')).toHaveValue('Profile City');
+  const narrow = fixture({ emptyAddress: true }); setLingxingAddress(narrow); context = await setup(narrow); await open(narrow);
+  await addressSection().getByRole('button', { name: '采用地址', exact: true }).click(); await expect(addressField('城市')).toHaveValue('Lingxing City');
   for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: 1000 }); await wizard().locator(':scope > .import-dialog-body').evaluate((node) => { node.scrollTop = 0; });
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)); const bounds = await currency().boundingBox(); assert(bounds && bounds.x >= -1 && bounds.x + bounds.width <= width + 1);

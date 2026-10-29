@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_BOX_FIELDS, documentAddressDifferences, documentBoxes, documentBoxValue, documentCountryCode, documentMemberAddressCode, documentRepresentativeProduct, documentRevisionDataSchema, hasCompleteDocumentAddress, type DocumentCandidate, type DocumentExportReference, type DocumentMemberSnapshot, type DocumentRevisionData, type DocumentSourceReference, type DocumentValidation } from '@scm/contracts';
-import { hasAddressConflict } from './address.js';
+import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_BOX_FIELDS, documentAddressDifferences, documentBoxes, documentBoxValue, documentCountryCode, documentInvoiceBoxGroups, documentMemberAddressCode, documentRevisionDataSchema, hasCompleteDocumentAddress, type DocumentCandidate, type DocumentExportReference, type DocumentMemberSnapshot, type DocumentRevisionData, type DocumentSourceReference, type DocumentValidation } from '@scm/contracts';
+import { hasAddressConflict, haveDocumentAddressSourcesChanged } from './address.js';
 
 export function documentDigest(value: unknown): string {
   const canonical = (input: unknown): unknown => Array.isArray(input) ? input.map(canonical) : input && typeof input === 'object'
@@ -9,22 +9,23 @@ export function documentDigest(value: unknown): string {
 }
 export const shipmentClaimKey = (member: Pick<DocumentCandidate, 'demand'> | DocumentMemberSnapshot) => JSON.stringify([member.demand.snapshot.sid, member.demand.snapshot.fba.trim().toUpperCase()]);
 /** Only new export requests require v2; reading/validating completed v1 files stays compatible. */
-export function documentExportRulesIssue(data: Pick<DocumentRevisionData, 'generationRulesVersion'>, reference?: Pick<DocumentExportReference, 'generationRulesVersion'>): DocumentValidation['issues'][number] | null {
+export function documentExportRulesIssue(data: Pick<DocumentRevisionData, 'generationRulesVersion'>, reference?: Pick<DocumentExportReference, 'generationRulesVersion' | 'pricingRule'>): DocumentValidation['issues'][number] | null {
   if (reference && (reference.generationRulesVersion !== 'v2' || reference.generationRulesVersion !== data.generationRulesVersion)) {
     return { code: 'DOCUMENT_EXPORT_RULES_STALE', severity: 'error', message: '该生成任务使用旧版规则或与单据修订不一致，请查询并采用领星资料后重新生成。' };
   }
-  return data.generationRulesVersion === 'v2' ? null : { code: 'DOCUMENT_GENERATION_UPGRADE_REQUIRED', severity: 'error', message: '旧草稿请先查询并采用领星售价及箱规资料升级；已有文件请建立更正单据后生成。' };
+  if (reference && reference.pricingRule !== 'fixed-2') return { code: 'DOCUMENT_EXPORT_RULES_STALE', severity: 'error', message: '该生成任务使用历史申报价格规则，请按固定单价 2.00 重新生成。' };
+  return data.generationRulesVersion === 'v2' ? null : { code: 'DOCUMENT_GENERATION_UPGRADE_REQUIRED', severity: 'error', message: '旧草稿请先查询并采用领星商品及箱规资料升级；已有文件请建立更正单据后生成。' };
 }
-/** Hidden product declarations do not gate v2 output; source quantities still validate separately. */
+/** Local address profiles are historical; hidden product declarations do not gate v2 output. */
 export function documentUsesProfileReference(data: DocumentRevisionData, reference: DocumentRevisionData['profileReferences'][number]): boolean {
+  if (reference.category === 'address') return false;
   if (data.generationRulesVersion !== 'v2' || reference.category !== 'product') return true;
   const value = (key: string) => {
     const input = reference.data[key];
     return typeof input === 'string' ? input.trim() : typeof input === 'boolean' || typeof input === 'number' && Number.isFinite(input) ? String(input) : '';
   };
   return data.members.some((member) => Number(reference.data.sid) === member.demand.snapshot.sid
-    && documentBoxes(member, data.fields).some((box) => {
-      const item = documentRepresentativeProduct(box.items);
+    && documentInvoiceBoxGroups(documentBoxes(member, data.fields)).some(({ representative: item }) => {
       return item && item.msku === value('msku') && item.fnsku === value('fnsku') && item.sku === value('sku');
     }));
 }
@@ -67,11 +68,11 @@ export function documentAddressSourceKey(members: DocumentRevisionData['members'
 export function shouldResolveDocumentAddress(data: DocumentRevisionData, previous?: DocumentRevisionData): boolean {
   // A field edit supplied in this revision takes precedence over automatic source defaults.
   if (previous && documentAddressDifferences(previous.fields, data.fields).length > 0) return false;
-  const sourceChanged = Boolean(previous && documentAddressSourceKey(previous.members) !== documentAddressSourceKey(data.members));
+  const sourceChanged = Boolean(previous && (documentAddressSourceKey(previous.members) !== documentAddressSourceKey(data.members) || haveDocumentAddressSourcesChanged(previous.members, data.members)));
   // An intentionally cleared manual address stays empty on subsequent saves in the same scope.
   if (previous && !sourceChanged && data.fields.addressSelectionMode === 'manual') return false;
   const hasAddress = DOCUMENT_ADDRESS_FIELDS.some((key) => !['addressCode', 'countryCode'].includes(key) && data.fields[key]?.trim());
-  return !hasAddress || sourceChanged;
+  return data.fields.addressSelectionMode === 'profile' || !hasAddress || sourceChanged;
 }
 const countryAliases: Record<string, string> = {
   US: 'US', USA: 'US', 'UNITED STATES': 'US', '美国': 'US',
@@ -98,10 +99,9 @@ export function validateDocumentData(data: DocumentRevisionData): DocumentValida
   const first = data.members[0]!, scope = (member: DocumentMemberSnapshot) => JSON.stringify([member.demand.snapshot.sid, member.demand.snapshot.channel, member.demand.snapshot.destinationFc, member.demand.snapshot.country]);
   if (data.members.some((member) => scope(member) !== scope(first))) add('DOCUMENT_SPLIT_REQUIRED', '店铺、业务渠道、目的仓或国家不同的货件必须分开发票。');
   const resolvedAddress = data.fields.addressConfirmed === 'true' && Boolean(data.fields.addressConfirmationReason?.trim());
-  const addressReferences = data.profileReferences.filter((reference) => reference.category === 'address');
   if (!hasCompleteDocumentAddress(data.fields)) add('DOCUMENT_ADDRESS_INCOMPLETE', '请补齐本票收件人、地址第一行、城市、邮编及两字母国家代码。');
-  if ((!addressReferences.length || data.fields.addressAdoptionVersion === 'explicit/v1') && !resolvedAddress) add('DOCUMENT_ADDRESS_UNCONFIRMED', '请核对本票最终完整地址并填写采用原因后确认。');
-  if (addressReferences.some((reference) => documentAddressDifferences(data.fields, reference.data).length > 0) && !resolvedAddress) add('DOCUMENT_ADDRESS_OVERRIDE_UNCONFIRMED', '本票地址与引用的地址簿版本不同，请核对最终地址并填写更改原因后确认。');
+  if (!resolvedAddress) add('DOCUMENT_ADDRESS_UNCONFIRMED', '请核对领星货件地址或本票手工地址并填写采用原因后确认。');
+  if (data.fields.addressCodeStatus === 'needs_review') add('DOCUMENT_ADDRESS_CODE_UNRESOLVED', data.fields.addressCodeReason || '请核实 B3 地址库编码并重新确认本票地址。');
   const addresses = data.members.flatMap((member) => member.sourceCandidates?.addresses.map((entry) => entry.data) ?? []);
   if (hasAddressConflict(addresses) && !resolvedAddress) add('DOCUMENT_ADDRESS_CONFLICT', '收件地址存在差异，请明确确认本票采用地址并填写原因后再出单。');
   const claims = new Set<string>();
@@ -133,19 +133,15 @@ export function validateDocumentData(data: DocumentRevisionData): DocumentValida
   if (!data.templateReference) add('DOCUMENT_TEMPLATE_REQUIRED', '请选择已登记的单据模板。');
   const scalar = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
   const code = (value: unknown) => scalar(value).toUpperCase();
-  for (const category of ['party', 'address', 'channel', 'tax'] as const) {
+  for (const category of ['party', 'channel', 'tax'] as const) {
     const references = data.profileReferences.filter((reference) => reference.category === category);
-    if (references.length > 1) issues.push({ code: 'DOCUMENT_PROFILE_AMBIGUOUS', severity: 'error', message: '同一张发票只能明确采用一份主体、地址、渠道和税务资料。', profileCategory: category });
+    if (references.length > 1) issues.push({ code: 'DOCUMENT_PROFILE_AMBIGUOUS', severity: 'error', message: '同一张发票只能明确采用一份主体、渠道和税务资料。', profileCategory: category });
     const reference = references[0]; if (!reference) continue;
     const values = reference.data;
     const mismatch = category === 'party' ? values.sid !== undefined && scalar(values.sid) !== String(first.demand.snapshot.sid)
-      : category === 'address' ? !data.members.every((member) => {
-        const memberCode = documentMemberAddressCode(member);
-        return Boolean(memberCode && [values.addressCode, values.destinationFc, values.fc].some((value) => code(value) === memberCode));
-      })
-        : category === 'channel' ? scalar(values.businessChannel ?? values.channel) !== (first.demand.snapshot.channel ?? '')
+      : category === 'channel' ? scalar(values.businessChannel ?? values.channel) !== (first.demand.snapshot.channel ?? '')
           : values.sid !== undefined && scalar(values.sid) !== String(first.demand.snapshot.sid) || values.country !== undefined && scalar(values.country) !== first.demand.snapshot.country;
-    const countryMismatch = (category === 'address' || category === 'tax') && Boolean(code(values.countryCode)) && Boolean(code(data.fields.countryCode)) && code(values.countryCode) !== code(data.fields.countryCode);
+    const countryMismatch = category === 'tax' && Boolean(code(values.countryCode)) && Boolean(code(data.fields.countryCode)) && code(values.countryCode) !== code(data.fields.countryCode);
     const currencyMismatch = (category === 'channel' || category === 'tax') && Boolean(code(values.currency)) && Boolean(code(data.fields.currency)) && code(values.currency) !== code(data.fields.currency);
     if (mismatch || countryMismatch || currencyMismatch) issues.push({ code: 'DOCUMENT_PROFILE_SCOPE_MISMATCH', severity: 'error', message: '所选资料不适用于当前票的店铺、目的仓、业务渠道、国家或币种。', profileCategory: category });
     if (category === 'channel') {

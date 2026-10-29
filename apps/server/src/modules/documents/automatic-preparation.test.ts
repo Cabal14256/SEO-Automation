@@ -26,7 +26,7 @@ function fixture(mixed = false): DocumentRevisionData {
         data: { sid: 101, fba: 'FBAAUTOMATIC', items, boxes: [{ id: boxId, externalBoxId: null, packageId: null, localBoxId: null, name: null, order: 1, items }], observedAt: now, issues: [] } },
       codes: [{ id: randomUUID(), groupId, demandId, boxId, prefix: 'A', sequence: 1, code: 'A1', valid: true, createdAt: now }], physical: null,
       boxSource: [{ demandId, shipmentRevisionId: shipmentId, boxId, sid: 101, fba: 'FBAAUTOMATIC', code: 'A1', order: 1, po: 'PO-KEPT', range: '', raw: { weight: '1', length: '2', width: '3', height: '4', weightUnit: 'KG', dimensionUnit: 'CM' }, values: { weight: '1.00', length: '2.00', width: '3.00', height: '4.00' }, items, sourceObservedAt: now }],
-      sourceCandidates: { addresses: [], products: [], issues: [] } }],
+      sourceCandidates: { addresses: [{ source: 'getShipmentDetails', snapshotId: randomUUID(), data: address }], products: [], issues: [] } }],
     productSourceFacts: [{ sid: 101, msku: 'M1', fnsku: 'F1', sku: 'S1', salesPrice: '9.99', currency: 'USD', unitPrice: '2.00', cartonQuantity: '5', sourceFileId: randomUUID(), sourceSha256: 'b'.repeat(64), fetchedAt: now }],
   };
 }
@@ -38,14 +38,14 @@ function catalog() {
 const errors = (plan: ReturnType<typeof planAutomaticPreparation>) => plan.issues.filter((issue) => issue.severity === 'error');
 
 describe('automatic invoice preparation', () => {
-  it('adopts unique scoped versions, fills blanks, confirms only the complete matching address book, and preserves sources', () => {
+  it('adopts scoped versions and confirms complete Lingxing shipment addresses without local address profiles', () => {
     const data = fixture(true), profiles = catalog(), templates = [template()];
     data.fields.orderNumber = 'OLD'; data.fields.currency = 'EUR';
     const original = structuredClone({ data, profiles, templates });
     const plan = planAutomaticPreparation(data, profiles, templates);
-    expect(errors(plan)).toEqual([]); expect(plan.profileReferences).toHaveLength(5); expect(plan.templateReference?.templateId).toBe(templates[0]!.id);
+    expect(errors(plan)).toEqual([]); expect(plan.profileReferences).toHaveLength(4); expect(plan.templateReference?.templateId).toBe(templates[0]!.id);
     expect(plan.fields).toMatchObject({ orderNumber: null, reference: null, tradeTerms: null, currency: 'USD', service: 'EXPRESS', customsMode: '9810', taxMode: '包税', vat: 'EXPLICIT-VAT', addressConfirmed: 'true' });
-    expect(plan.confirmAddress).toBe(true); expect(plan.fields.addressConfirmationReason).toContain(profiles.find((entry) => entry.category === 'address')!.id);
+    expect(plan.confirmAddress).toBe(true); expect(plan.fields.addressSelectionMode).toBe('lingxing'); expect(plan.profileReferences.some((entry) => entry.category === 'address')).toBe(false);
     const prepared = { ...data, fields: plan.fields, profileReferences: plan.profileReferences, templateReference: plan.templateReference };
     expect(validateDocumentData(prepared)).toEqual([]);
     const validation = validateWorkbookData(prepared);
@@ -102,17 +102,25 @@ describe('automatic invoice preparation', () => {
     expect(plan.profileReferences.some((entry) => entry.category === 'address')).toBe(false);
     expect(plan.issues.some((issue) => issue.code === 'DOCUMENT_ADDRESS_UNCONFIRMED')).toBe(mode !== 'confirmed');
   });
-  it('does not auto-confirm conflicting source addresses or multiple matching address-book entries', () => {
+  it('blocks conflicting Lingxing sources and ignores duplicate local address profiles', () => {
     const data = fixture(), profiles = catalog(), addressProfile = profiles.find((entry) => entry.category === 'address')!;
     data.members[0]!.sourceCandidates!.addresses = [address, { ...address, addressLine1: '2 Other Road' }].map((entry) => ({ source: 'fixture', snapshotId: randomUUID(), data: entry }));
     const conflicting = planAutomaticPreparation(data, profiles, [template()]); expect(conflicting.confirmAddress).toBe(false);
     expect(conflicting.issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_ADDRESS_CONFLICT' }));
     profiles.push({ ...structuredClone(addressProfile), id: randomUUID() });
-    expect(planAutomaticPreparation(fixture(), profiles, [template()]).issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_PROFILE_AMBIGUOUS', profileCategory: 'address' }));
+    expect(planAutomaticPreparation(fixture(), profiles, [template()]).confirmAddress).toBe(true);
   });
-  it('does not confirm bare complete fields or matching raw source addresses without address-book evidence', () => {
+  it('does not confirm bare fields or untrusted candidates without Lingxing evidence', () => {
     const data = fixture(); Object.assign(data.fields, address); data.members[0]!.sourceCandidates!.addresses = [{ source: 'fixture', snapshotId: randomUUID(), data: address }];
     const plan = planAutomaticPreparation(data, [], [template()]); expect(plan.confirmAddress).toBe(false); expect(plan.fields.addressConfirmed).not.toBe('true');
+  });
+  it('migrates historical address references without requiring a local profile version', () => {
+    const data = fixture(); data.profileReferences = [reference(profile('address', { ...address, addressLine1: 'Old Local Road' }))];
+    data.fields = { ...address, addressLine1: 'Old Local Road', addressSelectionMode: 'profile', addressConfirmed: 'true', addressConfirmationReason: 'Old directory' };
+    const plan = planAutomaticPreparation(data, [], [template()]);
+    expect(plan.issues).toEqual([]); expect(plan.fields.addressLine1).toBe(address.addressLine1); expect(plan.fields.addressSelectionMode).toBe('lingxing'); expect(plan.profileReferences).toEqual([]);
+    data.members[0]!.sourceCandidates!.addresses = [];
+    expect(planAutomaticPreparation(data, [], [template()]).issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_ADDRESS_UNCONFIRMED' }));
   });
   it('blocks stale pinned profile and template versions without adopting new values', () => {
     const data = fixture(), profiles = catalog(), chosen = profiles.find((entry) => entry.category === 'channel')!, oldTemplate = template();
@@ -121,6 +129,23 @@ describe('automatic invoice preparation', () => {
     const plan = planAutomaticPreparation(data, profiles, [currentTemplate]);
     expect(plan.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining(['DOCUMENT_PROFILE_STALE', 'DOCUMENT_TEMPLATE_STALE']));
     expect(plan.profileReferences.find((entry) => entry.profileId === chosen.id)?.version).toBe(1); expect(plan.fields.service).toBeUndefined(); expect(plan.templateReference?.version).toBe(1);
+  });
+  it('does not gate a merged FBA on the stale profile of a product outside its global representative', () => {
+    const data = fixture(true), member = data.members[0]!, [representative, hidden] = member.shipment.data.items;
+    const first = member.boxSource![0]!, second = { ...structuredClone(first), boxId: randomUUID(), order: 2, code: 'A2', items: [{ ...representative! }] };
+    first.items = [{ ...hidden! }]; member.boxSource!.push(second);
+    member.shipment.data.boxes[0]!.items = [{ ...hidden! }];
+    member.shipment.data.boxes.push({ ...structuredClone(member.shipment.data.boxes[0]!), id: second.boxId, order: 2, items: [{ ...representative! }] });
+    member.codes.push({ ...member.codes[0]!, id: randomUUID(), boxId: second.boxId, code: 'A2', sequence: 2 });
+    const stale = reference(profile('product', { sid: 101, ...hidden! })); data.profileReferences = [stale];
+    const profiles = catalog(), templates = [template()], original = structuredClone(data);
+    const plan = planAutomaticPreparation(data, profiles, templates);
+    expect(errors(plan)).toEqual([]);
+    expect(plan.profileReferences).toContainEqual(stale);
+    expect(plan.profileReferences.some((entry) => entry.category === 'product' && entry.data.sku === representative!.sku)).toBe(true);
+    expect(data).toEqual(original);
+    second.values.weight = '2.00';
+    expect(planAutomaticPreparation(data, profiles, templates).issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_PROFILE_STALE', profileCategory: 'product' }));
   });
   it('does not choose the first of several active templates', () => {
     const plan = planAutomaticPreparation(fixture(), catalog(), [template(), template()]); expect(plan.templateReference).toBeNull();

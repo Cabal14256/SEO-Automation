@@ -115,7 +115,13 @@ export async function scanFiles(repo, files, values = []) {
 }
 export async function scanHistory(repo, values = []) {
   let objects;
-  try { objects = await git(repo, ['rev-list', '--objects', '--all']); } catch { throw new Error('History could not be inspected'); }
+  try {
+    // Branches, remote-tracking branches and tags are the release boundary.
+    // Local tool checkpoints and stashes must not turn an otherwise clean push
+    // into a scan of private, unpublished work. Include detached HEAD as well.
+    const head = (await git(repo, ['rev-parse', '--verify', '--quiet', 'HEAD'], undefined, [0, 1])).toString('utf8').trim();
+    objects = await git(repo, ['rev-list', '--objects', '--branches', '--remotes', '--tags', ...(head ? [head] : [])]);
+  } catch { throw new Error('History could not be inspected'); }
   const findings = []; let scanned = 0;
   const records = objects.toString('utf8').split('\n').filter(Boolean).map((record) => /^([a-f0-9]{40,64})(?: (.*))?$/.exec(record)).filter(Boolean);
   const sizes = (await git(repo, ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'], records.map((match) => match[1]).join('\n') + '\n')).toString('utf8').trim().split('\n');

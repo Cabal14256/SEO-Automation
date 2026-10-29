@@ -1,4 +1,4 @@
-import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_BLANK_OUTPUT_FIELDS, applyDocumentAddress, documentAddressDataSchema, documentAddressDifferences, documentCountryCode, documentRevisionInputSchema, documentTicketCurrency, hasCompleteDocumentAddress, hasDocumentAddressConflict, matchDocumentAddressProfiles, withDocumentInvoiceDefaults,
+import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_BLANK_OUTPUT_FIELDS, applyDocumentAddress, documentCountryCode, documentRevisionInputSchema, documentTicketCurrency, hasCompleteDocumentAddress, hasDocumentAddressConflict, resolveDocumentLingxingAddress, withDocumentInvoiceDefaults,
   type DocumentProfile, type DocumentRevisionData, type DocumentTemplate, type DocumentValidation } from '@scm/contracts';
 import { documentDigest, documentUsesProfileReference } from './domain.js';
 import { DOCUMENT_HEADER_FIELDS } from './workbook.js';
@@ -117,33 +117,18 @@ export function planAutomaticPreparation(data: DocumentRevisionData, profiles: r
     // remain authoritative, including legitimate material/brand/image overrides.
     if (newlySelected) references.push(referenceOf(profile));
   }
-  const addressReferences = references.filter((reference) => reference.category === 'address');
   const manualAddress = fields.addressSelectionMode === 'manual';
-  const confirmed = fields.addressConfirmed === 'true' && !blank(fields.addressConfirmationReason) && hasCompleteDocumentAddress(fields);
+  const confirmed = fields.addressSelectionMode !== 'profile' && fields.addressConfirmed === 'true' && !blank(fields.addressConfirmationReason) && hasCompleteDocumentAddress(fields);
   if (manualAddress) {
     if (!confirmed) add('DOCUMENT_ADDRESS_UNCONFIRMED', '本票采用人工地址，请人工核对并确认；自动出单不会覆盖或代为确认。', 'address');
-  } else if (addressReferences.length > 1) add('DOCUMENT_PROFILE_AMBIGUOUS', '本票有多个地址资料引用，请人工选择。', 'address');
-  else {
-    const saved = addressReferences[0], matches = matchDocumentAddressProfiles(data.members, profiles);
-    const profile = saved ? validReferences.get(saved.profileId) : matches.length === 1 ? matches[0] : undefined;
+  } else {
+    const address = resolveDocumentLingxingAddress(data.members);
     const sourceAddresses = data.members.flatMap((member) => member.sourceCandidates?.addresses.map((entry) => entry.data) ?? []);
-    if (!saved && matches.length > 1) add('DOCUMENT_PROFILE_AMBIGUOUS', '匹配到多个有效地址簿记录，请人工选择。', 'address');
-    else if (profile && !matchDocumentAddressProfiles(data.members, [profile]).length) add('DOCUMENT_PROFILE_SCOPE_MISMATCH', '已采用地址簿不适用于本票来源，请人工核对。', 'address');
-    else if (profile) {
-      const valid = documentAddressDataSchema.safeParse(profile.data);
-      const conflicts = documentAddressDifferences(fields, profile.data).filter((key) => !blank(fields[key]));
-      if (!valid.success) add('DOCUMENT_ADDRESS_INCOMPLETE', '匹配的地址簿记录不完整或无效，请补齐后重试。', 'address');
-      else if (hasDocumentAddressConflict(sourceAddresses)) {
-        if (!confirmed) add('DOCUMENT_ADDRESS_CONFLICT', '货件来源地址存在非空差异，不能自动确认，请人工核对。', 'address');
-      } else if (conflicts.length) {
-        if (!confirmed) add('DOCUMENT_AUTOMATION_FIELD_CONFLICT', `地址簿与本票已有${conflicts.map((key) => fieldNames[key] ?? '地址字段').join('、')}不一致，已保留本票地址，请人工核对。`, 'address');
-      } else {
-        if (!saved) references.push(referenceOf(profile));
-        const completed = applyDocumentAddress(fields, profile.data);
-        Object.assign(fields, completed, { addressSelectionMode: 'profile', addressSourceLabel: `地址簿 · ${profile.key} · v${profile.version}`, addressConfirmed: 'true', addressConfirmationReason: `自动出单核对：唯一适用且完整的地址簿 ${profile.key}（${profile.id}，v${profile.version}），本票地址及来源无冲突。` });
-        confirmAddress = true;
-      }
-    } else if (!saved && !confirmed) add('DOCUMENT_ADDRESS_UNCONFIRMED', '没有唯一适用的完整地址簿，请补齐地址簿或人工确认本票地址。', 'address');
+    if (address) {
+      for (let index = references.length - 1; index >= 0; index--) if (references[index]!.category === 'address') references.splice(index, 1);
+      Object.assign(fields, applyDocumentAddress(fields, address), { addressSelectionMode: 'lingxing', addressSourceLabel: '领星货件地址', addressConfirmed: 'true', addressConfirmationReason: '自动出单核对：所有货件均有完整且无冲突的领星来源地址，按领星货件地址出单。' });
+      confirmAddress = true;
+    } else if (!confirmed) add(hasDocumentAddressConflict(sourceAddresses) ? 'DOCUMENT_ADDRESS_CONFLICT' : 'DOCUMENT_ADDRESS_UNCONFIRMED', '领星货件地址缺失、不完整或有冲突，请在领星维护后刷新，或人工确认本票地址。', 'address');
   }
   if (templateReference) {
     const current = templates.find((entry) => entry.id === templateReference!.templateId && entry.purpose === data.purpose);

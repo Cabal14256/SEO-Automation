@@ -8,6 +8,7 @@ import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
 import { documentBoxFieldKey, documentRevisionInputSchema, documentSchema, withDocumentDefaults as documentFlagDefaults } from '../../packages/contracts/dist/index.js';
+import { chooseOption, readOptions } from '../shared/ui-controls.mjs';
 
 const withDocumentDefaults = (fields = {}) => documentFlagDefaults({ orderNumber: null, reference: null, tradeTerms: null, currency: 'USD', ...fields });
 
@@ -152,8 +153,43 @@ try {
   await expect.poll(async () => { try { return (await fetch(baseURL)).status; } catch { return 0; } }, { timeout: 20_000 }).toBe(200);
   browser = await chromium.launch({ headless: true, channel: process.env.IMPORT_BROWSER_CHANNEL || 'chrome' });
 
+  step = 'address-adoption-uses-lingxing-and-allows-ticket-only-completion-without-a-local-book';
+  const lingxingAddress = fixture();
+  const addressMember = lingxingAddress.complete.currentRevision.data.members[0];
+  addressMember.sourceCandidates.addresses[0].data = { ...address, city: null, addressLine2: null };
+  lingxingAddress.complete.currentRevision.data.fields.addressLine2 = 'Old optional address line';
+  lingxingAddress.profiles.push({ id: uid(), category: 'address', key: 'LOCAL ADDRESS MUST NOT APPEAR', version: 1, status: 'active',
+    data: { ...address, city: 'Local book city', destinationFc: 'TEST1' }, createdBy: 'fixture', createdAt: now });
+  let addressContext = await setup(lingxingAddress); await open(lingxingAddress.complete);
+  await expect(wizard().getByRole('button', { name: /管理地址簿|保存到地址簿|在地址簿补全/ })).toHaveCount(0);
+  await addressEditor().locator(':scope > summary').click();
+  const addressSource = addressSection().getByRole('combobox', { name: '地址来源', exact: true });
+  const options = await readOptions(addressSource); assert.equal(options.length, 3); assert(options.every((value) => !value.startsWith('profile:')));
+  await chooseOption(addressSource, 'source:' + addressMember.source.demandId + ':0');
+  await expect(addressSection()).toContainText('采用后请在下方补齐并确认');
+  await addressSection().getByRole('button', { name: '采用地址', exact: true }).click();
+  await expect(addressSection().getByLabel('城市', { exact: true })).toHaveValue('');
+  await expect(addressSection().getByLabel('地址第 2 行', { exact: true })).toHaveValue('');
+  await expect(addressSection().getByLabel('已核对并确认本票采用的完整收件地址', { exact: true })).not.toBeChecked();
+  await expect(addressSection().getByLabel('已核对并确认本票采用的完整收件地址', { exact: true })).toBeDisabled();
+  await save().click(); await expect(save()).toBeDisabled();
+  assert.equal(lingxingAddress.accepted[0].fields.addressSelectionMode, 'lingxing');
+  assert(!lingxingAddress.accepted[0].profileReferences.some((reference) => reference.category === 'address'));
+  await addressSection().getByLabel('城市', { exact: true }).fill('Verified Lingxing City');
+  await addressSection().getByLabel('地址核对 / 冲突处理原因', { exact: true }).fill('Checked Lingxing shipment destination');
+  await addressSection().getByLabel('已核对并确认本票采用的完整收件地址', { exact: true }).check();
+  await save().click(); await expect(save()).toBeDisabled(); assert.equal(lingxingAddress.accepted[1].fields.city, 'Verified Lingxing City');
+  noGeneration(lingxingAddress); await addressContext.close(); note();
+
+  step = 'settings-have-no-local-address-book-and-old-address-links-redirect';
+  addressContext = await setup(fixture()); await page.goto('/settings/addresses');
+  await expect(page).toHaveURL(/\/settings\/document-profiles$/);
+  await expect(page.getByRole('navigation', { name: '设置分类', exact: true }).getByRole('link', { name: '收件地址', exact: true })).toHaveCount(0);
+  const profileCategories = await readOptions(page.getByRole('combobox', { name: '资料分类', exact: true }));
+  assert(!profileCategories.includes('address')); await addressContext.close(); note();
+
   for (const unicodeIdentity of [false, true]) {
-    step = 'http-without-webcrypto-keeps-' + (unicodeIdentity ? 'unicode' : 'ascii') + '-product-fields-and-manual-price-editable';
+    step = 'http-without-webcrypto-keeps-' + (unicodeIdentity ? 'unicode' : 'ascii') + '-product-and-box-fields-editable-with-fixed-invoice-price';
     const plainHttp = fixture({ unicodeIdentity });
     const data = plainHttp.complete.currentRevision.data;
     data.productSourceFacts[0].salesPrice = null; data.productSourceFacts[0].unitPrice = null;
@@ -165,11 +201,17 @@ try {
     const product = wizard().locator('.document-product-adjustment').filter({ hasText: identity.msku }); await expect(product).toHaveCount(1);
     if (await product.getAttribute('open') === null) await product.locator(':scope > summary').click();
     const material = product.getByLabel('材质', { exact: true }); await expect(material).toBeEnabled(); await material.fill('HTTP fixture material');
-    const price = product.getByLabel('人工补充售价（USD）', { exact: true }); await expect(price).toBeEnabled(); await price.fill('19.99');
-    await product.getByLabel('售价补充依据', { exact: true }).fill('HTTP fixture price evidence');
+    const price = product.getByLabel(identity.msku + ' 自动申报单价', { exact: true });
+    await expect(price).toContainText('固定申报单价（每件）'); await expect(price).toContainText('2.00 USD');
+    await expect(price).toContainText('无需补充商品售价'); await expect(price.getByRole('textbox')).toHaveCount(0);
+    await expect(wizard().getByLabel(/人工补充售价|售价补充依据/)).toHaveCount(0);
+    const firstBox = data.members[0].boxSource[0]; await boxField('A1', '长（CM）').fill('42.25');
     await save().click(); await expect(save()).toBeDisabled(); assert.equal(plainHttp.accepted.length, 1);
     assert.equal(plainHttp.accepted[0].fields[prefix + 'material'], 'HTTP fixture material');
-    assert.deepEqual(plainHttp.accepted[0].manualSalesPrices, [{ sid, msku: identity.msku, fnsku: identity.fnsku, sku: identity.sku, salesPrice: '19.99', reason: 'HTTP fixture price evidence' }]);
+    assert.equal(plainHttp.accepted[0].fields[documentBoxFieldKey(firstBox.boxId, 'length')], '42.25');
+    assert.equal(plainHttp.accepted[0].manualSalesPrices, undefined);
+    await expect(material).toHaveValue('HTTP fixture material'); await expect(boxField('A1', '长（CM）')).toHaveValue('42.25');
+    await expect(price).toContainText('2.00 USD');
     assert.equal(JSON.stringify(data.members), plainHttp.sourceSnapshot); noGeneration(plainHttp); await plainContext.close(); note();
   }
 

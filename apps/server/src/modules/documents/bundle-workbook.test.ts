@@ -24,6 +24,20 @@ async function invoice(id: string, rows = 1, overrides: Record<string, ExcelJS.C
 }
 const load = async (bytes: Buffer) => { const book = new ExcelJS.Workbook(); await book.xlsx.load(bytes as unknown as Parameters<typeof book.xlsx.load>[0]); return book; };
 describe('one real XLSX for a complete invoice batch', () => {
+  it('reassigns FBA colors across combined invoices and reuses the same color for repeated FBAs', async () => {
+    const first = await invoice('A', 2), second = await invoice('B', 2);
+    const prepare = async (input: typeof first, ranges: string[]) => {
+      const book = await load(input.bytes), sheet = book.worksheets[0]!;
+      ranges.forEach((range, index) => { sheet.getCell(index + 18, 1).value = range; sheet.getCell(index + 18, 1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF0000' } }; });
+      return { ...input, bytes: Buffer.from(await book.xlsx.writeBuffer()) };
+    };
+    const result = await createDocumentBundleWorkbook([await prepare(first, ['FBAFIRSTU000001', 'FBAFIRSTU000002']), await prepare(second, ['FBASECONDU000001', 'FBAFIRSTU000003'])]);
+    const sheet = (await load(result.bytes)).worksheets[0]!, firstFill = sheet.getCell('A18').fill, secondFill = sheet.getCell('A20').fill;
+    expect(firstFill).toMatchObject({ type: 'pattern', pattern: 'solid' }); expect(secondFill).not.toEqual(firstFill);
+    expect(sheet.getCell('Q18').fill).toEqual(firstFill); expect(sheet.getCell('A19').fill).toEqual(firstFill);
+    expect(sheet.getCell('A21').fill).toEqual(firstFill); expect(sheet.getCell('Q20').fill).toEqual(secondFill);
+    expect(sheet.getCell('I20').numFmt).toBe('0.00'); expect(sheet.getImages()).toHaveLength(2);
+  });
   it('merges equal headers and adds actual boxes/quantities while preserving rows, styles, pictures and print settings', async () => {
     const first = await invoice('A', 2), second = await invoice('B', 3), result = await createDocumentBundleWorkbook([first, second]);
     const book = await load(result.bytes), sheet = book.worksheets[0]!;
@@ -35,8 +49,34 @@ describe('one real XLSX for a complete invoice batch', () => {
     expect(sheet.getCell('I20').font.name).toBe('微软雅黑'); expect(sheet.getColumn(17).width).toBe(35); expect(sheet.model.merges).toContain('B6:D6');
     expect(sheet.getImages().map((image) => image.range.tl.nativeRow)).toEqual([17, 19]);
     expect(Buffer.from(book.getImage(Number(sheet.getImages()[1]!.imageId)).buffer as unknown as Uint8Array).toString('base64')).toBe(pixel);
-    expect(sheet.pageSetup).toMatchObject({ orientation: 'landscape', fitToWidth: 1, fitToHeight: 0, printArea: 'A1:Q22', printTitlesRow: '17:17' });
+    expect(sheet.pageSetup).toMatchObject({ orientation: 'landscape', fitToWidth: 1, fitToHeight: 0, printArea: 'A1:Q22', printTitlesRow: '1:17' });
     expect(sheet.views[0]).toMatchObject({ state: 'frozen', ySplit: 17 });
+  });
+  it('repairs address wrapping and repeated print headers when reusing a historical combined workbook', async () => {
+    const address = 'Main Avenue Logistics Park, Industrial Estate, Receiving Building Number 123';
+    const historical = await invoice('A', 2, { B6: address, B7: '楼栋 A\r\n二楼\n收货处' }), original = await load(historical.bytes), oldSheet = original.worksheets[0]!;
+    [17.2, 7.77, 7.77].forEach((width, index) => { oldSheet.getColumn(index + 2).width = width; });
+    for (const row of [6, 7]) { oldSheet.getRow(row).height = 14.25; oldSheet.getCell(row, 2).font = { name: '微软雅黑', size: 9 }; oldSheet.getCell(row, 2).alignment = { horizontal: 'center', wrapText: false }; }
+    const input = { ...historical, bytes: Buffer.from(await original.xlsx.writeBuffer()) }, before = Buffer.from(input.bytes);
+    const first = await createDocumentBundleWorkbook([input]), sheet = (await load(first.bytes)).worksheets[0]!;
+    expect(sheet.getCell('B6').value).toBe(address); expect(sheet.getCell('B7').value).toBe('楼栋 A\n二楼\n收货处');
+    expect(sheet.getCell('B6').alignment).toMatchObject({ horizontal: 'left', wrapText: true });
+    expect(sheet.getRow(6).height).toBeGreaterThan(14.25); expect(sheet.getRow(7).height).toBeGreaterThanOrEqual(36.75);
+    expect(sheet.pageSetup.printTitlesRow).toBe('1:17'); expect(sheet.getCell('A18').value).toBe('A-0'); expect(sheet.getImages()).toHaveLength(1); expect(input.bytes).toEqual(before);
+    const range = first.sheets[0]!.ranges[0]!;
+    const reused = await createDocumentBundleWorkbook([{ documentId: 'A', bytes: first.bytes, selections: [{ ...range, sheetName: first.sheets[0]!.name }] }]);
+    const written = (await load(reused.bytes)).worksheets[0]!;
+    expect(written.getRow(6).height).toBe(sheet.getRow(6).height); expect(written.getCell('B6').value).toBe(address); expect(written.pageSetup.printTitlesRow).toBe('1:17');
+  });
+  it('rejects historical addresses too tall to print completely on every page', async () => {
+    await expect(createDocumentBundleWorkbook([await invoice('A', 1, { B6: '中'.repeat(4000) })])).rejects.toThrow(/地址二、地址三.*409/);
+  });
+  it('compares CRLF address headers as XML-normalized text without relaxing values or numeric types', async () => {
+    const address = 'Receiving hall\r\nFloor 2', input = await invoice('A', 1, { B6: address });
+    const result = await createDocumentBundleWorkbook([{ ...input, expectedHeaders: { B6: address, B16: 1 } }]);
+    expect((await load(result.bytes)).worksheets[0]!.getCell('B6').value).toBe('Receiving hall\nFloor 2');
+    await expect(createDocumentBundleWorkbook([{ ...input, expectedHeaders: { B6: 'Receiving hall\r\nFloor 3' } }])).rejects.toThrow('建立更正单据');
+    await expect(createDocumentBundleWorkbook([{ ...input, expectedHeaders: { B6: address, B16: '1' } }])).rejects.toThrow('建立更正单据');
   });
   it('keeps different addresses, currencies or other header values on separate worksheets in the same workbook', async () => {
     const result = await createDocumentBundleWorkbook([await invoice('A'), await invoice('B', 1, { B6: '20 Other Road' }), await invoice('C', 1, { F12: '英镑', B12: 'GB' })]);

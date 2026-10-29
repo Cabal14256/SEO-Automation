@@ -1,6 +1,6 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { documentLingxingApplyInputSchema, documentLingxingPreviewInputSchema, documentLingxingPreviewSchema, type DocumentLingxingIssue, type DocumentLingxingPreview, type DocumentProductSourceFact, type DocumentRevisionData } from '@scm/contracts';
+import { applyDocumentAddress, documentLingxingApplyInputSchema, documentLingxingPreviewInputSchema, documentLingxingPreviewSchema, resolveDocumentLingxingAddress, type DocumentLingxingIssue, type DocumentLingxingPreview, type DocumentProductSourceFact, type DocumentRevisionData } from '@scm/contracts';
 import { readConfig } from '../../config.js';
 import { db, pool } from '../../db/client.js';
 import { fileIndex } from '../../db/schema.js';
@@ -9,7 +9,6 @@ import { publishReportFile } from '../batches/report-service.js';
 import { BatchError, requireBatchActor, type BatchTx } from '../batches/service.js';
 import { checkedFileBytes } from '../imports/service.js';
 import { createLingxingReadClient, LingxingReadError, type LingxingReadAttempt, type LingxingReadClient, type LingxingReadResult } from '../lingxing/read-client.js';
-import { hasAddressConflict, mergeCompatibleAddresses } from './address.js';
 import { documentDigest, documentUsesProfileReference } from './domain.js';
 import { downloadLingxingImage } from './lingxing-image.js';
 import { mapLingxingInvoiceProduct, mapLingxingStockSubjects, matchLingxingFbaProduct, matchLingxingListingProduct } from './lingxing-mapping.js';
@@ -228,10 +227,9 @@ export async function collectLingxingDocumentPreview(data: DocumentRevisionData,
     catch (error) { issues.push(issueFor(error, '主体列表查询')); }
   }
   const addresses = data.members.flatMap((member) => member.sourceCandidates?.addresses.map((entry) => entry.data) ?? []);
-  const address = mergeCompatibleAddresses(addresses), fields = { ...aggregateLingxingFields(products) };
-  if (address && !hasAddressConflict([...addresses, data.fields])) for (const [key, value] of Object.entries(address)) { if (addressFields.has(key)) fields[key] = value; }
-  else if (address) issues.push({ code: 'DOCUMENT_ADDRESS_CONFLICT', message: '已维护的本票地址与来源有不同的非空值，本次不会混合填写地址。' });
-  else if (addresses.length) issues.push({ code: 'DOCUMENT_ADDRESS_CONFLICT', message: '来源中有不同的非空地址，本次不会自动采用地址。' });
+  const address = resolveDocumentLingxingAddress(data.members), fields = { ...aggregateLingxingFields(products) };
+  if (address) for (const [key, value] of Object.entries(address)) { if (addressFields.has(key)) fields[key] = value; }
+  else if (addresses.length) issues.push({ code: 'DOCUMENT_ADDRESS_CONFLICT', message: '领星货件地址不完整、国家不符或存在冲突，请维护领星地址或人工核对本票地址。' });
   if (data.members.some((member) => !member.sourceCandidates)) issues.push({ code: 'DOCUMENT_SOURCE_SNAPSHOTS_MISSING', message: '部分货件尚无地址及商品来源快照，未将缺少快照视为来源资料不存在。' });
   return { products, fields, parties, issues, requests };
 }
@@ -284,7 +282,7 @@ export function documentLingxingSourceFacts(preview: DocumentLingxingPreview, pr
       salesPrice: salesPrice || null, currency: currency || null, unitPrice, cartonQuantity, ...provenance };
   });
 }
-async function attachDerivedProfile(tx: BatchTx, actorId: string, input: ApplyInput, data: DocumentRevisionData, category: 'product' | 'address', key: string, values: Record<string, unknown>, existing?: typeof documentProfiles.$inferSelect) {
+async function attachDerivedProfile(tx: BatchTx, actorId: string, input: ApplyInput, data: DocumentRevisionData, category: 'product', key: string, values: Record<string, unknown>, existing?: typeof documentProfiles.$inferSelect) {
   const profile = await writeDocumentProfileInTx(tx, actorId, { operationId: input.operationId, category, key, data: values, reason: input.reason, ...(existing ? { expectedVersion: existing.version } : {}) });
   const next = { category, profileId: profile.id, version: profile.version, data: profile.data };
   const index = data.profileReferences.findIndex((reference) => reference.profileId === profile.id);
@@ -328,6 +326,11 @@ export async function applyDocumentLingxing(id: string, actorId: string, input: 
     const allowedFields = new Set(['currency', 'battery', 'magnetic', 'liquid', 'powder', 'dangerous']);
     const first = data.members[0]!;
     for (const [key, value] of Object.entries(preview.fields)) if (allowedFields.has(key) && blank(data.fields[key]) && !blank(value)) data.fields[key] = value;
+    const address = resolveDocumentLingxingAddress(data.members);
+    if (address && data.fields.addressSelectionMode !== 'manual') {
+      data.fields = { ...applyDocumentAddress(data.fields, address), addressSelectionMode: 'lingxing', addressSourceLabel: '领星货件地址' };
+      data.profileReferences = data.profileReferences.filter((reference) => reference.category !== 'address');
+    }
     if (!data.profileReferences.some((reference) => reference.category === 'channel')) {
       const profiles = await tx.select().from(documentProfiles).where(and(eq(documentProfiles.category, 'channel'), eq(documentProfiles.status, 'active'))).for('share');
       const matches = profiles.filter((profile) => scalar(profile.data.businessChannel ?? profile.data.channel) === first.demand.snapshot.channel

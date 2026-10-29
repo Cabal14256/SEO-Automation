@@ -6,7 +6,6 @@ import { DashboardRoute, LoginRoute, NotFoundPage } from './pages';
 import { SellerMappingsRoute } from './features/seller-mappings';
 import { SettingsRoute } from './features/settings';
 import { DocumentProfilesRoute } from './features/document-profiles';
-import { DocumentAddressesRoute } from './features/document-address-settings';
 import { ImportsRoute } from './features/imports';
 import { BatchesRoute } from './features/batches';
 import { ShippingRoute } from './features/shipping-workspace';
@@ -40,11 +39,7 @@ const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/set
 const documentProfilesRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings/document-profiles', component: DocumentProfilesRoute,
   validateSearch: (search: Record<string, unknown>): { documentId?: string } => ({ documentId: typeof search.documentId === 'string' && /^[0-9a-f-]{36}$/i.test(search.documentId) ? search.documentId : undefined }),
 });
-const documentAddressesRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings/addresses', component: DocumentAddressesRoute,
-  validateSearch: (search: Record<string, unknown>): { documentId?: string; draftId?: string } => ({
-    documentId: typeof search.documentId === 'string' && /^[0-9a-f-]{36}$/i.test(search.documentId) ? search.documentId : undefined,
-    draftId: typeof search.draftId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(search.draftId) ? search.draftId : undefined,
-  }),
+const documentAddressesRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings/addresses', component: () => <Navigate to="/settings/document-profiles" replace />,
 });
 const sellerMappingsRoute = createRoute({
   getParentRoute: () => rootRoute,

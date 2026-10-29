@@ -11,13 +11,14 @@ import { filterMultiSelectOptions } from '../components/ui/multi-select-options'
 import { BatchTable, Check, QueryError } from './batch-shared';
 import { documentApi } from './document-api';
 import { documentAutomationApi } from './document-automation-api';
+import { useAutomationResume } from './document-automation';
 import { DocumentField } from './document-fields';
 import { shippingRunApi } from './shipping-run-api';
 import { useDocumentAction } from './documents';
 
 const commonFields = [['service', '渠道服务'], ['customsMode', '报关方式'], ['clearanceMode', '清关方式'], ['taxMode', '税务方式'], ['vat', 'VAT'], ['deliveryStation', '交货仓站'], ['battery', '含电池'], ['magnetic', '含磁性'], ['liquid', '含液体'], ['powder', '含粉末'], ['dangerous', '危险品']] as const;
-export function NewDocument({ active, started, onEditorState, actionsContainer, close, blocked }: {
-  active: boolean; started: (job: DocumentAutomationJob) => void; onEditorState: (state: { dirty: boolean; busy: boolean }) => void;
+export function NewDocument({ active, started, resume, onEditorState, actionsContainer, close, blocked }: {
+  active: boolean; started: (job: DocumentAutomationJob) => void; resume: (job: DocumentAutomationJob) => void; onEditorState: (state: { dirty: boolean; busy: boolean }) => void;
   actionsContainer: HTMLDivElement | null; close: () => void; blocked: boolean;
 }) {
   const id = useId();
@@ -31,8 +32,11 @@ export function NewDocument({ active, started, onEditorState, actionsContainer, 
   const [fields, setFields] = useState<Record<string, string | null>>({});
   const [prefillScopeChanged, setPrefillScopeChanged] = useState(false);
   const action = useDocumentAction();
-  const locked = action.busy || blocked || !active;
-  useEffect(() => { onEditorState({ dirty: selected.length > 0 || Boolean(title.trim()) || Object.values(fields).some(Boolean), busy: action.busy }); }, [selected.length, title, fields, action.busy, onEditorState]);
+  const resetAction = action.reset;
+  useEffect(() => { resetAction(); }, [runId, selected, title, fields, resetAction]);
+  const existing = useAutomationResume(action.error, resume, { preserveDraft: true, active });
+  const locked = action.busy || existing.busy || blocked || !active;
+  useEffect(() => { onEditorState({ dirty: selected.length > 0 || Boolean(title.trim()) || Object.values(fields).some(Boolean), busy: action.busy || existing.busy }); }, [selected.length, title, fields, action.busy, existing.busy, onEditorState]);
   const runs = useQuery({ queryKey: ['shipping-runs'], queryFn: shippingRunApi.list, enabled: active, retry: false });
   const candidates = useQuery({ queryKey: ['document-candidates', runId], queryFn: () => documentApi.candidates(runId), enabled: active && Boolean(runId), retry: false });
   const options = useQuery({ queryKey: ['document-field-options'], queryFn: documentApi.fieldOptions, enabled: active, retry: false });
@@ -58,7 +62,7 @@ export function NewDocument({ active, started, onEditorState, actionsContainer, 
   return <div className="document-new-wizard">
     <nav className="import-wizard-progress" aria-label="新建发票步骤"><ol>{([{ value: 'sources', label: '选择货件' }, { value: 'details', label: '出单资料' }] as const).map((item, index) => <li key={item.value} data-current={step === item.value}><button type="button" aria-current={step === item.value ? 'step' : undefined} disabled={locked || item.value === 'details' && !canStart} onClick={() => chooseStep(item.value)}><span className="wizard-step-number" aria-hidden="true">{index + 1}</span><span>{item.label}</span></button></li>)}</ol></nav>
     <section className="content-panel document-new-panel" aria-labelledby={`${id}-new-title`}>
-    <div className="section-heading"><h3 ref={heading} tabIndex={-1} id={`${id}-new-title`}>{step === 'sources' ? '选择本次发货的货件' : '出单资料'}</h3><span>{step === 'sources' ? '支持多选，也可选择当前列表全部货件' : `已选 ${selected.length} 个货件 · 统一检查后生成一份 XLSX`}</span></div>
+    <div className="section-heading"><h3 ref={heading} tabIndex={-1} id={`${id}-new-title`}>{step === 'sources' ? '选择本次发货的货件' : '出单资料'}</h3><span>{step === 'sources' ? '支持多选，也可选择当前列表全部货件' : `已选 ${selected.length} 个货件 · 统一检查后生成发票 ZIP 压缩包`}</span></div>
     <div hidden={step !== 'sources'}>
     {runs.isError && <QueryError error={runs.error} retry={() => void runs.refetch()} />}
     <form className="document-candidate-filters" onSubmit={(event) => { event.preventDefault(); if (locked) return; if (runId && draftRunId !== runId) setPrefillScopeChanged(Boolean(title.trim()) || Object.values(fields).some(Boolean)); setRunId(draftRunId); setSelected([]); setSearch(''); }}>
@@ -83,9 +87,10 @@ export function NewDocument({ active, started, onEditorState, actionsContainer, 
       <p className="mapping-help">下方资料可选填写，用于补齐所选货件的空白字段，已有内容保留。未填写的资料由系统读取档案；仍有缺项时会统一提示。</p>
       <div className="field document-title-field"><label htmlFor={`${id}-title`}>任务名称（可选）</label><Input id={`${id}-title`} value={title} maxLength={200} disabled={locked} onChange={(event) => setTitle(event.target.value)} /></div>
       <div className="document-form-grid">{commonFields.map(([key, label]) => <div className="field" key={key}><label htmlFor={`${id}-${key}`}>{label}</label><DocumentField id={`${id}-${key}`} fieldKey={key} value={fields[key] || ''} disabled={locked} onValueChange={(value) => setFields((current) => ({ ...current, [key]: value }))} services={options.data?.services ?? []} servicesLoading={options.isFetching} servicesError={options.isError} retryServices={() => void options.refetch()} /></div>)}</div>
-      <p className="mapping-help">系统先读取所选货件资料并整批检查；有缺项时统一填写，全部通过后才生成一份 XLSX。相同表头合并，不同地址或币种分工作表；混装提醒不阻止输出。</p>
+      <p className="mapping-help">系统先读取所选货件资料并整批检查；有缺项时统一填写，全部通过后，每张发票生成独立 Excel 文件并打包为 ZIP；混装提醒不阻止输出。</p>
     </div>
     {action.feedback}
+    {existing.feedback}
     {actionsContainer && createPortal(<>{step === 'details' && <Button type="button" icon={ArrowLeft} disabled={locked} onClick={() => chooseStep('sources')}>上一步</Button>}<Button type="button" icon={X} disabled={locked} onClick={close}>暂时关闭</Button>{step === 'sources' ? <Button type="button" icon={ArrowRight} variant="primary" disabled={!canStart} onClick={() => chooseStep('details')}>下一步：出单资料</Button> : <Button type="button" icon={ArrowRight} variant="primary" disabled={!canStart} loading={action.busy} onClick={start}>自动生成发票</Button>}</>, actionsContainer)}
     </section>
   </div>;

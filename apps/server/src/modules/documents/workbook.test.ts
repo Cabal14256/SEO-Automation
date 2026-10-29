@@ -30,6 +30,24 @@ function v2Data(boxCount = 1): DocumentRevisionData {
   }));
   return source;
 }
+function differentProductBoxes(country = 'DE') {
+  const source = v2Data(4), member = source.members[0]!;
+  const currency = country === 'GB' ? 'GBP' : country === 'US' ? 'USD' : 'EUR';
+  source.fields.countryCode = country; source.fields.currency = currency;
+  member.demand.snapshot.country = country; member.demand.snapshot.fba = 'FBADEMOBOXTEST'; member.shipment.data.fba = 'FBADEMOBOXTEST';
+  const items = [3, 1, 4, 2].map((index) => ({ msku: `M${index}`, fnsku: `F${index}`, sku: `S${index}`, quantity: '200', name: `商品${index}` }));
+  member.shipment.data.items = structuredClone(items);
+  member.shipment.data.boxes.forEach((box, index) => { box.items = [structuredClone(items[index]!)]; });
+  member.physical!.snapshot.source.boxes.forEach((box, index) => {
+    box.fba = 'FBADEMOBOXTEST'; box.items = [structuredClone(items[index]!)];
+    box.values = { weight: '16.20', length: '48.00', width: '41.00', height: '44.00' };
+  });
+  source.profileReferences = [source.profileReferences[0]!];
+  source.profileReferences[0]!.data.model = 'iphone 15 Pro'; source.profileReferences[0]!.data.salesLink = 'https://www.amazon.de/dp/B0TEST0001';
+  source.productSourceFacts = [source.productSourceFacts![0]!];
+  source.productSourceFacts[0]!.currency = currency; source.productSourceFacts[0]!.cartonQuantity = '200';
+  return source;
+}
 function withManualSalesPrice(source: DocumentRevisionData, salesPrice = '12.375') {
   const fact = source.productSourceFacts![0]!;
   source.manualSalesPrices = [{ sid: fact.sid, msku: fact.msku, fnsku: fact.fnsku, sku: fact.sku, salesPrice, currency: 'USD', reason: '核对售价', recordedBy: 'admin', recordedAt: at,
@@ -54,6 +72,68 @@ function confirmDomainFixture(source: DocumentRevisionData) {
   }
 }
 describe('丰信单票 XLSX', () => {
+  it('wraps long English and Chinese addresses with explicit line breaks without changing the saved address', async () => {
+    const raw = new ExcelJS.Workbook(); await raw.xlsx.load(await template() as never);
+    const layout = raw.worksheets[0]!; layout.properties.defaultRowHeight = 14.25;
+    [17.2, 7.77, 7.77].forEach((width, index) => { layout.getColumn(index + 2).width = width; });
+    for (let row = 3; row <= 14; row++) {
+      layout.getCell(row, 2).font = { name: '微软雅黑', size: 9 };
+      layout.getCell(row, 2).alignment = { horizontal: 'center', wrapText: false, shrinkToFit: true };
+    }
+    const source = v2Data();
+    source.fields.addressLine1 = 'Main Avenue Logistics Park, Industrial Estate, Receiving Building Number 123';
+    source.fields.addressLine2 = '测试园区仓储物流收货中心'.repeat(6);
+    source.fields.addressLine3 = 'Building A\r\n\r\nFloor 2\nReceiving desk';
+    const before = structuredClone(source), book = new ExcelJS.Workbook();
+    await book.xlsx.load(await createWorkbook(source, Buffer.from(await raw.xlsx.writeBuffer())) as never);
+    const sheet = book.worksheets[0]!;
+    expect(sheet.getCell('B6').value).toBe(source.fields.addressLine1); expect(sheet.getCell('B7').value).toBe(source.fields.addressLine2); expect(sheet.getCell('B8').value).toBe(source.fields.addressLine3!.replace(/\r\n?/g, '\n'));
+    for (const row of [6, 7, 8]) {
+      expect(sheet.getCell(row, 2).alignment).toMatchObject({ horizontal: 'left', vertical: 'middle', wrapText: true });
+      expect(sheet.getCell(row, 2).alignment.shrinkToFit).not.toBe(true);
+      expect(sheet.getRow(row).height).toBeGreaterThan(14.25);
+    }
+    expect(sheet.getRow(7).height).toBeGreaterThan(sheet.getRow(6).height!);
+    expect(sheet.getRow(8).height).toBeGreaterThanOrEqual(48);
+    expect(sheet.pageSetup).toMatchObject({ printTitlesRow: '1:17', fitToWidth: 1, fitToHeight: 0 });
+    expect(sheet.model.merges).toContain('B6:D6'); expect(source).toEqual(before);
+  });
+  it('preserves a taller template row and fits multiline content on the opposite side of the address', async () => {
+    const raw = new ExcelJS.Workbook(); await raw.xlsx.load(await template() as never);
+    const layout = raw.worksheets[0]!;
+    layout.getRow(6).height = 44;
+    layout.getCell('F13').font = { name: '微软雅黑', size: 16 };
+    layout.getCell('F13').alignment = { wrapText: true, vertical: 'middle' };
+    const source = v2Data(); source.fields.remarks = '说明第一行\n说明第二行';
+    const book = new ExcelJS.Workbook(); await book.xlsx.load(await createWorkbook(source, Buffer.from(await raw.xlsx.writeBuffer())) as never);
+    const sheet = book.worksheets[0]!;
+    expect(sheet.getRow(6).height).toBe(44); expect(sheet.getRow(13).height).toBeGreaterThanOrEqual(43);
+    expect(sheet.getCell('F13').value).toBe(source.fields.remarks); expect(sheet.getCell('F13').font.size).toBe(16);
+  });
+  it('refuses an unprintable address instead of silently capping its row height', async () => {
+    const source = v2Data(); source.fields.addressLine1 = '中'.repeat(4000);
+    await expect(createWorkbook(source, await template())).rejects.toThrow(/地址二、地址三.*409/);
+    const raw = new ExcelJS.Workbook(); await raw.xlsx.load(await template() as never);
+    raw.worksheets[0]!.getRow(6).height = 200;
+    await expect(createWorkbook(v2Data(), Buffer.from(await raw.xlsx.writeBuffer()))).rejects.toThrow('重复表头高度上限 360 磅');
+    const crowded = v2Data();
+    for (const field of ['addressLine1', 'addressLine2', 'addressLine3']) crowded.fields[field] = '中文地址'.repeat(25);
+    await expect(createWorkbook(crowded, await template())).rejects.toThrow('重复表头高度上限 360 磅');
+  });
+  it('fills complete detail rows by FBA while retaining template headings, images and number formats', async () => {
+    const source = data(1), second = data(1).members[0]!;
+    second.demand.snapshot.fba = 'FBASECOND'; second.shipment.data.fba = 'FBASECOND';
+    second.physical!.snapshot.source.boxes.forEach((box) => { box.fba = 'FBASECOND'; });
+    source.members.push(second);
+    const before = structuredClone(source), book = new ExcelJS.Workbook();
+    await book.xlsx.load(await createWorkbook(source, await template()) as never);
+    const sheet = book.worksheets[0]!, firstFill = sheet.getCell('A18').fill, secondFill = sheet.getCell('A20').fill;
+    expect(firstFill).toMatchObject({ type: 'pattern', pattern: 'solid' }); expect(secondFill).not.toEqual(firstFill);
+    expect(sheet.getCell('Q18').fill).toEqual(firstFill); expect(sheet.getCell('A19').fill).toEqual(firstFill);
+    expect(sheet.getCell('Q21').fill).toEqual(secondFill); expect(sheet.getCell('I18').numFmt).toBe('0.00');
+    expect(sheet.getCell('A17').value).toBe('货箱编号'); expect(sheet.getCell('A17').fill).not.toEqual(firstFill);
+    expect(sheet.getImages()).toHaveLength(4); expect(source).toEqual(before);
+  });
   it('renders marked/line-wrapped template headings then merges real invoices without losing dates, images, merges or data', async () => {
     const raw = new ExcelJS.Workbook(); await raw.xlsx.load(await template() as never);
     raw.worksheets[0]!.getCell('A17').value = '货箱编号 *'; raw.worksheets[0]!.getCell('G17').value = '产品\n英文品名*'; raw.worksheets[0]!.getCell('J17').value = '产品申报数量\n（单箱产品个数） *';
@@ -449,6 +529,47 @@ describe('丰信 v2 发票规则', () => {
     expect(calculateInvoiceUnitPrice(input)).toBe(expected);
   });
 
+  it.each(['DE', 'US', 'GB'])('merges different products in a complete %s FBA into one range and one stable representative', async (country) => {
+    const source = differentProductBoxes(country), before = structuredClone(source);
+    expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
+    const projected = projectDocumentLines(source);
+    expect(projected.lines).toHaveLength(1);
+    expect(projected.lines[0]).toMatchObject({ range: 'FBADEMOBOXTESTU000001-4', count: 4, box: { order: 2 }, product: { sku: 'S1' }, declaredQuantity: '200', actualTotalQuantity: '800' });
+    expect(projected.lines[0]!.boxIds).toHaveLength(4);
+    expect(projected).toMatchObject({ boxCount: 4, totalQuantity: '800', totalWeight: '64.80', totalValue: '1600.00' });
+    expect(Object.values(projected.perProduct)).toEqual(['200', '200', '200', '200']);
+    const result = await createDocumentBundleWorkbook([{ documentId: 'europe', bytes: await createWorkbook(source, await template()) }]);
+    const book = new ExcelJS.Workbook(); await book.xlsx.load(result.bytes as never);
+    const sheet = book.worksheets[0]!;
+    expect(sheet.rowCount).toBe(18); expect(sheet.getCell('A18').value).toBe('FBADEMOBOXTESTU000001-4');
+    expect(sheet.getCell('J18').value).toBe(200); expect(sheet.getCell('O18').value).toBe('iphone 15 Pro'); expect(sheet.getCell('Q18').value).toBe('https://www.amazon.de/dp/B0TEST0001');
+    expect(sheet.getCell('B16').value).toBe(4); expect(sheet.getCell('F15').value).toBe(800); expect(sheet.getImages()).toHaveLength(1);
+    expect(result.sheets[0]).toMatchObject({ rows: 1, boxes: 4, actualQuantity: 800 });
+    expect(source).toEqual(before);
+  });
+
+  it('reconciles unequal actual box quantities without multiplying the representative box quantity', async () => {
+    const source = differentProductBoxes(), member = source.members[0]!;
+    member.shipment.data.items[0]!.quantity = '100'; member.shipment.data.boxes[0]!.items[0]!.quantity = '100'; member.physical!.snapshot.source.boxes[0]!.items[0]!.quantity = '100';
+    const projection = projectDocumentLines(source);
+    expect(projection.lines).toHaveLength(1); expect(projection.lines[0]).toMatchObject({ actualQuantity: '200', actualTotalQuantity: '700', declaredQuantity: '200', count: 4 });
+    expect(projection.totalQuantity).toBe('700'); expect(Object.values(projection.perProduct).sort()).toEqual(['100', '200', '200', '200']);
+    const book = new ExcelJS.Workbook(); await book.xlsx.load(await createWorkbook(source, await template()) as never);
+    expect(book.worksheets[0]!.getCell('F15').value).toBe(700); expect(book.worksheets[0]!.getCell('J18').value).toBe(200);
+    member.shipment.data.items[0]!.quantity = '99';
+    expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'QUANTITY_MISMATCH', severity: 'error' }));
+  });
+
+  it('uses the representative carrier box as the fallback and keeps legacy different-product boxes expanded', () => {
+    const source = differentProductBoxes(), member = source.members[0]!;
+    source.productSourceFacts![0]!.cartonQuantity = null;
+    member.shipment.data.items[0]!.quantity = '100'; member.shipment.data.boxes[0]!.items[0]!.quantity = '100'; member.physical!.snapshot.source.boxes[0]!.items[0]!.quantity = '100';
+    expect(projectDocumentLines(source).lines[0]).toMatchObject({ declaredQuantity: '200', actualTotalQuantity: '700' });
+    expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_CARTON_QUANTITY_FALLBACK', severity: 'warning' }));
+    source.generationRulesVersion = 'v1';
+    expect(projectDocumentLines(source).lines.map((line) => line.range)).toEqual([1, 2, 3, 4].map((order) => `FBADEMOBOXTESTU${String(order).padStart(6, '0')}`));
+  });
+
   it('compresses a complete mixed FBA to one representative row, keeping source product totals separate from declared defaults', async () => {
     const source = v2Data(12), member = source.members[0]!, first = member.shipment.data.items[0]!;
     source.profileReferences = [source.profileReferences[0]!];
@@ -525,57 +646,65 @@ describe('丰信 v2 发票规则', () => {
     expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'DECLARATION_REQUIRED', message: expect.stringContaining('material') }));
   });
 
-  it('renders an audited missing-price fallback at 20% without altering remote facts or actual totals', async () => {
+  it('renders fixed 2.00 despite a historical manual fallback without altering remote facts or actual totals', async () => {
     const source = withManualSalesPrice(v2Data()); source.productSourceFacts![0]!.salesPrice = null; source.productSourceFacts![0]!.currency = null;
     const facts = structuredClone(source.productSourceFacts), errors = validateWorkbookData(source).filter((issue) => issue.severity === 'error');
-    expect(errors).toEqual([]); expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_MANUAL_SALES_PRICE_USED', severity: 'warning' }));
+    expect(errors).toEqual([]); expect(validateWorkbookData(source).some((issue) => issue.code === 'DOCUMENT_MANUAL_SALES_PRICE_USED')).toBe(false);
     const book = new ExcelJS.Workbook(); await book.xlsx.load(await createWorkbook(source, await template()) as never);
-    expect(book.worksheets[0]!.getCell('I18').value).toBe(2.48); expect(book.worksheets[0]!.getCell('F12').value).toBe('美元'); expect(book.worksheets[0]!.getCell('F15').value).toBe(5);
+    expect(book.worksheets[0]!.getCell('I18').value).toBe(2); expect(book.worksheets[0]!.getCell('I18').numFmt).toBe('0.00'); expect(book.worksheets[0]!.getCell('F12').value).toBe('美元'); expect(book.worksheets[0]!.getCell('F15').value).toBe(5);
     expect(source.productSourceFacts).toEqual(facts);
   });
-  it('uses a newly available remote price over manual fallback and still blocks a remote currency conflict', () => {
+  it('ignores changed Listing prices and currencies when deriving the fixed declaration', () => {
     const source = withManualSalesPrice(v2Data()); source.productSourceFacts![0]!.salesPrice = '20';
-    expect(projectDocumentLines(source).lines[0]!.declaration.unitPrice).toBe('4.00');
+    expect(projectDocumentLines(source).lines[0]!.declaration.unitPrice).toBe('2.00');
     expect(validateWorkbookData(source).some((issue) => issue.code === 'DOCUMENT_MANUAL_SALES_PRICE_USED')).toBe(false);
     source.productSourceFacts![0]!.currency = 'EUR';
-    expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'CURRENCY_CONFLICT', severity: 'error' }));
+    expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(projectDocumentLines(source).lines[0]!.declaration.currency).toBe('USD');
   });
-  it.each(['source', 'currency', 'identity', 'price'])('blocks a stale/invalid manual %s without reading legacy declaration fields', (kind) => {
+  it.each(['source', 'currency', 'identity', 'price'])('does not depend on a historical manual %s for fixed pricing', (kind) => {
     const source = withManualSalesPrice(v2Data()); source.productSourceFacts![0]!.salesPrice = null;
     if (kind === 'source') source.members[0]!.source.demandVersion++;
     if (kind === 'currency') source.members[0]!.demand.snapshot.country = 'GB';
     if (kind === 'identity') source.manualSalesPrices![0]!.fnsku = 'OTHER';
     if (kind === 'price') source.manualSalesPrices![0]!.salesPrice = '0.01';
-    expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'DECLARATION_SALES_PRICE_INVALID', severity: 'error' }));
+    expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(projectDocumentLines(source).lines[0]!.declaration.unitPrice).toBe('2.00');
   });
-  it.each([null, '', '0', '0.024', '-1', '1e2', '900719925474099100'])('blocks source sales price %s even when legacy/manual/fact prices claim to be usable', async (salesPrice) => {
+  it.each([null, '', '0', '0.024', '-1', '1e2', '900719925474099100'])('exports fixed 2.00 with source sales price %s despite legacy/manual overrides', async (salesPrice) => {
     const source = v2Data(); source.productSourceFacts![0]!.salesPrice = salesPrice;
     source.productSourceFacts![0]!.unitPrice = '1.25';
     const prefix = `product.${documentProductOverrideKey(12, source.members[0]!.shipment.data.items[0]!)}.`;
     source.fields[prefix + 'unitPrice'] = '10'; source.fields[prefix + 'unitPriceConfirmed'] = 'true';
-    expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'DECLARATION_SALES_PRICE_INVALID', severity: 'error' }));
-    await expect(createWorkbook(source, await template())).rejects.toThrow('售价缺失或无效');
+    const before = structuredClone(source);
+    expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
+    const book = new ExcelJS.Workbook(); await book.xlsx.load(await createWorkbook(source, await template()) as never);
+    expect(book.worksheets[0]!.getCell('I18').value).toBe(2); expect(book.worksheets[0]!.getCell('I18').numFmt).toBe('0.00');
+    expect(source).toEqual(before);
   });
 
-  it.each(['missing', 'duplicate'])('blocks %s source facts instead of guessing a representative price', (mode) => {
+  it.each(['missing', 'duplicate'])('does not require %s source facts to use fixed pricing', (mode) => {
     const source = v2Data();
     if (mode === 'missing') source.productSourceFacts = [];
     else source.productSourceFacts!.push(structuredClone(source.productSourceFacts![0]!));
-    expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'DECLARATION_SALES_PRICE_INVALID', severity: 'error' }));
+    expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.00', currency: 'USD' });
   });
 
-  it.each([null, '', 'CNY'])('blocks an unsupported/missing Listing currency %s instead of inheriting the invoice currency', (currency) => {
+  it.each([null, '', 'CNY'])('keeps invoice currency with unsupported/missing Listing currency %s', (currency) => {
     const source = v2Data(); source.productSourceFacts![0]!.currency = currency;
-    expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'DECLARATION_CURRENCY_UNSUPPORTED', severity: 'error' }));
+    expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.00', currency: 'USD' });
   });
 
-  it('blocks a supported Listing currency conflicting with the invoice and ignores old confirmation fields', () => {
+  it('uses country-derived invoice currencies and ignores Listing currency and old confirmation fields', () => {
     const source = v2Data(); source.productSourceFacts![0]!.currency = 'EUR';
-    expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'CURRENCY_CONFLICT', severity: 'error' }));
+    expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
     source.fields.currency = 'EUR';
-    expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'CURRENCY_CONFLICT', severity: 'error' }));
+    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.00', currency: 'USD' });
     source.members[0]!.demand.snapshot.country = 'DE';
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.00', currency: 'EUR' });
     expect(reviseDocumentProductFields(v2Data(), source)).toEqual(source.fields);
   });
 
@@ -678,13 +807,14 @@ describe('发票固定留空抬头与国家币种', () => {
     expect(source).toEqual(previous);
   });
 
-  it.each([['US', 'EUR'], ['GB', 'USD'], ['DE', 'GBP']])('blocks archived Listing currency %s/%s conflicts even when the old header matches the fact', async (country, currency) => {
+  it.each([['US', 'EUR', 'USD', '美元'], ['GB', 'USD', 'GBP', '英镑'], ['DE', 'GBP', 'EUR', '欧元']])('exports fixed pricing in the invoice currency for %s despite archived Listing currency %s', async (country, currency, expectedCurrency, expectedLabel) => {
     const source = v2Data(); source.members[0]!.demand.snapshot.country = country!;
     source.productSourceFacts![0]!.currency = currency!; source.fields.currency = currency!;
     const previous = structuredClone(source);
-    expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'CURRENCY_CONFLICT', severity: 'error' }));
-    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ currency, unitPrice: '2.00' });
-    await expect(createWorkbook(source, await template())).rejects.toThrow('申报币种与单票币种不一致');
+    expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ currency: expectedCurrency, unitPrice: '2.00' });
+    const output = new ExcelJS.Workbook(); await output.xlsx.load(await createWorkbook(source, await template()) as never);
+    expect(output.worksheets[0]!.getCell('F12').value).toBe(expectedLabel); expect(output.worksheets[0]!.getCell('I18').value).toBe(2);
     expect(source).toEqual(previous);
   });
 });

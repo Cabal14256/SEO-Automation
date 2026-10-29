@@ -13,7 +13,7 @@ function fixture(): DocumentRevisionData {
     codes: [{ id: randomUUID(), groupId, demandId, boxId, prefix: 'A', sequence: 1, code: 'A1', valid: true, createdAt: at }],
     physical: { id: physicalId, groupId, m2ConfirmationId, m3Version: 2, sourceFingerprint: source.fingerprint, snapshot: { source, entries: [{ shipmentRevisionId: shipmentId, boxId, status: 'consistent', measured: {}, reason: '' }], ruleVersion: 'physical-review/v1' }, createdBy: 'admin', createdAt: at } };
   const address = { recipientName: 'Receiver', addressLine1: '10 Road', city: 'City', postalCode: '00123', countryCode: 'US' };
-  return { purpose: 'invoice', weekStartDate: '2026-10-19', title: 'Invoice', fields: { service: 'Approved service', ...address }, members: [member], profileReferences: (['product', 'party', 'address', 'channel', 'tax'] as const).map((category) => ({ category, profileId: randomUUID(), version: 1, data: category === 'address' ? { destinationFc: 'ONT8', ...address } : category === 'channel' ? { businessChannel: 'HY', service: 'Approved service' } : {} })), templateReference: { templateId: randomUUID(), version: 1, fileId: randomUUID(), sha256: 'a'.repeat(64) } };
+  return { purpose: 'invoice', weekStartDate: '2026-10-19', title: 'Invoice', fields: { service: 'Approved service', ...address, addressConfirmed: 'true', addressConfirmationReason: 'Verified fixture shipment address' }, members: [member], profileReferences: (['product', 'party', 'address', 'channel', 'tax'] as const).map((category) => ({ category, profileId: randomUUID(), version: 1, data: category === 'address' ? { destinationFc: 'ONT8', ...address } : category === 'channel' ? { businessChannel: 'HY', service: 'Approved service' } : {} })), templateReference: { templateId: randomUUID(), version: 1, fileId: randomUUID(), sha256: 'a'.repeat(64) } };
 }
 describe('document immutable snapshot validation', () => {
   it('pins new generation tasks to v2 without invalidating legacy snapshot validation', () => {
@@ -24,7 +24,8 @@ describe('document immutable snapshot validation', () => {
     expect(documentExportRulesIssue(next)).toBeNull();
     expect(documentExportRulesIssue(next, {} as never)?.code).toBe('DOCUMENT_EXPORT_RULES_STALE');
     expect(documentExportRulesIssue(legacy, { generationRulesVersion: 'v2' })?.code).toBe('DOCUMENT_EXPORT_RULES_STALE');
-    expect(documentExportRulesIssue(next, { generationRulesVersion: 'v2' })).toBeNull();
+    expect(documentExportRulesIssue(next, { generationRulesVersion: 'v2' })?.code).toBe('DOCUMENT_EXPORT_RULES_STALE');
+    expect(documentExportRulesIssue(next, { generationRulesVersion: 'v2', pricingRule: 'fixed-2' })).toBeNull();
   });
   it('validates a saved exact address-code reference even when its legacy destination FC differs', () => {
     const data = fixture(), member = data.members[0]!;
@@ -34,7 +35,7 @@ describe('document immutable snapshot validation', () => {
     data.fields = { ...data.fields, addressCode: 'ADDR-42', addressConfirmed: 'true', addressConfirmationReason: 'Checked current source code' };
     expect(validateDocumentData(data).filter((issue) => issue.code === 'DOCUMENT_PROFILE_SCOPE_MISMATCH')).toEqual([]);
     member.sourceCandidates.addresses.push({ source: 'listShipments', snapshotId: randomUUID(), data: { addressCode: 'CONFLICT' } });
-    expect(validateDocumentData(data)).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_PROFILE_SCOPE_MISMATCH', profileCategory: 'address' }));
+    expect(validateDocumentData(data).some((issue) => issue.profileCategory === 'address')).toBe(false);
   });
   it('keeps an archived address reference valid through its matching legacy FC without requiring a current directory record', () => {
     const data = fixture(), reference = data.profileReferences.find((item) => item.category === 'address')!;
@@ -75,16 +76,33 @@ describe('document immutable snapshot validation', () => {
     expect(documentUsesProfileReference(data, { ...reference, data: { ...first, sku: 12345, sid: 12 } })).toBe(true);
     expect(documentUsesProfileReference(data, { ...reference, category: 'party' })).toBe(true);
   });
+  it('uses only the global representative profile when different products share an invoice box range', () => {
+    const data = fixture(), member = data.members[0]!, first = member.shipment.data.items[0]!;
+    const hidden = { ...first, msku: 'Z', fnsku: 'Z', sku: 'Z' }, boxes = member.physical!.snapshot.source.boxes;
+    const second = { ...structuredClone(boxes[0]!), boxId: randomUUID(), order: 2, code: 'A2' };
+    boxes[0]!.items = [hidden]; boxes.push(second);
+    const hiddenReference = { category: 'product' as const, profileId: randomUUID(), version: 1, data: { ...hidden, sid: 12 } };
+    const representativeReference = { ...hiddenReference, data: { ...first, sid: 12 } };
+    data.generationRulesVersion = 'v2';
+    const before = structuredClone(data);
+    expect(documentUsesProfileReference(data, hiddenReference)).toBe(false);
+    expect(documentUsesProfileReference(data, representativeReference)).toBe(true);
+    expect(data).toEqual(before);
+    data.fields[documentBoxFieldKey(second.boxId, 'weight')] = '2.00';
+    expect(documentUsesProfileReference(data, hiddenReference)).toBe(true);
+    data.generationRulesVersion = 'v1';
+    expect(documentUsesProfileReference(data, hiddenReference)).toBe(true);
+  });
   it('uses the final ticket address and requires a reason for any departure from its referenced address version', () => {
-    const data = fixture(); data.fields.addressLine1 = '20 Different Road';
-    expect(validateDocumentData(data)).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_ADDRESS_OVERRIDE_UNCONFIRMED' }));
+    const data = fixture(); data.fields.addressLine1 = '20 Different Road'; data.fields.addressConfirmed = 'false';
+    expect(validateDocumentData(data)).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_ADDRESS_UNCONFIRMED' }));
     data.fields.addressConfirmed = 'true'; data.fields.addressConfirmationReason = 'Verified a temporary delivery address';
     expect(validateDocumentData(data)).toEqual([]);
     data.fields.postalCode = '';
     expect(validateDocumentData(data)).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_ADDRESS_INCOMPLETE' }));
   });
   it('accepts a complete confirmed manual address without an address book reference', () => {
-    const data = fixture(); data.profileReferences = data.profileReferences.filter((reference) => reference.category !== 'address');
+    const data = fixture(); data.profileReferences = data.profileReferences.filter((reference) => reference.category !== 'address'); data.fields.addressConfirmed = 'false';
     expect(validateDocumentData(data)).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_ADDRESS_UNCONFIRMED' }));
     expect(validateDocumentData(data)).not.toContainEqual(expect.objectContaining({ code: 'DOCUMENT_PROFILE_REQUIRED', profileCategory: 'address' }));
     data.fields.addressConfirmed = 'true'; data.fields.addressConfirmationReason = 'Checked the original shipment snapshot';
@@ -96,7 +114,7 @@ describe('document immutable snapshot validation', () => {
     expect(validateDocumentData(data)).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_SOURCE_FILE_INVALID' }));
   });
   it('rechecks historical address diagnostics when the detail only supplements a blank list street', () => {
-    const data = fixture();
+    const data = fixture(); data.fields.addressConfirmed = 'false';
     data.members[0]!.sourceCandidates = { products: [], addresses: [
       { source: 'listShipments', snapshotId: randomUUID(), data: { addressLine1: null, city: 'GREENWOOD', countryCode: 'US' } },
       { source: 'getShipmentDetails', snapshotId: randomUUID(), data: { addressLine1: '1151 S GRAHAM RD', city: 'GREENWOOD', countryCode: 'US' } },
@@ -157,13 +175,13 @@ describe('document immutable snapshot validation', () => {
   it('canonicalizes nested maps for idempotency without collapsing member order', () => { expect(documentDigest({ a: 1, b: { x: 'x', y: 'y' } })).toBe(documentDigest({ b: { y: 'y', x: 'x' }, a: 1 })); expect(documentDigest(['a', 'b'])).not.toBe(documentDigest(['b', 'a'])); });
   it('marks a historical published file invalid when its bound raw source fails hash verification', () => { expect(documentDependencyInvalidReason([{ code: 'DOCUMENT_SOURCE_FILE_INVALID', severity: 'error', message: '原始来源文件哈希校验失败。' }])).toBe('原始来源文件哈希校验失败。'); expect(documentDependencyInvalidReason([{ code: 'DOCUMENT_SOURCE_FILE_INVALID', severity: 'warning', message: '候选缺项' }])).toBeNull(); expect(documentDependencyInvalidReason([])).toBeNull(); });
   it('rejects duplicate draft selections and unknown request keys', () => { const id = randomUUID(), value = { operationId: randomUUID(), weekStartDate: '2026-10-19', title: 'Draft', demandIds: [id, id] }; expect(documentCreateInputSchema.safeParse(value).success).toBe(false); expect(documentCreateInputSchema.safeParse({ ...value, demandIds: [id], extra: true }).success).toBe(false); });
-  it('requires separate invoices for scope differences and deliberate resolution of address conflicts', () => { const data = fixture(); const next = structuredClone(data.members[0]!); next.demand.snapshot.sid = 13; data.members.push(next); expect(validateDocumentData(data).some((issue) => issue.code === 'DOCUMENT_SPLIT_REQUIRED')).toBe(true); data.members.pop(); data.members[0]!.sourceCandidates = { addresses: [{ source: 'a', snapshotId: randomUUID(), data: { addressLine1: 'Road 1' } }, { source: 'b', snapshotId: randomUUID(), data: { addressLine1: 'Road 2' } }], products: [], issues: [] }; expect(validateDocumentData(data).some((issue) => issue.code === 'DOCUMENT_ADDRESS_CONFLICT')).toBe(true); data.fields.addressConfirmed = 'true'; data.fields.addressConfirmationReason = 'Checked full address with receiver'; expect(validateDocumentData(data).some((issue) => issue.code === 'DOCUMENT_ADDRESS_CONFLICT')).toBe(false); });
-  it('blocks ambiguous or out-of-scope master data references', () => { const data = fixture(); data.profileReferences.push({ category: 'party', profileId: randomUUID(), version: 1, data: { sid: 13 } }); data.profileReferences.find((ref) => ref.category === 'address')!.data = { destinationFc: 'OTHER' }; expect(validateDocumentData(data).map((issue) => issue.code)).toEqual(expect.arrayContaining(['DOCUMENT_PROFILE_AMBIGUOUS', 'DOCUMENT_PROFILE_SCOPE_MISMATCH'])); });
+  it('requires separate invoices for scope differences and deliberate resolution of address conflicts', () => { const data = fixture(); const next = structuredClone(data.members[0]!); next.demand.snapshot.sid = 13; data.members.push(next); expect(validateDocumentData(data).some((issue) => issue.code === 'DOCUMENT_SPLIT_REQUIRED')).toBe(true); data.members.pop(); data.fields.addressConfirmed = 'false'; data.members[0]!.sourceCandidates = { addresses: [{ source: 'a', snapshotId: randomUUID(), data: { addressLine1: 'Road 1' } }, { source: 'b', snapshotId: randomUUID(), data: { addressLine1: 'Road 2' } }], products: [], issues: [] }; expect(validateDocumentData(data).some((issue) => issue.code === 'DOCUMENT_ADDRESS_CONFLICT')).toBe(true); data.fields.addressConfirmed = 'true'; data.fields.addressConfirmationReason = 'Checked full address with receiver'; expect(validateDocumentData(data).some((issue) => issue.code === 'DOCUMENT_ADDRESS_CONFLICT')).toBe(false); });
+  it('blocks ambiguous or out-of-scope master data references', () => { const data = fixture(); data.profileReferences.push({ category: 'party', profileId: randomUUID(), version: 1, data: { sid: 13 } }); data.profileReferences.find((ref) => ref.category === 'channel')!.data = { businessChannel: 'OTHER' }; expect(validateDocumentData(data).map((issue) => issue.code)).toEqual(expect.arrayContaining(['DOCUMENT_PROFILE_AMBIGUOUS', 'DOCUMENT_PROFILE_SCOPE_MISMATCH'])); });
   it('uses the same normalized FC scope as automatic address matching', () => {
     const data = fixture(); data.members[0]!.demand.snapshot.destinationFc = ' ont8 ';
     expect(validateDocumentData(data)).toEqual([]);
   });
-  it.each(['address', 'tax'] as const)('blocks a %s country code for another country even when the FC and store match', (category) => {
+  it.each(['tax'] as const)('blocks a %s country code for another country even when the FC and store match', (category) => {
     const data = fixture(), profile = data.profileReferences.find((reference) => reference.category === category)!;
     data.fields.countryCode = ' us '; profile.data.countryCode = 'DE';
     expect(validateDocumentData(data)).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_PROFILE_SCOPE_MISMATCH', profileCategory: category }));

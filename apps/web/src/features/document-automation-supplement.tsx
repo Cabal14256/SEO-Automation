@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { createPortal } from 'react-dom';
 import { ArrowRight, RefreshCw } from 'lucide-react';
-import { calculateDocumentInvoiceUnitPrice, type DocumentAutomationFieldDescriptor, type DocumentAutomationJob, type DocumentAutomationSupplementInput } from '@scm/contracts';
+import { type DocumentAutomationFieldDescriptor, type DocumentAutomationJob, type DocumentAutomationSupplementInput } from '@scm/contracts';
 import { ApiError } from '../api';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -79,7 +79,7 @@ export function DocumentAutomationSupplement({ job, blocked, onState, registerDi
     const group = grouped.get(key); if (group) group.push(field); else grouped.set(key, [field]);
   }
   return <section className="document-automation-supplement" aria-label="统一补充资料">
-    <div className="section-heading"><div><h3>统一补充缺少的资料</h3><p className="mapping-help">共 {descriptors.length} 项待补充。相同范围的公共资料只需填写一次；整批检查全部通过后才会生成一份 XLSX。</p></div></div>
+    <div className="section-heading"><div><h3>统一补充缺少的资料</h3><p className="mapping-help">共 {descriptors.length} 项待补充。相同范围的公共资料只需填写一次；整批检查全部通过后，每张发票生成独立 Excel 文件并打包为 ZIP。</p></div></div>
     {changedVersion || removed.length ? <div className="permission-note warning-note" role="alert"><p>部分单据版本或缺项已更新，本次填写仍保留。请核对新版内容后继续，已由新版解决的旧缺项将不再提交。</p>{removed.length > 0 && <details><summary>查看原先填写的内容</summary><ul>{removed.map((key) => <li key={key}>{draftDescriptors.current.get(key)?.scopeLabel} · {draftDescriptors.current.get(key)?.label || '已更新字段'}：{String(values[key] ?? '') || '空白'}</li>)}</ul></details>}<Button type="button" icon={RefreshCw} disabled={blocked || mutation.isPending} onClick={() => {
       baseVersions.current = currentVersions; originalRequest.current = null;
       const restored = Object.fromEntries(descriptors.flatMap((field) => { const previous = draftValue(field); return previous.present ? [[field.id, previous.value]] : []; }));
@@ -91,8 +91,6 @@ export function DocumentAutomationSupplement({ job, blocked, onState, registerDi
         {[...grouped].map(([key, group]) => <fieldset key={key} className="document-automation-field-group" aria-label={group[0]!.scopeLabel}><legend>{group[0]!.scopeLabel}</legend><div className="document-form-grid">{group.map((field) => {
           const draft = draftValue(field), value = draft.value;
           const inputId = `${id}-${field.id}`;
-          const salesPriceCurrency = /^@sellingPrice\.(USD|GBP|EUR)\./.exec(field.targets[0]?.fieldKey ?? '')?.[1];
-          const declaredPrice = salesPriceCurrency ? calculateDocumentInvoiceUnitPrice(value) : null;
           return <div className="field" key={field.id} data-automation-field={field.id}>
             {field.kind === 'checkbox' ? <Check checked={value === true || value === 'true'} disabled={blocked || mutation.isPending} onChange={(checked) => update(field, checked)}>{field.label}</Check> : <>
               <label htmlFor={inputId}>{field.label}{field.required ? '（待补）' : ''}</label>
@@ -100,12 +98,11 @@ export function DocumentAutomationSupplement({ job, blocked, onState, registerDi
                 : <Input id={inputId} value={String(value ?? '')} maxLength={4000} inputMode={field.kind === 'number' ? 'decimal' : 'text'} disabled={blocked || mutation.isPending} onChange={(event) => update(field, event.target.value)} />}
             </>}
             <p className="mapping-help">{field.help || (field.targets.length > 1 ? `统一填写到 ${field.targets.length} 个对应位置。` : '仅修改此处对应的资料。')}</p>
-            {salesPriceCurrency && <p className="mapping-help" role="status">申报单价（售价 × 20%）：{declaredPrice ? `${declaredPrice} ${salesPriceCurrency}` : '待填写有效售价'}</p>}
             {changedVersion && draft.present && value !== field.value && <p className="mapping-help">新版保存值：{String(field.value ?? '') || '空白'}。本次输入已保留，请核对后继续。</p>}
           </div>;
         })}</div></fieldset>)}
       </fieldset>
-      {mutation.error && <p className="form-note error-note" role="alert">{messageOf(mutation.error)} 所有填写已保留。{typeof mutation.error === 'object' && 'status' in mutation.error && mutation.error.status === 409 ? ' 请刷新任务并核对新版后继续。' : ' 可重试确认保存结果。'}</p>}
+      {mutation.error && <p className="form-note error-note" role="alert">{messageOf(mutation.error)} 所有填写已保留。{mutation.error instanceof ApiError && mutation.error.status === 409 && /VERSION_CONFLICT/.test(mutation.error.code ?? '') ? ' 请刷新任务并核对新版后继续。' : ' 可重试确认保存结果。'}</p>}
       <p className="mapping-help">可先保存部分资料；仍有缺项时会继续提示，不会提前生成。</p>
       {!actionsContainer && <Button type="submit" variant="primary" icon={ArrowRight} loading={mutation.isPending} disabled={blocked || !dirty || changedVersion || removed.length > 0}>保存并统一检查</Button>}
     </form>

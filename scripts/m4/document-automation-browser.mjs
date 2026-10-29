@@ -66,7 +66,7 @@ function fixture() {
   candidates[0].shipment = structuredClone(first.shipment); candidates[0].codes = structuredClone(first.codes); candidates[0].boxSource = structuredClone(first.boxSource);
   documentCandidateListSchema.parse({ items: candidates, total: 2, shippingRunId: run.id }); records.forEach((record) => documentSchema.parse(record));
   return { run, candidates, template, profiles, records, job: null, startInputs: [], retryInputs: [], supplementInputs: [], acceptedSupplements: [], supplementLedger: new Map(), supplementModes: [], holdSupplement: false, releaseSupplement: null, bundleGenerations: 0, sourceSnapshot: JSON.stringify(records.map((record) => record.currentRevision.data.members)),
-    starts: new Map(), retries: new Map(), retryModes: [], retryAccepted: 0, showExisting: false, startMode: 'ready', holdStart: false, releaseStart: null, holdRetry: false, releaseRetry: null, jobReadModes: [], jobReads: 0, listReads: 0, downloads: 0 };
+    starts: new Map(), retries: new Map(), retryModes: [], retryAccepted: 0, showExisting: false, startMode: 'ready', holdStart: false, releaseStart: null, holdRetry: false, releaseRetry: null, holdJobRead: false, releaseJobRead: null, jobReadModes: [], jobReads: 0, listReads: 0, downloads: 0 };
 }
 function syncJob(state, phase) {
   const job = state.job, counts = { total: job.items.length, queued: 0, running: 0, ready: 0, exporting: 0, completed: 0, blocked: 0 };
@@ -132,7 +132,7 @@ function beginBundle(state) {
   for (const item of state.job.items) Object.assign(item, { stage: 'export', status: 'exporting' }); return syncJob(state, 'generating');
 }
 function finishBundle(state) {
-  assert.equal(state.job.phase, 'generating'); state.job.bundle = { status: 'completed', fileId: uid(), fileName: '整批发票-' + state.job.id.slice(0, 8) + '.xlsx', sheetCount: 2, completedAt: now, error: null };
+  assert.equal(state.job.phase, 'generating'); state.job.bundle = { status: 'completed', fileId: uid(), fileName: '整批发票-' + state.job.id.slice(0, 8) + '.zip', sheetCount: 2, fileCount: state.job.items.length, completedAt: now, error: null };
   for (const item of state.job.items) { Object.assign(item, { stage: 'done', status: 'completed', issues: [{ code: 'CARTON_MIXED_CONTENTS', severity: 'warning', message: '混装箱已按代表商品输出，请下载整份 Excel 后核对修改。' }] }); recordFor(state, item).status = 'pending_review'; }
   return syncJob(state, 'completed');
 }
@@ -173,6 +173,7 @@ async function setup(state) {
     if (path === base && method === 'GET') { state.listReads += 1; return json({ items: state.job ? [state.job] : [] }); }
     if (path === base && method === 'POST') {
       const input = documentAutomationStartInputSchema.parse(request.postDataJSON()); state.startInputs.push(input); assert.equal(input.shippingRunId, state.run.id);
+      if (state.startMode === 'busy' || state.startMode === 'busy-no-id') return json({ error: { code: 'DOCUMENT_AUTOMATION_BUSY', message: state.startMode === 'busy' ? '所选 FBA 已有自动出单任务，请继续该任务。' : '自动出单正在处理，请等待本轮检查结束后重试。', ...(state.startMode === 'busy' ? { details: { jobId: state.job.id } } : {}) } }, 409);
       let job = state.starts.get(input.operationId); const replayed = Boolean(job); if (!job) { job = createJob(state, input); state.starts.set(input.operationId, job); }
       if (state.holdStart) await new Promise((release) => { state.releaseStart = () => { state.holdStart = false; release(); }; releases.push(state.releaseStart); });
       if (state.startMode === 'drop-once') { state.startMode = 'ready'; return route.abort('failed'); }
@@ -180,6 +181,7 @@ async function setup(state) {
     }
     if (state.job && (path === base + '/' + state.job.id || path === base + '/' + state.job.id + '/requirements') && method === 'GET') {
       state.jobReads += 1;
+      if (path === base + '/' + state.job.id && state.holdJobRead) await new Promise((release) => { state.releaseJobRead = () => { state.holdJobRead = false; release(); }; releases.push(state.releaseJobRead); });
       if (path === base + '/' + state.job.id && state.jobReadModes.shift() === '503') return json({ error: { code: 'FIXTURE_JOB_READ_FAILED', message: '技术夹具：整批任务读取暂时失败。' } }, 503);
       return json({ job: documentAutomationJobSchema.parse(state.job) });
     }
@@ -189,7 +191,8 @@ async function setup(state) {
       const replay = state.supplementLedger.get(input.operationId); if (replay) return json({ job: replay, replayed: true });
       const mode = state.supplementModes.shift();
       if (mode === '409') { const record = state.records[0]; record.version += 1; record.currentRevision = { ...record.currentRevision, id: uid(), version: record.version, data: { ...record.currentRevision.data, fields: { ...record.currentRevision.data.fields, remarks: 'OTHER-USER-SERVER-NOTE' } } }; rebuildRequirements(state); }
-      if (mode === '503' || mode === '409') return json({ error: { code: mode === '409' ? 'DOCUMENT_AUTOMATION_VERSION_CONFLICT' : 'FIXTURE_SUPPLEMENT_FAILED', message: mode === '409' ? '技术夹具：批次版本冲突，本次填写已保留。' : '技术夹具：整批保存失败，本次填写已保留。' } }, Number(mode));
+      if (mode === 'busy') return json({ error: { code: 'DOCUMENT_AUTOMATION_BUSY', message: '整批任务正在检查，请等待本轮检查结束后保存补充。' } }, 409);
+      if (mode === '503' || mode === '409') return json({ error: { code: mode === '409' ? 'VERSION_CONFLICT' : 'FIXTURE_SUPPLEMENT_FAILED', message: mode === '409' ? '技术夹具：批次版本冲突，本次填写已保留。' : '技术夹具：整批保存失败，本次填写已保留。' } }, Number(mode));
       assert.equal(input.expectedVersion, state.job.version); const changed = new Set(), staged = new Map(state.records.map((record) => [record.id, structuredClone(record)]));
       for (const entry of input.values.filter((entry) => entry.value === true)) {
         const confirmation = state.job.supplement.descriptors.find((descriptor) => descriptor.id === entry.id);
@@ -223,7 +226,7 @@ async function setup(state) {
     }
     if (state.job && path === base + '/' + state.job.id + '/download' && method === 'GET') {
       state.downloads += 1; assert.equal(state.job.phase, 'completed'); assert.equal(state.job.bundle.status, 'completed');
-      return route.fulfill({ status: 200, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers: { 'content-disposition': 'attachment; filename="technical-whole-batch.xlsx"' }, body: Buffer.from('Local bundle download fixture only') });
+      return route.fulfill({ status: 200, contentType: 'application/zip', headers: { 'content-disposition': 'attachment; filename="technical-whole-batch.zip"' }, body: Buffer.from('Local bundle download fixture only') });
     }
     const detail = path.match(/^\/api\/v1\/documents\/([^/]+)$/), record = state.records.find((record) => record.id === detail?.[1]);
     if (record && method === 'GET') return json({ document: record, validation: null, exports: [] });
@@ -232,7 +235,7 @@ async function setup(state) {
   page = await context.newPage(); page.setDefaultTimeout(15_000); page.on('pageerror', (error) => browserErrors.push(error.message)); return context;
 }
 const wizard = () => page.getByRole('dialog', { name: '发票与单据向导', exact: true });
-const jobDialog = () => page.getByRole('dialog', { name: '整批检查与合并出单', exact: true });
+const jobDialog = () => page.getByRole('dialog', { name: '整批检查与打包出单', exact: true });
 const dashboard = () => page.getByRole('region', { name: '自动出单任务', exact: true });
 const recent = () => page.getByRole('region', { name: '最近自动出单任务', exact: true });
 const startButton = () => wizard().getByRole('button', { name: '自动生成发票', exact: true });
@@ -240,7 +243,7 @@ const nextSourceButton = () => wizard().getByRole('button', { name: '下一步�
 const requirementForm = () => dashboard().getByRole('region', { name: '统一补充资料', exact: true });
 const field = (id) => requirementForm().locator('[data-automation-field^="' + id + '-v"]');
 const saveButton = () => jobDialog().getByRole('button', { name: '保存并统一检查', exact: true });
-const downloadButton = () => dashboard().getByRole('button', { name: /下载.*(整批|XLSX)/ });
+const downloadButton = () => dashboard().getByRole('button', { name: /下载.*(整批|XLSX|ZIP)/ });
 const generateButton = () => jobDialog().getByRole('button', { name: '生成发票文件', exact: true });
 async function openNew(state) {
   await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 30_000 }); await page.getByRole('button', { name: '制作发票', exact: true }).click();
@@ -280,6 +283,15 @@ async function noOutput(state, generations = 0) {
   for (const button of await downloadButton().all()) await expect(button).toBeDisabled(); noIndividualPipeline();
 }
 async function screenshot(name) { await page.screenshot({ path: resolve(evidence, name), animations: 'disabled' }); }
+async function expectRecoveryButtonAccessible(button) {
+  await expect.poll(() => button.evaluate((node) => {
+    const dialog = node.closest('dialog'), body = node.closest('.import-dialog-body'), footer = dialog?.querySelector('.import-wizard-footer');
+    if (!dialog || !body || !footer) return false;
+    const bounds = node.getBoundingClientRect(), bodyBounds = body.getBoundingClientRect(), footerBounds = footer.getBoundingClientRect();
+    const hit = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    return dialog.scrollTop === 0 && bounds.top >= Math.max(0, bodyBounds.top) && bounds.bottom <= Math.min(innerHeight, footerBounds.top) + 1 && (hit === node || node.contains(hit));
+  })).toBe(true);
+}
 function satisfyAll(state) {
   for (const descriptor of state.job.supplement.descriptors) {
     const id = descriptor.id.replace(/-v[0-9-]+$/, ''), value = values[id];
@@ -308,7 +320,7 @@ try {
   await expect(dashboard().getByRole('button', { name: '补充资料', exact: true })).toHaveCount(0); await expect(generateButton()).toHaveCount(0); await expect(jobDialog().getByRole('button', { name: '重新统一检查', exact: true })).toBeVisible(); await noOutput(first); await screenshot('document-preflight-barrier-1440.png'); note();
 
   step = 'closing-and-refreshing-finds-the-same-preflight-task-without-starting-it-again';
-  await jobDialog().getByRole('button', { name: '关闭整批检查与合并出单', exact: true }).click(); await openJob(); await openMissing();
+  await jobDialog().getByRole('button', { name: '关闭整批检查与打包出单', exact: true }).click(); await openJob(); await openMissing();
   await expect(field('address-city')).toBeVisible(); assert.equal(first.startInputs.length, 1); await noOutput(first); await context.close(); note();
 
   step = 'one-central-form-groups-common-product-box-and-address-fields-with-distinct-targets';
@@ -327,7 +339,7 @@ try {
   step = 'a-partial-save-applies-the-common-value-once-to-both-targets-and-stays-in-preflight';
   for (const record of batch.records) assert.equal(record.currentRevision.data.fields.service, 'TECH SERVICE'); assert.equal(batch.job.phase, 'needs_input');
   await expect(field('common-service')).toHaveCount(0); await expect(field('common-tax')).toBeVisible(); assert.equal(batch.job.counts.completed, 0); await noOutput(batch);
-  await jobDialog().getByRole('button', { name: '关闭整批检查与合并出单', exact: true }).click(); await openJob(); await openMissing();
+  await jobDialog().getByRole('button', { name: '关闭整批检查与打包出单', exact: true }).click(); await openJob(); await openMissing();
   await expect(field('common-service')).toHaveCount(0); for (const record of batch.records) assert.equal(record.currentRevision.data.fields.service, 'TECH SERVICE'); assert.equal(batch.startInputs.length, 1); note();
 
   step = 'all-targeted-product-box-and-address-values-save-without-changing-other-fields-or-sources';
@@ -338,9 +350,9 @@ try {
 
   step = 'all-ranges-must-pass-recheck-before-one-bundle-download-becomes-available';
   ready(batch); await jobDialog().getByRole('button', { name: '刷新自动出单进度', exact: true }).click(); await expect(dashboard().getByRole('heading', { name: '整批检查通过', exact: true })).toBeVisible(); await noOutput(batch);
-  beginBundle(batch); await expect(dashboard().getByRole('heading', { name: '正在生成合并文件', exact: true })).toBeVisible(); await noOutput(batch, 1);
+  beginBundle(batch); await expect(dashboard().getByRole('heading', { name: '正在生成发票压缩包', exact: true })).toBeVisible(); await noOutput(batch, 1);
   finishBundle(batch); await expect(downloadButton()).toHaveCount(1); await expect(downloadButton()).toBeEnabled(); await jobDialog().locator(':scope > .import-dialog-body').evaluate((node) => { node.scrollTop = 0; }); await screenshot('document-bundle-completed-1440.png');
-  const download = page.waitForEvent('download'); await downloadButton().click(); await download; assert.equal(batch.downloads, 1); assert.equal(batch.bundleGenerations, 1); assert.equal(batch.job.bundle.sheetCount, 2);
+  const download = page.waitForEvent('download'); await downloadButton().click(); await download; assert.equal(batch.downloads, 1); assert.equal(batch.bundleGenerations, 1); assert.equal(batch.job.bundle.fileCount, 2); await expect(dashboard()).toContainText('2 个 Excel 文件');
   assert(batch.records.every((record) => record.status === 'pending_review')); noIndividualPipeline(); await context.close(); note();
 
   step = 'version-conflict-keeps-every-entered-value-and-never-commits-or-generates';
@@ -351,6 +363,14 @@ try {
   for (const [id, value] of Object.entries(values)) await expectValue(id, value); await expect(saveButton()).toBeDisabled();
   await jobDialog().getByRole('button', { name: '已核对新版，保留填写继续', exact: true }).click(); await expect(saveButton()).toBeEnabled(); await saveButton().click();
   await expect.poll(() => conflict.acceptedSupplements.length).toBe(1); assert.equal(conflict.records[0].currentRevision.data.fields.remarks, 'OTHER-USER-SERVER-NOTE'); assert.equal(conflict.job.phase, 'preparing'); await noOutput(conflict); await context.close(); note();
+
+  step = 'a-worker-busy-save-keeps-input-without-mislabeling-it-as-a-version-conflict';
+  const busySave = fixture(); context = await setup(busySave); await start(busySave); prepareMissing(busySave); await openMissing(); await set('common-service', 'OTHER SERVICE');
+  const busySaveVersion = busySave.job.version; busySave.supplementModes.push('busy'); await saveButton().click();
+  await expect(dashboard()).toContainText('整批任务正在检查，请等待本轮检查结束后保存补充。');
+  await expect(dashboard()).not.toContainText('请刷新任务并核对新版后继续'); await expectValue('common-service', 'OTHER SERVICE');
+  assert.equal(busySave.job.version, busySaveVersion); assert.equal(busySave.acceptedSupplements.length, 0); await expect(saveButton()).toBeEnabled();
+  await saveButton().click(); await expect.poll(() => busySave.acceptedSupplements.length).toBe(1); await noOutput(busySave); await context.close(); note();
 
   step = 'checking-address-confirmation-includes-the-visible-existing-reason-without-inventing-one';
   const confirmation = fixture(); context = await setup(confirmation); await start(confirmation); confirmation.onlyAddress = true; confirmation.prefilledReason = true;
@@ -372,6 +392,53 @@ try {
   step = 'a-lost-start-response-retries-the-same-operation-and-recovers-one-task';
   const lost = fixture(); lost.startMode = 'drop-once'; context = await setup(lost); await openNew(lost); await wizard().getByLabel('选择当前列表', { exact: true }).check(); await toPrefill(lost); await startButton().click();
   await expect(startButton()).toBeEnabled(); await startButton().click(); await expect(dashboard()).toBeVisible(); assert.equal(lost.startInputs.length, 2); assert.equal(lost.starts.size, 1); assert.equal(lost.startInputs[0].operationId, lost.startInputs[1].operationId); await context.close(); note();
+
+  step = 'a-busy-new-start-explicitly-opens-the-latest-existing-task-and-preserves-the-new-form-after-a-read-failure';
+  const occupied = fixture(); createJob(occupied, { shippingRunId: occupied.run.id, demandIds: occupied.candidates.map((candidate) => candidate.demandId) }); prepareMissing(occupied);
+  occupied.startMode = 'busy'; const occupiedId = occupied.job.id, occupiedRecords = JSON.stringify(occupied.records); context = await setup(occupied); await openNew(occupied);
+  await wizard().getByLabel('选择当前列表', { exact: true }).check(); await toPrefill(occupied);
+  await wizard().getByLabel('任务名称（可选）', { exact: true }).fill('UNSAVED NEW TASK TITLE'); await chooseOption(wizard().getByLabel('渠道服务', { exact: true }), 'TECH SERVICE');
+  await startButton().click(); await expect(wizard()).toContainText('所选 FBA 已有自动出单任务，请继续该任务。');
+  await expect(wizard()).not.toContainText('请重新读取最新版本'); await expect(dashboard()).toHaveCount(0);
+  const continueExisting = () => wizard().getByRole('button', { name: '继续已有任务', exact: true }); await expect(continueExisting()).toBeEnabled();
+  await expectRecoveryButtonAccessible(continueExisting());
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1000 }); await wizard().evaluate((node) => { node.scrollTop = 0; const body = node.querySelector(':scope > .import-dialog-body'); if (body) body.scrollTop = body.scrollHeight; });
+    await expectRecoveryButtonAccessible(continueExisting()); assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)); await screenshot('document-busy-existing-task-' + width + '.png');
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  occupied.jobReadModes.push('503'); occupied.holdJobRead = true; await continueExisting().click(); await expect.poll(() => typeof occupied.releaseJobRead).toBe('function');
+  await expect(wizard().getByLabel('任务名称（可选）', { exact: true })).toBeDisabled(); await expect(startButton()).toBeDisabled(); await expect(wizard().getByRole('button', { name: '关闭发票与单据向导', exact: true })).toBeDisabled();
+  await expect(page.locator('.document-page-heading').getByRole('button', { name: '继续本次制作', exact: true })).toBeDisabled();
+  occupied.releaseJobRead(); await expect(wizard()).toContainText('整批任务读取暂时失败');
+  await expect(wizard().getByLabel('任务名称（可选）', { exact: true })).toHaveValue('UNSAVED NEW TASK TITLE'); await expect(wizard().getByLabel('渠道服务', { exact: true })).toHaveAttribute('data-value', 'TECH SERVICE');
+  assert.equal(occupied.startInputs.length, 1); assert.equal(occupied.retryInputs.length, 0); assert.equal(occupied.starts.size, 0); await expect(continueExisting()).toBeEnabled();
+  syncJob(occupied, 'needs_input'); const latestVersion = occupied.job.version; occupied.job.error = { code: 'FIXTURE_LATEST_EXISTING_TASK', message: '技术夹具：已读取既有任务最新版本 v' + latestVersion };
+  await continueExisting().click(); await expect(dashboard()).toBeVisible(); await expect(dashboard()).toContainText('已读取既有任务最新版本 v' + latestVersion);
+  assert.equal(occupied.job.id, occupiedId); assert.equal(occupied.startInputs.length, 1); assert.equal(occupied.retryInputs.length, 0); assert.equal(JSON.stringify(occupied.records), occupiedRecords);
+  await jobDialog().getByRole('button', { name: '关闭整批检查与打包出单', exact: true }).click(); await page.getByRole('button', { name: '继续本次制作', exact: true }).click();
+  await expect(wizard().getByLabel('任务名称（可选）', { exact: true })).toHaveValue('UNSAVED NEW TASK TITLE'); await expect(wizard().getByLabel('渠道服务', { exact: true })).toHaveAttribute('data-value', 'TECH SERVICE');
+  await wizard().getByRole('button', { name: '上一步', exact: true }).click(); await expect(wizard().getByLabel('选择当前列表', { exact: true })).toBeChecked();
+  await wizard().getByLabel(occupied.candidates[0].demand.snapshot.fba, { exact: true }).uncheck(); await expect(continueExisting()).toHaveCount(0); await expect(wizard()).not.toContainText('所选 FBA 已有自动出单任务');
+  assert.equal(occupied.startInputs.length, 1); await noOutput(occupied); await context.close(); note();
+
+  step = 'a-busy-existing-draft-start-opens-the-indicated-task-without-another-start-or-retry';
+  const occupiedDraft = fixture(); occupiedDraft.showExisting = true;
+  createJob(occupiedDraft, { shippingRunId: occupiedDraft.run.id, documentId: occupiedDraft.records[0].id, expectedVersion: occupiedDraft.records[0].version });
+  occupiedDraft.startMode = 'busy'; occupiedDraft.job.error = { code: 'FIXTURE_EXISTING_DRAFT_TASK', message: '技术夹具：原草稿已有关联任务。' }; const draftJobId = occupiedDraft.job.id;
+  context = await setup(occupiedDraft); await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.locator('.document-list-panel tbody tr').filter({ hasText: occupiedDraft.records[0].currentRevision.data.title }).getByRole('button', { name: '自动生成发票', exact: true }).click();
+  await expect(page.getByRole('button', { name: '继续已有任务', exact: true })).toBeEnabled(); await expect(page.getByRole('alert').filter({ hasText: '请重新读取最新版本' })).toHaveCount(0);
+  await page.getByRole('button', { name: '继续已有任务', exact: true }).click(); await expect(dashboard()).toBeVisible(); await expect(dashboard()).toContainText('原草稿已有关联任务');
+  assert.equal(occupiedDraft.job.id, draftJobId); assert.equal(occupiedDraft.startInputs.length, 1); assert.equal(occupiedDraft.startInputs[0].documentId, occupiedDraft.records[0].id); assert.equal(occupiedDraft.starts.size, 0); assert.equal(occupiedDraft.retryInputs.length, 0);
+  await noOutput(occupiedDraft); await context.close(); note();
+
+  step = 'a-busy-start-without-a-task-id-keeps-its-specific-wait-message-and-entered-form';
+  const busyWithoutId = fixture(); busyWithoutId.startMode = 'busy-no-id'; context = await setup(busyWithoutId); await openNew(busyWithoutId);
+  await wizard().getByLabel('选择当前列表', { exact: true }).check(); await toPrefill(busyWithoutId); await wizard().getByLabel('任务名称（可选）', { exact: true }).fill('KEEP AFTER BUSY'); await startButton().click();
+  await expect(wizard()).toContainText('自动出单正在处理，请等待本轮检查结束后重试。'); await expect(wizard()).not.toContainText('请重新读取最新版本'); await expect(wizard().getByRole('button', { name: '继续已有任务', exact: true })).toHaveCount(0);
+  await expect(wizard().getByLabel('任务名称（可选）', { exact: true })).toHaveValue('KEEP AFTER BUSY'); assert.equal(busyWithoutId.startInputs.length, 1); assert.equal(busyWithoutId.starts.size, 0); assert.equal(busyWithoutId.job, null);
+  await expect(startButton()).toBeEnabled(); await noOutput(busyWithoutId); await context.close(); note();
 
   step = 'a-closed-page-can-return-to-one-completed-bundle-without-restarting-the-job';
   const detached = fixture(); context = await setup(detached); await start(detached); prepareMissing(detached); await page.goto('about:blank'); satisfyAll(detached); ready(detached); beginBundle(detached); finishBundle(detached);
@@ -410,7 +477,7 @@ try {
   const layout = fixture(); context = await setup(layout); await start(layout); prepareMissing(layout); await openMissing();
   for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: 1000 }); await fillAll(); await requirementForm().evaluate((node) => { const body = node.closest('.import-dialog-body'); if (body) body.scrollTop += node.getBoundingClientRect().top - body.getBoundingClientRect().top - 16; });
-    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)); await expect(jobDialog().getByRole('heading', { name: '整批检查与合并出单', exact: true })).toBeInViewport(); assert.equal(await jobDialog().evaluate((node) => node.scrollTop), 0);
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)); await expect(jobDialog().getByRole('heading', { name: '整批检查与打包出单', exact: true })).toBeInViewport(); assert.equal(await jobDialog().evaluate((node) => node.scrollTop), 0);
     for (const control of await requirementForm().locator('input,button[role="combobox"]').all()) { const bounds = await control.boundingBox(); assert(bounds && bounds.x >= -1 && bounds.x + bounds.width <= width + 1); }
     await screenshot('document-preflight-' + width + '.png');
   }

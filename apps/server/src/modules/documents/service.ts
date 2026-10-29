@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, count, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { applyDocumentAddress, documentAddressDataSchema, documentBoxSources, documentCreateInputSchema, documentCorrectInputSchema, documentEffectiveSalesPrice, documentListQuerySchema, documentOperationInputSchema, documentProfileWriteSchema, documentRevisionInputSchema, documentReviewInputSchema, matchDocumentAddressProfiles, withDocumentDefaults, withDocumentInvoiceDefaults,
+import { applyDocumentAddress, documentBoxSources, documentCreateInputSchema, documentCorrectInputSchema, documentListQuerySchema, documentOperationInputSchema, documentProfileWriteSchema, documentRevisionInputSchema, documentReviewInputSchema, resolveDocumentLingxingAddress, withDocumentDefaults, withDocumentInvoiceDefaults,
   type Document, type DocumentCandidate, type DocumentCandidateList, type DocumentCandidateQuery, type DocumentListQuery, type DocumentMemberSnapshot, type DocumentProfile, type DocumentRevision, type DocumentRevisionData, type DocumentTemplate, type DocumentValidation } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { fileIndex, operationAudit } from '../../db/schema.js';
@@ -10,12 +10,15 @@ import { BatchError, getConfirmedGroupInTx, requireBatchActor, type BatchTx } fr
 import { checkedFileBytes } from '../imports/service.js';
 import { documentAddressSourceKey, documentBoxFieldIssues, documentDependencyInvalidReason, documentDigest, documentM2SourceReference, documentUsesProfileReference, memberFromCandidate, reviseDocumentBoxFields, shipmentClaimKey, shouldResolveDocumentAddress, validateDocumentData } from './domain.js';
 import { haveDocumentAddressSourcesChanged, reviseDocumentAddressFields } from './address.js';
+import { checkedDocumentExportFile, documentExportFileSha256 } from './export-file.js';
 import { documentExports, documentMemberClaims, documentProfiles, documentProfileVersions, documentRevisions, documentReviews, documents, documentTemplates, documentTemplateVersions, documentValidations } from './schema.js';
 import { loadDocumentSourceCandidates } from './sources.js';
 import { assertDocumentImageChanges, assertProductImageChange } from './image-fields.js';
 import { documentListWhere, needsDocumentStatusFilter } from './query.js';
 import { shippingRuns, shippingTicketMembers } from '../shipping-runs/schema.js';
 import { applyDocumentManualSalesPricesInTx } from './manual-sales-price.js';
+import { applyDocumentAddressCodeDefaults, hydrateDocumentAddressCodeSourcesInTx, validateDocumentAddressCode } from './address-code-service.js';
+import { DocumentAddressCodeCatalogError, loadDocumentAddressCodeCatalog } from './address-code-catalog.js';
 
 export { BatchError as DocumentError } from '../batches/service.js';
 type CreateInput = z.infer<typeof documentCreateInputSchema>;
@@ -104,23 +107,26 @@ async function claimMembers(tx: BatchTx, documentId: string, revisionId: string,
   await tx.update(documentMemberClaims).set({ releasedAt: new Date() }).where(and(eq(documentMemberClaims.documentId, documentId), isNull(documentMemberClaims.releasedAt)));
   for (const member of data.members) await tx.insert(documentMemberClaims).values({ id: randomUUID(), purpose: data.purpose, sid: member.demand.snapshot.sid, fba: member.demand.snapshot.fba.trim().toUpperCase(), demandId: member.demand.id, documentId, revisionId });
 }
-/** Persist server-derived ticket defaults with the exact address-book version that supplied them. */
+/** Defaults use archived Lingxing shipment evidence; local address profiles are historical only. */
 export async function applyDocumentAutomaticDefaultsInTx(tx: BatchTx, data: DocumentRevisionData, previous?: DocumentRevisionData): Promise<DocumentRevisionData> {
+  const finish = (value: DocumentRevisionData) => applyDocumentAddressCodeDefaults(value).catch(addressCodeCatalogFailure);
+  data = await hydrateDocumentAddressCodeSourcesInTx(tx, data);
   const fields = withDocumentInvoiceDefaults(data.fields, data.members);
   let next = { ...data, fields };
-  if (!shouldResolveDocumentAddress(next, previous)) return next;
-  const sourceChanged = Boolean(previous && documentAddressSourceKey(previous.members) !== documentAddressSourceKey(next.members));
+  if (!shouldResolveDocumentAddress(next, previous)) return finish(next);
+  const sourceChanged = Boolean(previous && (documentAddressSourceKey(previous.members) !== documentAddressSourceKey(next.members) || haveDocumentAddressSourcesChanged(previous.members, next.members)));
   if (sourceChanged) next = { ...next, profileReferences: next.profileReferences.filter((reference) => reference.category !== 'address'), fields: {
     ...next.fields, addressConfirmed: 'false', addressConfirmationReason: '', addressAdoptionVersion: 'explicit/v1', addressSelectionMode: 'manual', addressSourceLabel: '来源已变化，请人工核对本票地址',
   } };
-  // Shared locks keep status, version and data consistent with a concurrent address-book edit.
-  const profiles = await tx.select().from(documentProfiles).where(and(eq(documentProfiles.category, 'address'), eq(documentProfiles.status, 'active'))).for('share');
-  const matches = matchDocumentAddressProfiles(next.members, profiles);
-  if (matches.length !== 1) return next;
-  const profile = matches[0]!;
-  return { ...next, fields: { ...applyDocumentAddress(next.fields, profile.data), addressSelectionMode: 'profile', addressSourceLabel: `地址簿 · ${profile.key} · v${profile.version}` },
-    profileReferences: [...next.profileReferences.filter((reference) => reference.category !== 'address'), { category: 'address', profileId: profile.id, version: profile.version, data: profile.data }],
-  };
+  const address = resolveDocumentLingxingAddress(next.members);
+  if (!address) return finish(next.fields.addressSelectionMode === 'profile' ? { ...next, fields: { ...next.fields, addressConfirmed: 'false', addressConfirmationReason: '', addressSelectionMode: 'manual', addressSourceLabel: '历史地址待核对，请维护领星货件地址或确认本票地址' } } : next);
+  return finish({ ...next, fields: { ...applyDocumentAddress(next.fields, address), addressSelectionMode: 'lingxing', addressSourceLabel: '领星货件地址' },
+    profileReferences: next.profileReferences.filter((reference) => reference.category !== 'address'),
+  });
+}
+function addressCodeCatalogFailure(error: unknown): never {
+  if (error instanceof DocumentAddressCodeCatalogError) throw new BatchError(error.code, 503, error.message);
+  throw error;
 }
 
 async function appendRevision(tx: BatchTx, id: string, version: number, data: DocumentRevisionData, actorId: string, reason: string, previous?: DocumentRevisionData) {
@@ -152,11 +158,14 @@ async function authoritativeReferences(tx: BatchTx, input: Pick<RevisionInput, '
   const profileReferences: DocumentRevisionData['profileReferences'] = [];
   for (const reference of input.profileReferences ?? previous.profileReferences) {
     const saved = previous.profileReferences.find((entry) => entry.category === reference.category && entry.profileId === reference.profileId && entry.version === reference.version);
+    if (reference.category === 'address') {
+      if (!saved) throw new BatchError('DOCUMENT_ADDRESS_SOURCE_ONLY', 422, '收件地址以领星货件资料为准，不再采用本地地址簿。');
+      profileReferences.push(saved); continue;
+    }
     if (saved && !documentUsesProfileReference(scope, saved)) { profileReferences.push(saved); continue; }
     const [profile] = await tx.select().from(documentProfiles).where(eq(documentProfiles.id, reference.profileId)).for('share');
     const [version] = await tx.select().from(documentProfileVersions).where(and(eq(documentProfileVersions.profileId, reference.profileId), eq(documentProfileVersions.version, reference.version)));
-    const savedAddress = reference.category === 'address' && previous.profileReferences.some((saved) => saved.category === 'address' && saved.profileId === reference.profileId && saved.version === reference.version);
-    if (!profile || profile.status !== 'active' && !savedAddress || profile.category !== reference.category || !version) throw new BatchError('DOCUMENT_PROFILE_UNAVAILABLE', 422, '所选资料版本不存在或已停用。');
+    if (!profile || profile.status !== 'active' || profile.category !== reference.category || !version) throw new BatchError('DOCUMENT_PROFILE_UNAVAILABLE', 422, '所选资料版本不存在或已停用。');
     profileReferences.push({ category: profile.category, profileId: profile.id, version: version.version, data: version.data });
   }
   const requested = input.templateReference === undefined ? previous.templateReference : input.templateReference;
@@ -179,6 +188,8 @@ export async function reviseDocumentInTx(tx: BatchTx, id: string, actorId: strin
     const members = input.demandIds ? await selectMembers(tx, actorId, { shippingRunId: revision.data.shippingRunId }, input.demandIds) : revision.data.members;
     const scope = { ...revision.data, members };
     let data = { ...revision.data, ...(input.title ? { title: input.title } : {}), ...(input.fields ? { fields: input.fields } : {}), ...await authoritativeReferences(tx, input, revision.data, scope), members };
+    if (input.fields && Object.hasOwn(input.fields, 'addressCode') && !Object.hasOwn(input.fields, 'addressSelectionMode')
+      && input.fields.addressCode?.trim() !== revision.data.fields.addressCode?.trim()) data.fields = { ...data.fields, addressSelectionMode: 'manual' };
     const addresses = (value: DocumentRevisionData) => value.profileReferences.filter((reference) => reference.category === 'address').map((reference) => [reference.profileId, reference.version]);
     const addressEvidenceChanged = documentDigest(addresses(data)) !== documentDigest(addresses(revision.data)) || haveDocumentAddressSourcesChanged(revision.data.members, data.members);
     data.fields = reviseDocumentAddressFields(revision.data.fields, data.fields, Boolean(input.confirmAddress && input.fields), addressEvidenceChanged);
@@ -253,6 +264,11 @@ export async function documentDependencyValidityInTx(tx: BatchTx, documentId: st
 }
 export async function validateDocumentInTx(tx: BatchTx, id: string, actorId: string, expectedVersion?: number): Promise<DocumentValidation> {
   const { record, revision } = await lockedDocument(tx, id, actorId, expectedVersion), issues = validateDocumentData(revision.data);
+  if (revision.data.generationRulesVersion === 'v2' && revision.data.members.length) {
+    const evidence = await hydrateDocumentAddressCodeSourcesInTx(tx, revision.data, true);
+    issues.push(...validateDocumentAddressCode(evidence, await loadDocumentAddressCodeCatalog().catch(addressCodeCatalogFailure)));
+    if (evidence.members.some((member) => member.sourceCandidates?.issues.some((issue) => issue.code === 'DOCUMENT_SOURCE_FILE_INVALID'))) issues.push({ code: 'DOCUMENT_SOURCE_FILE_INVALID', severity: 'error', message: 'B3 采用的领星货件原始文件缺失、身份无效或哈希不符，请重新核实来源。' });
+  }
   if (['cancelled', 'superseded', 'stale'].includes(record.status)) issues.push({ code: 'DOCUMENT_READ_ONLY', severity: 'error', message: '单据已取消、来源作废或被替代，不能生成，请建立更正。' });
   const candidates = await documentCandidatesInTx(tx, actorId, { shippingRunId: revision.data.shippingRunId }), current = new Map(candidates.items.map((item) => [item.demandId, item]));
   for (const member of revision.data.members) {
@@ -268,18 +284,17 @@ export async function validateDocumentInTx(tx: BatchTx, id: string, actorId: str
     if (!documentUsesProfileReference(revision.data, reference)) continue;
     const [profile] = await tx.select().from(documentProfiles).where(eq(documentProfiles.id, reference.profileId)).for('share');
     const [version] = await tx.select().from(documentProfileVersions).where(and(eq(documentProfileVersions.profileId, reference.profileId), eq(documentProfileVersions.version, reference.version)));
-    if (!profile || profile.status !== 'active' && reference.category !== 'address' || profile.category !== reference.category || !version || documentDigest(version.data) !== documentDigest(reference.data)) issues.push({ code: 'DOCUMENT_PROFILE_STALE', severity: 'error', message: '引用资料版本已停用或无法核验，请重新选择。', profileCategory: reference.category });
+    if (!profile || profile.status !== 'active' || profile.category !== reference.category || !version || documentDigest(version.data) !== documentDigest(reference.data)) issues.push({ code: 'DOCUMENT_PROFILE_STALE', severity: 'error', message: '引用资料版本已停用或无法核验，请重新选择。', profileCategory: reference.category });
   }
   if (revision.data.generationRulesVersion === 'v2') {
-    const activeManual = (revision.data.manualSalesPrices ?? []).filter((manual) => documentEffectiveSalesPrice(revision.data, manual.sid, manual).source === 'manual');
-    const sources = new Map([...(revision.data.productSourceFacts ?? []), ...activeManual].map((fact) => [fact.sourceFileId, fact.sourceSha256]));
+    const sources = new Map((revision.data.productSourceFacts ?? []).map((fact) => [fact.sourceFileId, fact.sourceSha256]));
     for (const [sourceFileId, sourceSha256] of sources) {
       try {
         const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, sourceFileId));
         if (!file || file.sha256 !== sourceSha256) throw new Error('Source archive is missing or changed');
         await checkedFileBytes(file);
       } catch {
-        issues.push({ code: 'DOCUMENT_SOURCE_FILE_INVALID', severity: 'error', message: '领星售价及箱规来源归档缺失或哈希不符，请重新查询并采用资料。' });
+        issues.push({ code: 'DOCUMENT_SOURCE_FILE_INVALID', severity: 'error', message: '领星商品及箱规来源归档缺失或哈希不符，请重新查询并采用资料。' });
       }
     }
   }
@@ -330,13 +345,15 @@ export async function reviewDocument(id: string, actorId: string, input: z.infer
     const [exported] = await tx.select().from(documentExports).where(and(eq(documentExports.id, input.exportId), eq(documentExports.status, 'completed'), sql`${documentExports.reference}->>'documentId' = ${id}`, sql`${documentExports.reference}->>'revisionId' = ${revision.id}`)).limit(1);
     if (!exported?.fileId) throw new BatchError('DOCUMENT_FILE_REQUIRED', 422, '待复核文件尚未成功发布。');
     const validation = await validateDocumentInTx(tx, id, actorId, input.expectedVersion); if (input.decision === 'approve' && !validation.valid) throw new BatchError('VALIDATION_BLOCKED', 422, '来源或资料已变化，不能通过复核。', validation.issues);
-    const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, exported.fileId)); if (!file) throw new BatchError('FILE_UNAVAILABLE', 503, '复核文件索引缺失。'); if (file.sha256 !== input.fileSha256) throw new BatchError('DOCUMENT_REVIEW_FILE_CONFLICT', 409, '复核的文件哈希与已发布文件不一致，请重新读取。'); await checkedFileBytes(file);
-    await tx.insert(documentReviews).values({ id: randomUUID(), documentId: id, revisionId: revision.id, exportId: exported.id, fileId: file.id, fileSha256: file.sha256, decision: input.decision, reason: input.reason, dependencies: exported.reference, reviewedBy: actorId });
+    const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, exported.fileId)); if (!file) throw new BatchError('FILE_UNAVAILABLE', 503, '复核文件索引缺失。');
+    const fileSha256 = documentExportFileSha256(exported.reference, file.sha256)!;
+    if (fileSha256 !== input.fileSha256) throw new BatchError('DOCUMENT_REVIEW_FILE_CONFLICT', 409, '复核的文件哈希与已发布文件不一致，请重新读取。'); await checkedDocumentExportFile(file, exported.reference);
+    await tx.insert(documentReviews).values({ id: randomUUID(), documentId: id, revisionId: revision.id, exportId: exported.id, fileId: file.id, fileSha256, decision: input.decision, reason: input.reason, dependencies: exported.reference, reviewedBy: actorId });
     const [updated] = await tx.update(documents).set({ status: input.decision === 'approve' ? 'approved' : 'returned', version: record.version + 1, updatedAt: new Date() }).where(eq(documents.id, id)).returning();
-    await tx.insert(operationAudit).values({ id: randomUUID(), action: 'document.review.file', targetId: id, actorUserId: actorId, requestHash: file.sha256, details: { revisionId: revision.id, fileId: file.id, fileSha256: file.sha256, decision: input.decision, reason: input.reason } });
+    await tx.insert(operationAudit).values({ id: randomUUID(), action: 'document.review.file', targetId: id, actorUserId: actorId, requestHash: fileSha256, details: { revisionId: revision.id, fileId: file.id, fileSha256, decision: input.decision, reason: input.reason } });
     return { documentId: id, document: serializeDocument(updated!, revision) }; });
 }
-export async function listDocumentProfiles(actorId: string, category?: DocumentProfile['category']) { return db.transaction(async (tx) => { await requireBatchActor(tx, actorId); const rows = await tx.select().from(documentProfiles).where(category ? eq(documentProfiles.category, category) : undefined).orderBy(asc(documentProfiles.category), asc(documentProfiles.key)); return { items: rows.map(serializeProfile) }; }); }
+export async function listDocumentProfiles(actorId: string, category?: DocumentProfile['category']) { return db.transaction(async (tx) => { await requireBatchActor(tx, actorId); if (category === 'address') return { items: [] }; const rows = await tx.select().from(documentProfiles).where(and(ne(documentProfiles.category, 'address'), category ? eq(documentProfiles.category, category) : undefined)).orderBy(asc(documentProfiles.category), asc(documentProfiles.key)); return { items: rows.map(serializeProfile) }; }); }
 export async function getDocumentProfile(id: string, actorId: string) { return db.transaction(async (tx) => {
   await requireBatchActor(tx, actorId);
   const [profile] = await tx.select().from(documentProfiles).where(eq(documentProfiles.id, id));
@@ -347,17 +364,12 @@ export async function writeDocumentProfile(actorId: string, input: ProfileInput)
   return documentOperation(actorId, input.operationId, 'document.profile.write', input, async (tx) => ({ profile: await writeDocumentProfileInTx(tx, actorId, input) }));
 }
 export async function writeDocumentProfileInTx(tx: BatchTx, actorId: string, input: ProfileInput): Promise<DocumentProfile> {
+    if (input.category === 'address' || input.profileId) throw new BatchError('DOCUMENT_ADDRESS_SOURCE_ONLY', 422, '收件地址以领星货件资料为准，不再维护本地地址簿。');
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`document-profile:${input.category}:${input.key}`},0))`);
     const [previous] = await tx.select().from(documentProfiles).where(input.profileId ? eq(documentProfiles.id, input.profileId) : and(eq(documentProfiles.category, input.category), eq(documentProfiles.key, input.key))).for('update');
-    if (input.profileId && (!previous || previous.category !== 'address' || input.category !== 'address')) throw new BatchError('NOT_FOUND', 404, '收件地址不存在。');
     if (previous && previous.version !== input.expectedVersion || !previous && input.expectedVersion !== undefined) throw new BatchError('VERSION_CONFLICT', 409, '资料版本已变化，请刷新后重新提交。');
     if (input.category === 'product') assertProductImageChange(previous?.data ?? {}, input.data);
-    if (input.category === 'address' && previous?.status === 'retired') throw new BatchError('DOCUMENT_PROFILE_RETIRED', 409, '地址已删除，请先恢复后编辑。');
-    if (input.profileId && previous?.key !== input.key) {
-      const [duplicate] = await tx.select({ id: documentProfiles.id }).from(documentProfiles).where(and(eq(documentProfiles.category, input.category), eq(documentProfiles.key, input.key)));
-      if (duplicate) throw new BatchError('DOCUMENT_PROFILE_KEY_CONFLICT', 409, '该地址标识已存在，请使用其他标识。');
-    }
-    const data = input.category === 'address' ? { ...documentAddressDataSchema.parse(input.data), _addressBook: { key: input.key, status: 'active', previousKey: previous?.key ?? null } } : input.data;
+    const data = input.data;
     const version = (previous?.version ?? 0) + 1, id = previous?.id ?? randomUUID();
     const [profile] = previous ? await tx.update(documentProfiles).set({ key: input.key, version, status: 'active', data, updatedAt: new Date() }).where(eq(documentProfiles.id, id)).returning() : await tx.insert(documentProfiles).values({ id, category: input.category, key: input.key, data, createdBy: actorId }).returning();
     await tx.insert(documentProfileVersions).values({ id: randomUUID(), profileId: id, version, data, reason: input.reason, createdBy: actorId }); return serializeProfile(profile!);
@@ -366,15 +378,10 @@ export async function changeDocumentProfileStatus(id: string, actorId: string, i
   return documentOperation(actorId, input.operationId, status === 'active' ? 'document.profile.restore' : 'document.profile.retire', { id, ...input }, async (tx) => {
     const [record] = await tx.select().from(documentProfiles).where(eq(documentProfiles.id, id)).for('update');
     if (!record) throw new BatchError('NOT_FOUND', 404, '资料不存在。');
+    if (record.category === 'address') throw new BatchError('DOCUMENT_ADDRESS_SOURCE_ONLY', 422, '历史地址资料只供追溯，收件地址请在领星维护。');
     if (record.version !== input.expectedVersion) throw new BatchError('VERSION_CONFLICT', 409, '资料版本已变化，请重新读取后操作。');
-    if (status === 'active' && record.category !== 'address') throw new BatchError('VALIDATION_ERROR', 422, '仅地址簿支持恢复，其他资料请建立新版本。');
-    if (record.category !== 'address') { await tx.update(documentProfiles).set({ status, updatedAt: new Date() }).where(eq(documentProfiles.id, id)); return { profileId: id }; }
-    if (record.status === status) throw new BatchError('DOCUMENT_PROFILE_STATE_CONFLICT', 409, status === 'active' ? '地址已恢复。' : '地址已删除。');
-    if (status === 'active') documentAddressDataSchema.parse(record.data);
-    const version = record.version + 1, data = { ...record.data, _addressBook: { key: record.key, status, previousKey: record.key } };
-    const [updated] = await tx.update(documentProfiles).set({ status, version, data, updatedAt: new Date() }).where(eq(documentProfiles.id, id)).returning();
-    await tx.insert(documentProfileVersions).values({ id: randomUUID(), profileId: id, version, data, reason: input.reason, createdBy: actorId });
-    return { profile: serializeProfile(updated!) };
+    if (status === 'active') throw new BatchError('VALIDATION_ERROR', 422, '请建立新版本恢复资料。');
+    await tx.update(documentProfiles).set({ status, updatedAt: new Date() }).where(eq(documentProfiles.id, id)); return { profileId: id };
   });
 }
 export async function listDocumentTemplates(actorId: string): Promise<{ items: DocumentTemplate[] }> { return db.transaction(async (tx) => {

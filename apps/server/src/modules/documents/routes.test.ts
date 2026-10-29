@@ -43,9 +43,9 @@ describe('document authenticated API boundary', () => {
   });
   it('downloads only a completed validated bundle and passes missing/stale bundle errors through', async () => {
     const server = app(), id = randomUUID();
-    mocks.bundleRead.mockResolvedValue({ file: { mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', originalName: '整批发票.xlsx' }, bytes: Buffer.from('fixture-xlsx') });
+    mocks.bundleRead.mockResolvedValue({ file: { mimeType: 'application/zip', originalName: '整批发票.zip' }, bytes: Buffer.from('fixture-zip') });
     const response = await server.request(`/api/v1/documents/automations/${id}/download`);
-    expect(response.status).toBe(200); expect(response.headers.get('Content-Disposition')).toContain(encodeURIComponent('整批发票.xlsx')); expect(mocks.bundleRead).toHaveBeenCalledWith(id, 'admin');
+    expect(response.status).toBe(200); expect(response.headers.get('Content-Type')).toBe('application/zip'); expect(response.headers.get('Content-Disposition')).toContain('filename="invoice-bundle.zip"'); expect(response.headers.get('Content-Disposition')).toContain(encodeURIComponent('整批发票.zip')); expect(mocks.bundleRead).toHaveBeenCalledWith(id, 'admin');
     mocks.session.mockResolvedValueOnce(null); expect((await server.request(`/api/v1/documents/automations/${id}/download`)).status).toBe(401);
     expect(mocks.readExport).not.toHaveBeenCalled();
   });
@@ -111,15 +111,15 @@ describe('document authenticated API boundary', () => {
     expect((await request('/api/v1/documents', 4100, { ...input, fields: { remarks: 'x'.repeat(4001) } })).status).toBe(422);
     expect(mocks.create).toHaveBeenCalledTimes(1);
   });
-  it('accepts same-ID address edits and binds soft deletion and restore to actor and expected version', async () => {
+  it('rejects local address writes and binds profile status commands to actor and expected version', async () => {
     const server = app(), id = randomUUID(), operationId = randomUUID(), headers = { 'Content-Type': 'application/json' };
     const input = { operationId, profileId: id, expectedVersion: 3, category: 'address', key: 'New label', reason: 'Rename', data: { destinationFc: 'IND9', recipientName: 'Receiver', addressLine1: '10 Road', city: 'City', postalCode: '00123', countryCode: 'US' } };
     mocks.profileWrite.mockResolvedValue({ profile: { id, key: 'New label', version: 4 } });
-    expect((await server.request('/api/v1/document-profiles', { method: 'POST', headers, body: JSON.stringify(input) })).status).toBe(201);
-    expect(mocks.profileWrite).toHaveBeenCalledWith('admin', input);
+    expect((await server.request('/api/v1/document-profiles', { method: 'POST', headers, body: JSON.stringify(input) })).status).toBe(422);
+    expect(mocks.profileWrite).not.toHaveBeenCalled();
     const invalid = { ...input, data: { ...input.data, countryCode: 'USA', destinationFc: '' } };
     expect((await server.request('/api/v1/document-profiles', { method: 'POST', headers, body: JSON.stringify(invalid) })).status).toBe(422);
-    expect(mocks.profileWrite).toHaveBeenCalledTimes(1);
+    expect(mocks.profileWrite).not.toHaveBeenCalled();
     const operation = { operationId, expectedVersion: 4, reason: 'Delete' };
     mocks.profileStatus.mockResolvedValue({ profile: { id, status: 'retired', version: 5 } });
     expect((await server.request(`/api/v1/document-profiles/${id}/retire`, { method: 'POST', headers, body: JSON.stringify(operation) })).status).toBe(200);

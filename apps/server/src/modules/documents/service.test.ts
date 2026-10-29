@@ -6,7 +6,9 @@ import { documentListQuerySchema, type DocumentRevisionData } from '@scm/contrac
 import { operationAudit } from '../../db/schema.js';
 import { batchOperations, subBatches, weeklyBatches } from '../batches/schema.js';
 import { documentDigest } from './domain.js';
-import { documentExports, documentMemberClaims, documentProfiles, documentRevisions, documents } from './schema.js';
+import { haveDocumentAddressSourcesChanged, reviseDocumentAddressFields } from './address.js';
+import { planAutomaticPreparation } from './automatic-preparation.js';
+import { documentExports, documentMemberClaims, documentRevisions, documents } from './schema.js';
 
 const mocks = vi.hoisted(() => ({ transaction: vi.fn(), select: vi.fn(), actor: vi.fn(), execute: vi.fn(), update: vi.fn(), insert: vi.fn(), confirmedGroup: vi.fn(), physical: vi.fn(), sourceCandidates: vi.fn(), checked: vi.fn() }));
 vi.mock('../../db/client.js', () => ({ db: { transaction: mocks.transaction } }));
@@ -15,7 +17,7 @@ vi.mock('../physical/service.js', () => ({ getValidPhysicalConfirmationInTx: moc
 vi.mock('../imports/service.js', () => ({ checkedFileBytes: mocks.checked }));
 vi.mock('./sources.js', () => ({ loadDocumentSourceCandidates: mocks.sourceCandidates }));
 vi.mock('./domain.js', async (original) => ({ ...await original<typeof import('./domain.js')>(), validateDocumentData: () => [] }));
-vi.mock('./workbook.js', () => ({ validateWorkbookData: () => [], reviseDocumentProductFields: (_previous: DocumentRevisionData, next: DocumentRevisionData) => ({ ...next.fields }) }));
+vi.mock('./workbook.js', async (original) => ({ DOCUMENT_HEADER_FIELDS: (await original<typeof import('./workbook.js')>()).DOCUMENT_HEADER_FIELDS, validateWorkbookData: () => [], reviseDocumentProductFields: (_previous: DocumentRevisionData, next: DocumentRevisionData) => ({ ...next.fields }) }));
 import { appendDocumentRevisionInTx, applyDocumentAutomaticDefaultsInTx, cancelDocument, listDocumentCandidates, listDocuments, reviseDocumentInTx, serializeDocument } from './service.js';
 import type { BatchTx } from '../batches/service.js';
 
@@ -185,82 +187,108 @@ describe('invoice M2 box sources', () => {
   });
 });
 
-describe('server-derived invoice currency and address defaults', () => {
-  const address = { recipientName: 'Address Book Receiver', addressLine1: '10 Profile Road', city: 'Profile City', postalCode: '12345', countryCode: 'US', addressCode: 'ADDR1', destinationFc: 'OTHER-FC' };
-  const profile = (changes: Record<string, unknown> = {}) => ({ id: randomUUID(), category: 'address', key: 'ADDR1 US', version: 7, status: 'active', data: address, ...changes });
-  const dataFor = (country = '美国', addressCode = 'ADDR1'): DocumentRevisionData => {
+describe('server-derived invoice currency and Lingxing address defaults', () => {
+  const address = { recipientName: 'Lingxing Receiver', addressLine1: '10 Source Road', city: 'Source City', postalCode: '12345', countryCode: 'US', addressCode: 'ADDR1' };
+  const dataFor = (country = '美国'): DocumentRevisionData => {
     const data = fixture().revision.data;
-    data.members = [{ demand: { id: randomUUID(), snapshot: { sid: 12, fba: 'FBA1', country, destinationFc: addressCode } } }] as DocumentRevisionData['members'];
+    data.members = [{ demand: { id: randomUUID(), snapshot: { sid: 12, fba: 'FBA1', country, destinationFc: 'ADDR1' } }, sourceCandidates: { addresses: [{ source: 'getShipmentDetails', snapshotId: randomUUID(), data: address }], products: [], issues: [] } }] as DocumentRevisionData['members'];
     data.fields = { orderNumber: 'OLD-ORDER', reference: 'OLD-REFERENCE', tradeTerms: 'DDP', currency: 'GBP' };
     return data;
   };
   const tx = () => ({ select: mocks.select }) as unknown as BatchTx;
-  it('fills a new ticket from one exact address-code match and freezes its current version without confirming', async () => {
-    const data = dataFor(), saved = profile(); selected.push([saved]);
+  it('keeps one automatic preparation confirmed when hydration only completes parsing of the same bound files', async () => {
+    const previous = dataFor('US'); previous.generationRulesVersion = 'v2';
+    const sourceAddress = { ...address }; delete (sourceAddress as Partial<typeof address>).addressCode;
+    const member = previous.members[0]!, listId = randomUUID(), detailId = randomUUID();
+    member.demand.snapshot.destinationFc = 'RAW-FC';
+    member.shipment = { snapshotIds: [listId, detailId], data: { items: [], boxes: [] } } as unknown as typeof member.shipment;
+    member.sourceCandidates = { addresses: [{ source: 'listShipments', snapshotId: listId, data: { ...sourceAddress, addressLine1: null } }, { source: 'getShipmentDetails', snapshotId: detailId, data: sourceAddress }], products: [], issues: [] };
+    previous.fields = { ...sourceAddress, addressSelectionMode: 'lingxing', addressConfirmed: 'false', addressConfirmationReason: '' };
+    const hydrated = structuredClone(member.sourceCandidates);
+    for (const candidate of hydrated.addresses) { candidate.data.destinationFc = 'RAW-FC'; candidate.data.addressLine1 = address.addressLine1; }
+    mocks.sourceCandidates.mockResolvedValue(hydrated);
+
+    const plan = planAutomaticPreparation(previous, [], []);
+    expect(plan.confirmAddress).toBe(true); expect(plan.fields.addressConfirmed).toBe('true');
+    const planned = { ...previous, fields: reviseDocumentAddressFields(previous.fields, plan.fields, plan.confirmAddress, haveDocumentAddressSourcesChanged(previous.members, previous.members)), profileReferences: plan.profileReferences, templateReference: plan.templateReference };
+    const next = await applyDocumentAutomaticDefaultsInTx(tx(), planned, previous);
+
+    expect(mocks.sourceCandidates).toHaveBeenCalledTimes(1);
+    expect(next.fields).toMatchObject({ addressCode: 'RAW-FC', addressCodeStatus: 'resolved', addressCodeSource: 'lingxing_fc', addressSelectionMode: 'lingxing', addressConfirmed: 'true', addressConfirmationReason: plan.fields.addressConfirmationReason });
+    expect(next.fields.addressLine1).toBe(address.addressLine1);
+    expect(previous.members[0]!.sourceCandidates!.addresses.every((candidate) => !Object.hasOwn(candidate.data, 'destinationFc'))).toBe(true);
+  });
+  it.each(['geography', 'known FC'])('still withdraws automatic confirmation when bound %s evidence really changes', async (kind) => {
+    const previous = dataFor('US'); previous.generationRulesVersion = 'v2';
+    const sourceAddress = { ...address }; delete (sourceAddress as Partial<typeof address>).addressCode;
+    previous.members[0]!.sourceCandidates!.addresses[0]!.data = { ...sourceAddress, destinationFc: 'RAW-FC' };
+    previous.members[0]!.shipment = { snapshotIds: [], data: { items: [], boxes: [] } } as unknown as typeof previous.members[number]['shipment'];
+    previous.fields = { ...sourceAddress, addressSelectionMode: 'lingxing', addressConfirmed: 'false', addressConfirmationReason: '' };
+    const plan = planAutomaticPreparation(previous, [], []), planned = structuredClone({ ...previous, fields: reviseDocumentAddressFields(previous.fields, plan.fields, plan.confirmAddress) });
+    const changed = planned.members[0]!.sourceCandidates!.addresses[0]!.data;
+    if (kind === 'geography') changed.addressLine1 = '20 Changed Test Road'; else changed.destinationFc = 'OTHER-FC';
+    const next = await applyDocumentAutomaticDefaultsInTx(tx(), planned, previous);
+    expect(next.fields.addressConfirmed).toBe('false'); expect(next.fields.addressConfirmationReason).toBe('');
+  });
+  it('fills B3 from the bound Lingxing FC rather than the demand destination input', async () => {
+    const data = structuredClone(dataFor()); data.generationRulesVersion = 'v2';
+    const source = data.members[0]!.sourceCandidates!.addresses[0]!;
+    delete source.data.addressCode; source.data.destinationFc = 'RAW-FC';
     const next = await applyDocumentAutomaticDefaultsInTx(tx(), data);
-    expect(next.fields).toMatchObject({ currency: 'USD', orderNumber: null, reference: null, tradeTerms: null, ...Object.fromEntries(Object.entries(address).filter(([key]) => key !== 'destinationFc')),
-      addressConfirmed: 'false', addressConfirmationReason: '', addressSelectionMode: 'profile', addressSourceLabel: '地址簿 · ADDR1 US · v7' });
-    expect(next.profileReferences).toEqual([{ category: 'address', profileId: saved.id, version: 7, data: address }]);
+    expect(next.fields).toMatchObject({ addressCode: 'RAW-FC', addressCodeSource: 'lingxing_fc', addressCodeStatus: 'resolved', addressSelectionMode: 'lingxing' });
+    expect(next.fields.addressLine1).toBe(address.addressLine1); expect(selections).toEqual([]);
+  });
+  it('fills a new ticket from archived Lingxing evidence without querying the local address book', async () => {
+    const data = dataFor(), next = await applyDocumentAutomaticDefaultsInTx(tx(), data);
+    expect(next.fields).toMatchObject({ currency: 'USD', orderNumber: null, reference: null, tradeTerms: null, ...address, addressConfirmed: 'false', addressConfirmationReason: '', addressSelectionMode: 'lingxing', addressSourceLabel: '领星货件地址' });
+    expect(next.profileReferences).toEqual([]); expect(selections).toEqual([]);
     expect(data.fields).toMatchObject({ orderNumber: 'OLD-ORDER', currency: 'GBP' });
-    expect(selections[0]?.table).toBe(documentProfiles);
-    expect(dialect.sqlToQuery(selections[0]!.condition!).params).toEqual(['address', 'active']);
   });
-  it.each([['美国', 'USD'], ['UK', 'GBP'], ['德国', 'EUR'], ['法国', 'EUR'], ['西班牙', 'EUR'], ['意大利', 'EUR'], ['Canada', 'GBP']])('derives %s currency as %s, preserving an explicit fallback for unmapped countries', async (country, currency) => {
+  it.each([['美国', 'USD'], ['UK', 'GBP'], ['德国', 'EUR'], ['法国', 'EUR'], ['西班牙', 'EUR'], ['意大利', 'EUR'], ['Canada', 'GBP']])('derives %s currency as %s', async (country, currency) => {
     const data = dataFor(country); data.fields.recipientName = 'Manual Receiver';
-    expect((await applyDocumentAutomaticDefaultsInTx(tx(), data)).fields.currency).toBe(currency);
-    expect(selections).toEqual([]);
+    expect((await applyDocumentAutomaticDefaultsInTx(tx(), data)).fields.currency).toBe(currency); expect(selections).toEqual([]);
   });
-  it('preserves the explicit fallback for mixed-currency tickets without adopting a first-country result', async () => {
-    const data = dataFor(); data.members.push(dataFor('英国').members[0]!); data.fields.recipientName = 'Manual Receiver';
-    expect((await applyDocumentAutomaticDefaultsInTx(tx(), data)).fields.currency).toBe('GBP');
-  });
-  it('does not overwrite an existing manual address, confirmation or historical reference during ordinary saves', async () => {
-    const previous = dataFor(); previous.fields = { ...previous.fields, ...address, recipientName: 'Explicit Manual Receiver', addressSelectionMode: 'manual', addressConfirmed: 'true', addressConfirmationReason: 'Checked with receiver' };
+  it('preserves confirmed manual corrections and historical references during ordinary saves', async () => {
+    const previous = dataFor(); previous.fields = { ...address, recipientName: 'Manual Receiver', addressSelectionMode: 'manual', addressConfirmed: 'true', addressConfirmationReason: 'Checked with receiver' };
     previous.profileReferences = [{ category: 'address', profileId: randomUUID(), version: 2, data: address }];
     const next = await applyDocumentAutomaticDefaultsInTx(tx(), structuredClone(previous), previous);
-    expect(next.fields).toMatchObject({ recipientName: 'Explicit Manual Receiver', addressConfirmed: 'true', addressConfirmationReason: 'Checked with receiver' });
-    expect(next.profileReferences).toEqual(previous.profileReferences); expect(selections).toEqual([]);
+    expect(next.fields).toMatchObject(previous.fields); expect(next.profileReferences).toEqual(previous.profileReferences); expect(selections).toEqual([]);
   });
-  it('preserves explicit address edits supplied together with a source-code change', async () => {
-    const previous = dataFor(); previous.fields = { ...previous.fields, ...address };
+  it('preserves address edits submitted together with a member source change', async () => {
+    const previous = dataFor(); previous.fields = { ...address };
     const data = structuredClone(previous); data.members[0]!.demand.snapshot.destinationFc = 'NEWCODE'; data.fields.addressLine1 = 'Manual New Road'; data.fields.addressSelectionMode = 'manual';
     expect((await applyDocumentAutomaticDefaultsInTx(tx(), data, previous)).fields.addressLine1).toBe('Manual New Road'); expect(selections).toEqual([]);
   });
-  it('keeps an intentionally empty manual address empty on a later unrelated save', async () => {
-    const previous = dataFor(); previous.fields = { ...previous.fields, addressSelectionMode: 'manual', addressConfirmed: 'false', recipientName: '', addressLine1: '', city: '', postalCode: '', countryCode: '' };
-    const data = structuredClone(previous); data.fields.notes = 'Only unrelated notes changed';
-    const next = await applyDocumentAutomaticDefaultsInTx(tx(), data, previous);
-    expect(next.fields.recipientName).toBe(''); expect(next.profileReferences).toEqual([]); expect(selections).toEqual([]);
+  it('keeps an intentionally cleared manual address empty on an unrelated save', async () => {
+    const previous = dataFor(); previous.fields = { addressSelectionMode: 'manual', recipientName: '', addressLine1: '', city: '', postalCode: '', countryCode: '' };
+    const data = structuredClone(previous); data.fields.notes = 'Only notes changed';
+    expect((await applyDocumentAutomaticDefaultsInTx(tx(), data, previous)).fields.recipientName).toBe('');
   });
-  it('allows a fresh address-code match after the scope of a previously empty manual address changes', async () => {
-    const previous = dataFor(); previous.fields.addressSelectionMode = 'manual';
-    const data = structuredClone(previous); data.members[0]!.demand.snapshot.destinationFc = 'NEWCODE';
-    const saved = profile({ data: { ...address, addressCode: 'NEWCODE' } }); selected.push([saved]);
-    const next = await applyDocumentAutomaticDefaultsInTx(tx(), data, previous);
-    expect(next.fields).toMatchObject({ recipientName: address.recipientName, addressCode: 'NEWCODE', addressConfirmed: 'false' });
-    expect(next.profileReferences[0]?.profileId).toBe(saved.id);
+  it('replaces a legacy local default with the whole Lingxing address', async () => {
+    const previous = dataFor(); previous.fields = { ...address, addressLine1: 'Obsolete Local Road', phone: 'OLD-PHONE', addressSelectionMode: 'profile', addressConfirmed: 'true', addressConfirmationReason: 'Old book' };
+    previous.profileReferences = [{ category: 'address', profileId: randomUUID(), version: 2, data: { ...previous.fields } }];
+    const next = await applyDocumentAutomaticDefaultsInTx(tx(), structuredClone(previous), previous);
+    expect(next.fields).toMatchObject({ ...address, phone: '', addressConfirmed: 'false', addressSelectionMode: 'lingxing' }); expect(next.profileReferences).toEqual([]);
   });
-  it('rematches a changed FBA source address code, replacing the whole address and requiring fresh confirmation', async () => {
-    const previous = dataFor(); previous.fields = { ...previous.fields, ...address, phone: 'OLD-PHONE', addressConfirmed: 'true', addressConfirmationReason: 'Old scope checked' };
-    previous.profileReferences = [{ category: 'address', profileId: randomUUID(), version: 2, data: address }];
-    const data = structuredClone(previous); data.members[0]!.sourceCandidates = { addresses: [{ source: 'getShipmentDetails', snapshotId: randomUUID(), data: { addressCode: 'NEWCODE' } }], products: [], issues: [] };
-    const saved = profile({ key: 'NEWCODE US', version: 9, data: { ...address, addressCode: 'NEWCODE', addressLine1: '20 New Road' } }); selected.push([saved]);
+  it('refreshes source values even when the FBA and address code stay the same', async () => {
+    const previous = dataFor(); previous.fields = { ...address, addressSelectionMode: 'lingxing', addressConfirmed: 'true', addressConfirmationReason: 'Old source' };
+    const data = structuredClone(previous); data.members[0]!.sourceCandidates!.addresses[0]!.data.addressLine1 = '20 Updated Source Road';
     const next = await applyDocumentAutomaticDefaultsInTx(tx(), data, previous);
-    expect(next.fields).toMatchObject({ addressCode: 'NEWCODE', addressLine1: '20 New Road', phone: '', addressConfirmed: 'false', addressConfirmationReason: '' });
-    expect(next.profileReferences).toEqual([{ category: 'address', profileId: saved.id, version: 9, data: saved.data }]);
+    expect(next.fields).toMatchObject({ addressLine1: '20 Updated Source Road', addressConfirmed: 'false', addressConfirmationReason: '' });
   });
-  it.each(['missing', 'ambiguous', 'retired', 'incomplete'] as const)('keeps %s address matching unresolved', async (kind) => {
-    const data = dataFor();
-    selected.push(kind === 'missing' ? [] : kind === 'ambiguous' ? [profile(), profile()] : kind === 'retired' ? [profile({ status: 'retired' })] : [profile({ data: { ...address, city: '' } })]);
+  it('requires fresh confirmation of a legacy local default when Lingxing evidence is missing', async () => {
+    const previous = dataFor(); previous.fields = { ...address, addressSelectionMode: 'profile', addressConfirmed: 'true', addressConfirmationReason: 'Old book' }; previous.members[0]!.sourceCandidates!.addresses = [];
+    const next = await applyDocumentAutomaticDefaultsInTx(tx(), structuredClone(previous), previous);
+    expect(next.fields).toMatchObject({ ...address, addressSelectionMode: 'manual', addressConfirmed: 'false', addressConfirmationReason: '' }); expect(selections).toEqual([]);
+  });
+  it.each(['missing', 'conflicting', 'incomplete', 'foreign'] as const)('leaves %s Lingxing evidence unresolved', async (kind) => {
+    const data = dataFor(), candidates = data.members[0]!.sourceCandidates!;
+    if (kind === 'missing') candidates.addresses = [];
+    if (kind === 'conflicting') candidates.addresses.push({ source: 'listShipments', snapshotId: randomUUID(), data: { ...address, city: 'Other City' } });
+    if (kind === 'incomplete') candidates.addresses[0]!.data = { ...address, city: '' };
+    if (kind === 'foreign') candidates.addresses[0]!.data = { ...address, countryCode: 'GB' };
     const next = await applyDocumentAutomaticDefaultsInTx(tx(), data);
-    expect(next.profileReferences).toEqual([]); expect(next.fields.recipientName).toBeUndefined(); expect(next.fields.addressConfirmed).not.toBe('true');
-  });
-  it('does not retain an old address reference or confirmation when a new code has no unique match', async () => {
-    const previous = dataFor(); previous.fields = { ...previous.fields, ...address, addressConfirmed: 'true', addressConfirmationReason: 'Old scope' };
-    previous.profileReferences = [{ category: 'address', profileId: randomUUID(), version: 2, data: address }];
-    const data = structuredClone(previous); data.members[0]!.demand.snapshot.destinationFc = 'UNKNOWN'; selected.push([]);
-    const next = await applyDocumentAutomaticDefaultsInTx(tx(), data, previous);
-    expect(next.profileReferences).toEqual([]); expect(next.fields).toMatchObject({ addressLine1: '10 Profile Road', addressConfirmed: 'false', addressConfirmationReason: '' });
+    expect(next.fields.recipientName).toBeUndefined(); expect(next.profileReferences).toEqual([]); expect(selections).toEqual([]);
   });
 });
 

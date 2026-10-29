@@ -6,7 +6,7 @@ import { scrollDocumentFieldIntoView } from './document-details-navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useBlocker, useSearch } from '@tanstack/react-router';
 import { ArrowLeft, ArrowRight, CircleAlert, CircleCheck, Download, FileCheck, FileSpreadsheet, History, LoaderCircle, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from 'lucide-react';
-import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_FIELD_OPTIONS, documentCanManuallySupplySalesPrice, documentCurrencyForCountry, documentFieldsSchema, documentProductCurrency, documentTicketCurrency, hasDocumentAddressConflict, withDocumentDefaults, withDocumentInvoiceDefaults, type DocumentAutomationJob, type Document as BusinessDocument, type DocumentExport, type DocumentListQuery, type DocumentRevisionData, type DocumentValidation } from '@scm/contracts';
+import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_FIELD_OPTIONS, documentCurrencyForCountry, documentFieldsSchema, documentProductCurrency, documentTicketCurrency, hasDocumentAddressConflict, withDocumentDefaults, withDocumentInvoiceDefaults, type DocumentAutomationDeleteResponse, type DocumentAutomationJob, type Document as BusinessDocument, type DocumentExport, type DocumentListQuery, type DocumentRevisionData, type DocumentValidation } from '@scm/contracts';
 import { ApiError, type SessionResponse } from '../api';
 import { Button, IconButton } from '../components/ui/button';
 import { MonthPicker } from '../components/ui/month-picker';
@@ -16,7 +16,7 @@ import { BatchPagination, BatchTable, Check, downloadBlob, messageOf, newOperati
 import { documentApi, type DocumentDetails } from './document-api';
 import { NewDocument } from './document-automation-source';
 import { documentAutomationApi } from './document-automation-api';
-import { DocumentAutomationDialog, DocumentAutomationRecent, useAutomationRetry } from './document-automation';
+import { DocumentAutomationDialog, DocumentAutomationRecent, useAutomationResume, useAutomationRetry } from './document-automation';
 import type { AutomationFormState } from './document-automation-supplement';
 import { documentDetailsReadiness, type DetailProgress } from './document-details-readiness';
 import { DocumentField } from './document-fields';
@@ -92,6 +92,9 @@ function useDocumentAction(conflictAction = '保存') {
     onError: (error) => { setNotice(''); if (error instanceof ApiError && error.status === 401) void client.invalidateQueries({ queryKey: ['session'] }); },
     onSettled: () => { inFlight.current = false; },
   });
+  const versionConflict = mutation.error instanceof ApiError && mutation.error.status === 409 && /VERSION_CONFLICT/.test(mutation.error.code ?? '');
+  const resetMutation = mutation.reset;
+  const reset = useCallback(() => { resetMutation(); setNotice(''); }, [resetMutation]);
   return {
     run: (key: string, action: (operationId: string) => Promise<unknown>, success: string, done?: (value: unknown) => void) => {
       // Lock immediately: two clicks can arrive before the pending state renders.
@@ -100,9 +103,10 @@ function useDocumentAction(conflictAction = '保存') {
     },
     busy: mutation.isPending,
     pendingKey: mutation.isPending ? mutation.variables.key : undefined,
-    conflict: mutation.error instanceof ApiError && mutation.error.status === 409,
-    reset: () => { mutation.reset(); setNotice(''); },
-    feedback: <>{mutation.isError && <p className="form-note error-note" role="alert"><CircleAlert size={16} aria-hidden="true" />{messageOf(mutation.error)}{mutation.error instanceof ApiError && mutation.error.status === 409 ? ` 请重新读取最新版本，核对后再次${conflictAction}。` : ' 内容已保留，可核对后重试。'}</p>}{notice && <p className="form-note success-note" role="status"><CircleCheck size={16} aria-hidden="true" />{notice}</p>}</>,
+    error: mutation.error,
+    conflict: versionConflict,
+    reset,
+    feedback: <>{mutation.isError && <p className="form-note error-note" role="alert"><CircleAlert size={16} aria-hidden="true" />{messageOf(mutation.error)}{versionConflict ? ` 请重新读取最新版本，核对后再次${conflictAction}。` : mutation.error instanceof ApiError && mutation.error.status === 409 ? '' : ' 内容已保留，可核对后重试。'}</p>}{notice && <p className="form-note success-note" role="status"><CircleCheck size={16} aria-hidden="true" />{notice}</p>}</>,
   };
 }
 
@@ -159,6 +163,13 @@ export function DocumentsWorkspace({ active = true }: { active?: boolean }) {
     setMode(null); setDocumentId(''); setProgress(null); setWizardOpen(false);
     setAutomaticEdit(null); setAutomaticJobId(job.id); setAutomaticOpen(true);
   };
+  const resumeAutomaticJob = (job: DocumentAutomationJob) => {
+    automaticContinuation.reset(); automaticStart.reset();
+    client.setQueryData(['document-automation', job.id], { job });
+    void client.invalidateQueries({ queryKey: ['document-automations'] });
+    setWizardOpen(false); setAutomaticEdit(null); setAutomaticJobId(job.id); setAutomaticOpen(true);
+  };
+  const automaticResume = useAutomationResume(automaticStart.error, resumeAutomaticJob, { active });
   const open = (id: string, preferredStage?: DocumentStage) => {
     if (mode === 'detail' && documentId === id) { setWizardOpen(true); return; }
     const next = () => { onEditorState({ dirty: false, busy: false }); setDocumentId(id); setMode('detail'); setWizardOpen(true); setProgress(preferredStage ? { id, stage: preferredStage } : null); if (preferredStage) { try { sessionStorage.setItem(stageKey(userId, id), JSON.stringify({ stage: preferredStage })); } catch { /* In-memory stage remains available. */ } } };
@@ -177,12 +188,19 @@ export function DocumentsWorkspace({ active = true }: { active?: boolean }) {
     else switchTo(() => open(record.id, targetStage));
   };
   const deleted = (id: string) => {
-    if (mode !== 'detail' || documentId !== id) return;
-    onEditorState({ dirty: false, busy: false }); setMode(null); setDocumentId(''); setProgress(null); setWizardOpen(false);
     try { sessionStorage.removeItem(stageKey(userId, id)); } catch { /* The deleted record is no longer a resumable editor. */ }
     client.removeQueries({ queryKey: ['document', id], exact: true });
+    if (mode !== 'detail' || documentId !== id) return;
+    editorDraft.current = null;
+    onEditorState({ dirty: false, busy: false }); setMode(null); setDocumentId(''); setProgress(null); setWizardOpen(false); setAutomaticEdit(null);
   };
-  const close = () => { if (active && !editorStateRef.current.busy && !automaticContinuation.busy && !confirmDiscard) { setWizardOpen(false); if (automaticEdit) setAutomaticOpen(true); } };
+  const automationDeleted = (result: DocumentAutomationDeleteResponse) => {
+    result.cancelledDocumentIds.forEach(deleted);
+    if (automaticJobId !== result.automationId && automaticEdit?.jobId !== result.automationId) return;
+    automaticContinuation.reset(); setAutomaticJobId(''); setAutomaticOpen(false); setAutomaticEdit(null);
+    onAutomationFormState({ dirty: false, busy: false });
+  };
+  const close = () => { if (active && wizardOpen && !editorStateRef.current.busy && !automaticContinuation.busy && !confirmDiscard) { setWizardOpen(false); if (automaticEdit) setAutomaticOpen(true); } };
   const editAutomaticItem = (id: string, itemId: string) => switchTo(() => {
     automaticContinuation.reset(); setAutomaticOpen(false); setAutomaticEdit({ jobId: automaticJobId, itemId, documentId: id });
     open(id, 'details'); setProgress({ id, stage: 'details' });
@@ -226,17 +244,18 @@ export function DocumentsWorkspace({ active = true }: { active?: boolean }) {
   const discard = () => { if (editorStateRef.current.busy || automationFormRef.current.busy) return; automationDiscard.current(); editorDraft.current = null; const next = pendingSwitch.current; pendingSwitch.current = null; setConfirmDiscard(false); setEditorSession((current) => current + 1); onEditorState({ dirty: false, busy: false }); next?.(); };
   const continueEditing = () => { if (editorStateRef.current.busy || automationFormRef.current.busy) return; pendingSwitch.current = null; setConfirmDiscard(false); if (automationFormRef.current.dirty && !editorStateRef.current.dirty) { setWizardOpen(false); setAutomaticOpen(true); } if (blocker.status === 'blocked') blocker.reset(); };
   return <div className="documents-workspace">
-    <header className="document-page-heading"><div><h2>发票与单据</h2><p className="mapping-help">多选货件统一检查、集中补齐后生成一份 XLSX；不同表头分工作表，混装票下载后修改。</p></div><div className="document-footer-actions">{mode && <Button type="button" icon={ArrowRight} onClick={() => setWizardOpen(true)}>继续本次制作</Button>}<Button type="button" icon={Plus} variant="primary" disabled={automaticStart.busy || automaticContinuation.busy} onClick={startNew}>制作发票</Button></div></header>
+    <header className="document-page-heading"><div><h2>发票与单据</h2><p className="mapping-help">多选货件统一检查、集中补齐后，每张发票生成独立 Excel 文件并打包为 ZIP；混装票下载后修改。</p></div><div className="document-footer-actions">{mode && <Button type="button" icon={ArrowRight} disabled={editorState.busy || automaticStart.busy || automaticResume.busy || automaticContinuation.busy} onClick={() => { setAutomaticOpen(false); setWizardOpen(true); }}>继续本次制作</Button>}<Button type="button" icon={Plus} variant="primary" disabled={editorState.busy || automaticStart.busy || automaticResume.busy || automaticContinuation.busy} onClick={startNew}>制作发票</Button></div></header>
     {automaticStart.feedback}
-    <DocumentAutomationRecent active={active && !wizardOpen && !automaticOpen} disabled={editorState.busy || automaticStart.busy} open={(id) => switchTo(() => { setAutomaticJobId(id); setAutomaticOpen(true); })} />
-    <DocumentRecords active={active && !wizardOpen && !automaticOpen} busy={editorState.busy || automaticStart.busy} startNew={startNew} open={open} edit={edit} deleted={deleted} requestDelete={(record, next) => { if (mode === 'detail' && documentId === record.id) switchTo(() => { setWizardOpen(false); next(); }); else next(); }} />
+    {automaticResume.feedback}
+    <DocumentAutomationRecent active={active && !wizardOpen && !automaticOpen} disabled={editorState.busy || automaticStart.busy || automaticResume.busy || automaticContinuation.busy} open={(id) => switchTo(() => { setAutomaticJobId(id); setAutomaticOpen(true); })} requestDelete={(next) => switchTo(() => { setWizardOpen(false); setAutomaticOpen(false); next(); })} deleted={automationDeleted} />
+    <DocumentRecords active={active && !wizardOpen && !automaticOpen} busy={editorState.busy || automaticStart.busy || automaticResume.busy} startNew={startNew} open={open} edit={edit} deleted={deleted} requestDelete={(record, next) => { if (mode === 'detail' && documentId === record.id) switchTo(() => { setWizardOpen(false); next(); }); else next(); }} />
     {createPortal(<ImportDialog open={running || confirmDiscard} title="发票与单据向导" close={close} closeDisabled={editorState.busy || automaticContinuation.busy || confirmDiscard} wide><div className="document-wizard">
       {mode === 'detail' && !automaticEdit && <nav ref={progressNav} className="import-wizard-progress" aria-label="单据制作步骤"><ol>{documentStages.map((item, index) => <li key={item.value} data-current={stage === item.value}><button type="button" aria-current={stage === item.value ? 'step' : undefined} disabled={editorState.busy || confirmDiscard || mode === 'detail' && (!detail.data || Boolean(editorState.detailsDirty) && (item.value === 'generate' || item.value === 'review'))} onClick={() => chooseStage(item.value)}><span className="wizard-step-number" aria-hidden="true">{index + 1}</span><span>{item.label}</span></button></li>)}</ol></nav>}
-      <div className="import-wizard-heading"><div><h3 ref={heading} tabIndex={-1}>{mode === 'new' ? '制作发票' : automaticEdit ? '补充出单资料' : documentStages[stageIndex]!.label}</h3><p>{mode === 'new' ? '选择货件，再填写本次出单资料；统一检查通过后合并为一份 XLSX。' : automaticEdit ? '补齐本票缺项后，保存并继续后台自动出单。' : documentStages[stageIndex]!.description}</p></div></div>
+      <div className="import-wizard-heading"><div><h3 ref={heading} tabIndex={-1}>{mode === 'new' ? '制作发票' : automaticEdit ? '补充出单资料' : documentStages[stageIndex]!.label}</h3><p>{mode === 'new' ? '选择货件，再填写本次出单资料；统一检查通过后生成独立 Excel 文件并打包为 ZIP。' : automaticEdit ? '补齐本票缺项后，保存并继续后台自动出单。' : documentStages[stageIndex]!.description}</p></div></div>
       {confirmDiscard && <div className="document-cancel-confirm" role="alert"><p>当前有未保存的填写。继续编辑可保留本次内容；放弃后切换只保留已保存的版本。</p><div className="document-footer-actions"><Button type="button" disabled={editorState.busy} onClick={continueEditing}>继续编辑当前单据</Button><Button type="button" disabled={editorState.busy} onClick={discard}>放弃未保存修改并继续</Button></div></div>}
       {automaticContinuation.error && <p className="form-note error-note" role="alert">{messageOf(automaticContinuation.error)} 已保存的资料会保留，可点击“继续自动出单”重试。</p>}
       <fieldset className="document-wizard-fieldset" disabled={confirmDiscard || automaticContinuation.busy} inert={confirmDiscard}>
-        {mode === 'new' && <NewDocument key={newSession} active={running} started={showAutomaticJob} onEditorState={onEditorState} actionsContainer={newDocumentActions} close={close} blocked={confirmDiscard} />}
+        {mode === 'new' && <NewDocument key={newSession} active={running} started={showAutomaticJob} resume={resumeAutomaticJob} onEditorState={onEditorState} actionsContainer={newDocumentActions} close={close} blocked={confirmDiscard} />}
         {mode === 'detail' && (detail.isPending ? <p className="list-state" role="status">正在读取单据及版本…</p> : detail.isError ? <QueryError error={detail.error} retry={() => void detail.refetch()} /> : <DocumentEditor key={`${detail.data.document.id}-${detail.data.document.version}-${editorSession}-${documentEditingLocked(detail.data.document, detail.data.exports)}`} record={detail.data.document} draftRef={editorDraft} validation={detail.data.validation} exports={detail.data.exports} active={running} stage={stage} onEditorState={onEditorState} reload={() => void detail.refetch()} corrected={(id) => open(id, 'details')} actionsContainer={newDocumentActions} close={close} blocked={confirmDiscard || automaticContinuation.busy} automatic={automaticEdit?.documentId === documentId ? { continue: continueAutomatic, busy: automaticContinuation.busy } : undefined} advance={() => chooseStage('generate', true)} back={() => chooseStage('sources')} />)}
       </fieldset>
       <footer className="import-wizard-footer" data-stage={stage}><p className="mapping-help">{mode === 'new' ? '核对货件与出单资料后开始；任务开始后关闭页面也会继续处理。' : editorState.detailsDirty ? '有未保存的资料，请保存后继续；保存失败会保留本次填写。' : '关闭后可继续本次制作，已保存资料可进入下一步核对。'}</p><div ref={setNewDocumentActions}>{mode === 'detail' && stage !== 'details' && <><Button type="button" icon={ArrowLeft} disabled={stageIndex === 0 || editorState.busy || confirmDiscard} onClick={() => chooseStage(documentStages[stageIndex - 1]!.value)}>上一步</Button><Button type="button" icon={X} disabled={editorState.busy || confirmDiscard} onClick={close}>暂时关闭</Button><Button type="button" icon={ArrowRight} variant="primary" disabled={stageIndex === documentStages.length - 1 || editorState.busy || confirmDiscard || !detail.data || Boolean(editorState.detailsDirty) && stageIndex >= 1} onClick={() => chooseStage(documentStages[stageIndex + 1]!.value)}>下一步</Button></>}</div></footer>
@@ -439,9 +458,7 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
     return values.filter((value): value is string => typeof value === 'string' && Boolean(value.trim())).map((value) => value.trim());
   }))] : fieldOptions.data?.services ?? [];
   const operation = (operationId: string, text: string) => ({ operationId, expectedVersion: record.version, reason: text });
-  const manualPriceCurrencyChanged = Object.values(manualSalesPriceInputs).some((input) => input.salesPrice !== null && input.enteredCurrency !== documentTicketCurrency(data.members));
-  const manualPriceUnavailable = Object.values(manualSalesPriceInputs).some((input) => input.salesPrice !== null && !documentCanManuallySupplySalesPrice(data, input.sid, input));
-  const canSave = active && !busy && !blocked && !recoverableDraft && !manualPriceCurrencyChanged && !manualPriceUnavailable && !readOnly && !hasFile && !generationRunning && Boolean(title.trim() && reason.trim()) && !profiles.isFetching && !templates.isFetching && !profiles.isError && !templates.isError;
+  const canSave = active && !busy && !blocked && !recoverableDraft && !readOnly && !hasFile && !generationRunning && Boolean(title.trim() && reason.trim()) && !profiles.isFetching && !templates.isFetching && !profiles.isError && !templates.isError;
   const saveForm = (next: boolean) => {
     if (busy || blocked || recoverableDraft || !active) return;
     if (!dirty) { if (next) { if (automatic) automatic.continue(record); else advance(); } return; }
@@ -453,7 +470,7 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
     const next = continueAfterSave.current; continueAfterSave.current = false;
     if (!canSave || !dirty) return;
     const template = templates.data?.find((item) => item.id === templateId);
-    const input = { expectedVersion: record.version, reason: reason.trim(), title: title.trim(), fields, ...(Object.keys(manualSalesPriceInputs).length ? { manualSalesPrices: Object.values(manualSalesPriceInputs).map(({ sid, msku, fnsku, sku, salesPrice, reason }) => ({ sid, msku, fnsku, sku, salesPrice, reason })) } : {}), confirmAddress: addressReconfirmed, profileReferences: effectiveProfiles.map((reference) => ({ ...reference, data: {} })), templateReference: !adoptCurrentTemplateVersion && templateId === data.templateReference?.templateId ? data.templateReference : template ? { templateId: template.id, version: template.version, sha256: template.sha256, fileId: template.fileId } : null };
+    const input = { expectedVersion: record.version, reason: reason.trim(), title: title.trim(), fields, confirmAddress: addressReconfirmed, profileReferences: effectiveProfiles.map((reference) => ({ ...reference, data: {} })), templateReference: !adoptCurrentTemplateVersion && templateId === data.templateReference?.templateId ? data.templateReference : template ? { templateId: template.id, version: template.version, sha256: template.sha256, fileId: template.fileId } : null };
     action.run(`save:${record.id}:${JSON.stringify(input)}`, (operationId) => documentApi.revise(record.id, { operationId, ...input }), '单据修订已保存，生成前请重新校验。', (value) => {
       draftRef.current = null; setRecoverableDraft(null);
       const saved = (value as { document: BusinessDocument }).document;
@@ -525,7 +542,8 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
     <section className="content-panel document-summary"><div><h3>{data.title}</h3><p>{documentOccurrence(data)} · v{record.version} · {data.members.length} 个 FBA</p></div><Status status={record.status} /><IconButton icon={RefreshCw} label="重新读取单据" disabled={busy} onClick={reload} /></section>
     {recoverableDraft && <div className="permission-note warning-note" role="alert"><p>已读取 v{record.version}，本次在 v{recoverableDraft.baseVersion} 中未保存的输入仍保留。可恢复本次修改，核对新版资料后再保存；未修改的字段继续采用新版。{removedBoxDraftFields > 0 && `其中 ${removedBoxDraftFields} 项已移除箱的修改不再应用。`}{removedManualPriceDrafts.length > 0 && `已移除商品的人工售价不再应用：${removedManualPriceDrafts.map((input) => `${input.sku || input.msku} ${input.salesPrice ?? '清除'} ${input.enteredCurrency}`).join('、')}。`}{(hasFile || record.status !== 'draft') && '当前单据已不可编辑，请通过更正单据处理。'}</p><div className="document-footer-actions"><Button type="button" disabled={busy || record.status !== 'draft' || hasFile || generationRunning} onClick={recoverInputs}>恢复未保存输入</Button><Button type="button" disabled={busy} onClick={() => { draftRef.current = null; setRecoverableDraft(null); }}>放弃未保存输入</Button></div></div>}
     {record.status === 'stale' && <p className="form-note error-note" role="alert">来源或依赖版本已变化。请核对来源，保存新修订并重新生成；已有文件保留原内容。</p>}
-    {!invoiceV2 && !hasFile && <p className="form-note warning-note" role="status"><CircleAlert size={16} aria-hidden="true" />此草稿使用历史发票规则。请在“单票资料”中查询并采用领星资料，升级为售价 × 20%、每箱一行及箱规默认申报数量后再生成。</p>}
+    {!invoiceV2 && !hasFile && <p className="form-note warning-note" role="status"><CircleAlert size={16} aria-hidden="true" />此草稿使用历史发票规则。请在“单票资料”中查询并采用领星资料，升级为每件固定单价 2.00、每箱一行及箱规默认申报数量后再生成。</p>}
+    {hasFile && exports.some((item) => item.status === 'completed' && item.fileId && item.reference.pricingRule !== 'fixed-2') && <p className="form-note warning-note" role="status">历史文件保留生成时的申报价格；当前规则为每件固定 2.00，需建立更正单据后生成新文件。</p>}
     {action.feedback}{action.conflict && <Button icon={RefreshCw} onClick={reload}>重新读取最新版本</Button>}
     <div className="document-wizard-step" hidden={stage !== 'details'}>
     <nav className="document-details-progress" aria-label="单票资料完成情况">{readiness.map((item) => <button type="button" key={item.section} disabled={busy || blocked} data-incomplete={item.issues.length > 0} onClick={() => locate(item)}><strong>{item.label}</strong><span>{item.pending ? '正在读取商品…' : item.issues.length ? `待补 ${item.issues.length} 项` : '已填齐'}</span></button>)}</nav>
@@ -544,7 +562,7 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
       {!readOnly && !hasFile && <div className="document-footer-actions"><Button type="button" icon={ArrowRight} disabled={busy || profiles.isFetching || profiles.isError || profileIds.length === 0} onClick={adoptProfiles}>采用所选资料</Button><span className="mapping-help">商品资料随引用采用；其他资料先填入单票字段，遇到不同值时请人工处理。</span></div>}{profileNotice && <p className="form-note" role="status">{profileNotice}</p>}
       {fieldGroups.filter((group) => group.title !== '收件地址').map((group, index) => <details className="document-field-group" key={group.title} open={index === 0 || undefined}><summary>{group.title}</summary><div className="document-form-grid">{group.fields.map(([key, label]) => <div className="field" key={key} data-document-field={key}><label htmlFor={`${id}-${key}`}>{label}{optionalFields.has(key!) ? '（可选）' : ''}</label><>{key === 'currency' && (automaticCurrency || mixedCurrencies) ? <><Input id={`${id}-${key}`} value={automaticCurrency ? ({ USD: '美元（USD）', GBP: '英镑（GBP）', EUR: '欧元（EUR）' })[automaticCurrency] : '请按币种拆分出单'} readOnly aria-describedby={`${id}-currency-help`} /><p id={`${id}-currency-help`} className={`mapping-help${mixedCurrencies ? ' error-note' : ''}`}>{mixedCurrencies ? '本票 FBA 所属国家对应多个币种，请按币种拆分；系统不自动换汇。' : '根据 FBA 所属国家自动确定，无需填写。'}</p></> : <DocumentField id={`${id}-${key}`} fieldKey={key!} value={fields[key!] || ''} disabled={busy || readOnly || hasFile} onValueChange={(value) => updateField(key!, value)} services={services} servicesLoading={!channelReferences.length && fieldOptions.isFetching} servicesError={!channelReferences.length && fieldOptions.isError} retryServices={() => void fieldOptions.refetch()} serviceHelp={channelReferences.length ? '已引用渠道若维护服务范围，所填服务须在范围内。' : '按实际发运要求选择或填写服务，无需先建立渠道资料。'} />}</></div>)}</div></details>)}
       </section>
-      <DocumentAddressSection sectionId={sectionId('address')} documentId={record.id} members={data.members} fields={fields} reference={addressReference} profiles={profiles.data ?? []} loading={profiles.isPending || profiles.isFetching} error={profiles.isError ? profiles.error : undefined} retry={() => void profiles.refetch()} disabled={busy || blocked || Boolean(recoverableDraft) || readOnly || hasFile || generationRunning} dirty={dirty} conflict={sourceAddressConflict}
+      <DocumentAddressSection sectionId={sectionId('address')} documentId={record.id} members={data.members} fields={fields} reference={addressReference} disabled={busy || blocked || Boolean(recoverableDraft) || readOnly || hasFile || generationRunning} conflict={sourceAddressConflict}
         adopt={(next, reference) => { setFields(next); setAddressReference(reference); setAddressReconfirmed(false); }}
         edit={(key, value) => { setFields((current) => ({ ...current, [key]: value, addressConfirmed: 'false', addressConfirmationReason: '', addressSelectionMode: 'manual', addressSourceLabel: '本票手工地址' })); setAddressReference(null); setAddressReconfirmed(false); }}
         confirm={(checked) => { updateField('addressConfirmed', checked ? 'true' : 'false'); setAddressReconfirmed(checked); }} reason={(value) => updateField('addressConfirmationReason', value)} />
@@ -653,7 +671,7 @@ function ProductAdjustments({ documentId, version, data, products, keyError, pro
     if (!missingPrefixes) return;
     setExpanded(true); setExpandedProducts((current) => new Set([...current, ...missingPrefixes.split('\n')]));
   }, [missingPrefixes]);
-  return <details className="document-field-group document-product-adjustments" data-section-editor="products" open={expanded} onToggle={(event) => { if (event.target === event.currentTarget) setExpanded(event.currentTarget.open); }}><summary>本票商品申报调整 · {products.length} 个{invoiceV2 ? '输出代表商品' : '完整商品身份'}</summary><p className="mapping-help">{invoiceV2 ? '仅需补齐输出代表商品的申报资料，箱内其他商品保留实际身份与数量。有效售价、币种和标准箱规采用领星快照；售价缺失或无效时可补充本票售价，申报单价始终自动计算。' : '默认采用本票引用的商品资料。以下输入只修改当前单据快照，保存时沿用本次调整原因；需要更新公共资料时，请进入单据资料维护。'}</p>{keyError && <p className="form-note error-note" role="alert">{keyError}</p>}{products.map((product) => {
+  return <details className="document-field-group document-product-adjustments" data-section-editor="products" open={expanded} onToggle={(event) => { if (event.target === event.currentTarget) setExpanded(event.currentTarget.open); }}><summary>本票商品申报调整 · {products.length} 个{invoiceV2 ? '输出代表商品' : '完整商品身份'}</summary><p className="mapping-help">{invoiceV2 ? '仅需补齐输出代表商品的申报资料，箱内其他商品保留实际身份与数量。标准箱规采用领星快照；申报单价固定为每件 2.00，沿用本票币种，无需补充售价。' : '默认采用本票引用的商品资料。以下输入只修改当前单据快照，保存时沿用本次调整原因；需要更新公共资料时，请进入单据资料维护。'}</p>{keyError && <p className="form-note error-note" role="alert">{keyError}</p>}{products.map((product) => {
     const profile = findProductProfile(profileReferences, product);
     const value = (key: string) => fields[product.prefix + key] ?? profileValue(profile, key);
     const currency = documentProductCurrency(value('currency'), fields.currency);

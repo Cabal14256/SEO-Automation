@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
-import { withDocumentInvoiceDefaults, type DocumentExportReference, type DocumentRevisionData } from '@scm/contracts';
+import { DOCUMENT_INVOICE_UNIT_PRICE, withDocumentInvoiceDefaults, type DocumentExportReference, type DocumentRevisionData } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { fileIndex, operationAudit } from '../../db/schema.js';
 import { BatchError, freezeGroupForExport, requireBatchActor, type BatchTx } from '../batches/service.js';
@@ -8,7 +8,8 @@ import { publishReportFile } from '../batches/report-service.js';
 import { checkedFileBytes } from '../imports/service.js';
 import { documentAutomationJobs, documentInvoiceBundles } from './automation-schema.js';
 import { automationOperationId } from './automation-engine.js';
-import { createDocumentBundleWorkbook, type BundleSelection, type BundleWorkbookInput } from './bundle-workbook.js';
+import type { BundleSelection, BundleWorkbookInput } from './bundle-workbook.js';
+import { createDocumentBundleArchive, documentBundleInvoiceBytes } from './bundle-archive.js';
 import { documentDigest } from './domain.js';
 import { documentExports, documents } from './schema.js';
 import { lockedDocument, validateDocumentInTx } from './service.js';
@@ -18,7 +19,7 @@ type Job = typeof documentAutomationJobs.$inferSelect;
 type File = typeof fileIndex.$inferSelect;
 type Source = { itemId: string; documentId: string; version: number; reference: DocumentExportReference; data: DocumentRevisionData; file: File;
   existingExportId: string | null; selections?: BundleSelection[] };
-const bundleName = (id: string) => `整批发票-${id.slice(0, 8)}.xlsx`;
+const bundleName = (id: string) => `整批发票-${id.slice(0, 8)}.zip`;
 const scopeKey = (items: StoredDocumentAutomationItem[]) => documentDigest(items.map((item) => [item.id, item.documentId, item.documentVersion]).sort());
 function assertReference(reference: DocumentExportReference, record: { status: string; currentRevisionId: string | null }, revision: { id: string; version: number; data: DocumentRevisionData }) {
   const template = revision.data.templateReference;
@@ -26,7 +27,7 @@ function assertReference(reference: DocumentExportReference, record: { status: s
     || reference.generationRulesVersion !== revision.data.generationRulesVersion
     || !template || template.templateId !== reference.templateId || template.version !== reference.templateVersion || template.sha256 !== reference.templateSha256
     || documentDigest(revision.data.members.map((member) => member.source)) !== documentDigest(reference.sources)) {
-    throw new BatchError('DOCUMENT_EXPORT_STALE', 409, '整批工作簿的某票修订、来源或模板已变化，请建立更正单据。');
+    throw new BatchError('DOCUMENT_EXPORT_STALE', 409, '整批文件的某票修订、来源或模板已变化，请建立更正单据。');
   }
 }
 /** Bundle access always checks every member, including access through a historical per-document export. */
@@ -35,18 +36,18 @@ export async function assertDocumentBundleValidInTx(tx: BatchTx, jobId: string, 
   const [job] = await tx.select().from(documentAutomationJobs).where(eq(documentAutomationJobs.id, jobId));
   if (!job || job.deletedAt && !options.historicalExport) throw new BatchError('NOT_FOUND', 404, '自动出单任务不存在或已删除。');
   const [bundle] = await tx.select().from(documentInvoiceBundles).where(eq(documentInvoiceBundles.jobId, jobId)).for('share');
-  if (!bundle) throw new BatchError('FILE_UNAVAILABLE', 503, '整批工作簿的范围映射缺失，请联系管理员。');
+  if (!bundle) throw new BatchError('FILE_UNAVAILABLE', 503, '整批文件的范围映射缺失，请联系管理员。');
   if (options.archiveOnly) {
     const published = await tx.select().from(documentExports).where(and(eq(documentExports.fileId, bundle.fileId), eq(documentExports.status, 'completed')));
     if (!bundle.references.length || bundle.references.some((reference) => !published.some((item) => documentDigest(item.reference) === documentDigest(reference)))) {
-      throw new BatchError('FILE_UNAVAILABLE', 503, '历史工作簿的发布引用不完整，请联系管理员。');
+      throw new BatchError('FILE_UNAVAILABLE', 503, '历史文件的发布引用不完整，请联系管理员。');
     }
     return bundle;
   }
   for (const reference of [...bundle.references].sort((left, right) => left.documentId.localeCompare(right.documentId))) {
     const { record, revision } = await lockedDocument(tx, reference.documentId, actorId); assertReference(reference, record, revision);
     const validation = await validateDocumentInTx(tx, reference.documentId, actorId);
-    if (!validation.valid) throw new BatchError('DOCUMENT_EXPORT_STALE', 409, '整批工作簿的某票资料或来源已失效，请先核对更正。', validation.issues);
+    if (!validation.valid) throw new BatchError('DOCUMENT_EXPORT_STALE', 409, '整批文件的某票资料或来源已失效，请先核对更正。', validation.issues);
   }
   return bundle;
 }
@@ -54,15 +55,27 @@ export async function documentBundleValidity(jobId: string, actorId: string) {
   try { await db.transaction((tx) => assertDocumentBundleValidInTx(tx, jobId, actorId)); return { valid: true, invalidReason: null }; }
   catch (error) { if (error instanceof BatchError && [409, 422, 503].includes(error.status)) return { valid: false, invalidReason: error.message }; throw error; }
 }
-export async function readDocumentBundle(jobId: string, actorId: string, options: { historicalExport?: boolean } = {}) {
-  const file = await db.transaction(async (tx) => {
+export async function readDocumentBundle(jobId: string, actorId: string, options: { historicalExport?: boolean; documentId?: string } = {}) {
+  const result = await db.transaction(async (tx) => {
     const [job] = await tx.select().from(documentAutomationJobs).where(eq(documentAutomationJobs.id, jobId));
-    if (!job || job.deletedAt && !options.historicalExport || job.mode !== 'single_workbook' || job.bundle?.status !== 'completed' || !job.bundle.fileId) throw new BatchError('NOT_FOUND', 404, '整批工作簿尚未成功发布或任务已删除。');
+    if (!job || job.deletedAt && !options.historicalExport || job.mode !== 'single_workbook' || job.bundle?.status !== 'completed' || !job.bundle.fileId) throw new BatchError('NOT_FOUND', 404, '整批文件尚未成功发布或任务已删除。');
     const bundle = await assertDocumentBundleValidInTx(tx, jobId, actorId, { ...options, archiveOnly: true });
     const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, bundle.fileId));
-    if (!file || file.id !== job.bundle.fileId) throw new BatchError('FILE_UNAVAILABLE', 503, '整批工作簿归档缺失，请联系管理员。'); return file;
+    if (!file || file.id !== job.bundle.fileId) throw new BatchError('FILE_UNAVAILABLE', 503, '整批文件归档缺失，请联系管理员。'); return { file, sheets: bundle.sheets, references: bundle.references };
   });
-  return { file, bytes: await checkedFileBytes(file) };
+  const bytes = await checkedFileBytes(result.file);
+  if (!options.documentId || result.file.mimeType !== 'application/zip') return { ...result, bytes };
+  const sheets = result.sheets.filter((sheet) => sheet.documentIds.includes(options.documentId!));
+  if (sheets.length !== 1 || !sheets[0]!.fileName || sheets[0]!.documentIds.length !== 1) throw new BatchError('FILE_UNAVAILABLE', 503, '整批压缩包的单票文件映射缺失或不完整。');
+  const selections = sheets.flatMap((sheet) => sheet.ranges.filter((range) => range.documentId === options.documentId).map((range) => ({ ...range, sheetName: sheet.name, fileName: sheet.fileName, fileSha256: sheet.fileSha256 })));
+  if (!selections.length) throw new BatchError('FILE_UNAVAILABLE', 503, '整批压缩包缺少本票明细范围映射。');
+  let invoiceBytes: Buffer;
+  try { invoiceBytes = documentBundleInvoiceBytes({ documentId: options.documentId, bytes, selections }); }
+  catch (error) { throw new BatchError('FILE_UNAVAILABLE', 503, error instanceof Error ? error.message : '整批压缩包的单票文件读取失败。'); }
+  const sha256 = createHash('sha256').update(invoiceBytes).digest('hex'), reference = result.references.find((reference) => reference.documentId === options.documentId);
+  if (!reference) throw new BatchError('FILE_UNAVAILABLE', 503, '整批压缩包缺少本票发布引用。');
+  if (reference?.invoiceFileName && reference.invoiceFileName !== sheets[0]!.fileName || reference?.invoiceFileSha256 && reference.invoiceFileSha256 !== sha256) throw new BatchError('FILE_UNAVAILABLE', 503, '整批压缩包的单票 Excel 文件与发布引用不一致。');
+  return { ...result, bytes: invoiceBytes, file: { ...result.file, originalName: sheets[0]!.fileName!, mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', byteSize: invoiceBytes.length, sha256 } };
 }
 
 /** A complete second preflight. No file is rendered or published while even one ticket is blocked. */
@@ -95,18 +108,22 @@ export async function preflightDocumentBundle(job: Job): Promise<{ sources: Sour
         const template = revision.data.templateReference;
         if (!template) throw new BatchError('DOCUMENT_TEMPLATE_REQUIRED', 422, '请选择本票有效模板。');
         const reference: DocumentExportReference = { documentId: record.id, revisionId: revision.id, revisionVersion: revision.version, templateId: template.templateId,
-          templateVersion: template.version, templateSha256: template.sha256, sources: revision.data.members.map((member) => member.source), generationRulesVersion: revision.data.generationRulesVersion, bundleJobId: job.id };
+          templateVersion: template.version, templateSha256: template.sha256, sources: revision.data.members.map((member) => member.source), generationRulesVersion: revision.data.generationRulesVersion, pricingRule: 'fixed-2', bundleJobId: job.id };
         const exports = await tx.select().from(documentExports).where(sql`${documentExports.reference}->>'documentId' = ${record.id}`).orderBy(desc(documentExports.createdAt)).for('share');
         const existing = exports.find((entry) => entry.fileId && entry.status === 'completed');
         if (exports.some((entry) => ['queued', 'running'].includes(entry.status))) throw new BatchError('DOCUMENT_EXPORT_BUSY', 409, '本票已有生成任务，请等待结束后整批续跑。');
         let fileId = template.fileId, selections: BundleSelection[] | undefined;
         if (existing?.fileId) {
           if (existing.reference.generationRulesVersion !== 'v2') throw new BatchError('DOCUMENT_GENERATION_UPGRADE_REQUIRED', 422, '已有文件使用旧版发票规则，请建立更正后再生成整批文件；不会修改旧文件。');
+          if (existing.reference.pricingRule !== 'fixed-2') throw new BatchError('DOCUMENT_PRICING_UPGRADE_REQUIRED', 422, '已有文件使用历史申报价格规则，请建立更正后按每件 2 元生成整批文件。');
           assertReference(existing.reference, record, revision); fileId = existing.fileId;
           if (existing.reference.bundleJobId) {
             const old = await assertDocumentBundleValidInTx(tx, existing.reference.bundleJobId, job.createdBy, { historicalExport: true });
-            selections = old.sheets.flatMap((sheet) => sheet.ranges.filter((range) => range.documentId === record.id).map((range) => ({ ...range, sheetName: sheet.name })));
+            selections = old.sheets.flatMap((sheet) => sheet.ranges.filter((range) => range.documentId === record.id).map((range) => ({ ...range, sheetName: sheet.name, fileName: sheet.fileName, fileSha256: sheet.fileSha256 })));
             if (!selections.length) throw new BatchError('DOCUMENT_EXPORT_STALE', 409, '既有整批文件缺少本票范围映射，请核对历史文件。');
+            if (existing.reference.invoiceFileName && selections.some((selection) => selection.fileName !== existing.reference.invoiceFileName)
+              || existing.reference.invoiceFileSha256 && selections.some((selection) => selection.fileSha256 && selection.fileSha256 !== existing.reference.invoiceFileSha256)) throw new BatchError('DOCUMENT_EXPORT_STALE', 409, '既有整批文件的单票文件名或哈希与发布引用不一致。');
+            if (existing.reference.invoiceFileSha256) selections = selections.map((selection) => ({ ...selection, fileSha256: existing.reference.invoiceFileSha256 }));
           }
         }
         const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, fileId));
@@ -131,12 +148,17 @@ export async function publishDocumentBundle(job: Job, sources: Source[]) {
     let bytes = cache.get(source.file.id); if (!bytes) { bytes = await checkedFileBytes(source.file); cache.set(source.file.id, bytes); }
     const fields = withDocumentInvoiceDefaults(source.data.fields, source.data.members);
     const expectedHeaders = Object.fromEntries(Object.entries(DOCUMENT_HEADER_FIELDS).map(([key, address]) => [address, key === 'currency' ? ({ USD: '美元', EUR: '欧元', GBP: '英镑' } as Record<string, string>)[fields.currency ?? ''] ?? null : fields[key] ?? null]));
-    inputs.push({ documentId: source.documentId, bytes: source.existingExportId ? bytes : await createWorkbook(source.data, bytes, automationOperationId(job.id, source.itemId, 'bundle-export')), selections: source.selections, expectedHeaders });
+    inputs.push({ documentId: source.documentId, bytes: source.existingExportId ? bytes : await createWorkbook(source.data, bytes, automationOperationId(job.id, source.itemId, 'bundle-export')), selections: source.selections, expectedHeaders, expectedUnitPrice: Number(DOCUMENT_INVOICE_UNIT_PRICE) });
   }
-  const workbook = await createDocumentBundleWorkbook(inputs), originalName = bundleName(job.id);
+  const workbook = await createDocumentBundleArchive(inputs), originalName = bundleName(job.id);
+  for (const source of sources) {
+    const sheet = workbook.sheets.find((sheet) => sheet.documentIds.includes(source.documentId));
+    if (!sheet?.fileName || !sheet.fileSha256) throw new BatchError('FILE_UNAVAILABLE', 503, '整批压缩包缺少本票文件名或哈希映射，文件未发布。');
+    source.reference = { ...source.reference, invoiceFileName: sheet.fileName, invoiceFileSha256: sheet.fileSha256 };
+  }
   let published = false;
   try {
-    await publishReportFile({ bytes: workbook.bytes, originalName, mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', createdBy: job.createdBy }, async (file) => {
+    await publishReportFile({ bytes: workbook.bytes, originalName, mimeType: 'application/zip', createdBy: job.createdBy }, async (file) => {
       await db.transaction(async (tx) => {
         const [current] = await tx.select().from(documentAutomationJobs).where(eq(documentAutomationJobs.id, job.id)).for('update');
         if (!current || current.deletedAt || current.mode !== 'single_workbook') throw new BatchError('VERSION_CONFLICT', 409, '整批任务状态已变化，文件未发布。');
@@ -152,12 +174,12 @@ export async function publishDocumentBundle(job: Job, sources: Source[]) {
         const items = structuredClone(current.items);
         for (const source of sources) {
           const item = items.find((entry) => entry.id === source.itemId)!;
+          const exportId = automationOperationId(job.id, item.id, 'bundle-export');
+          await tx.insert(documentExports).values({ id: exportId, operationId: exportId, requestHash: documentDigest(source.reference), reference: source.reference, status: 'completed', fileId: file.id, createdBy: job.createdBy, completedAt: new Date() });
           if (!source.existingExportId) {
-            const exportId = automationOperationId(job.id, item.id, 'bundle-export');
-            await tx.insert(documentExports).values({ id: exportId, operationId: exportId, requestHash: documentDigest(source.reference), reference: source.reference, status: 'completed', fileId: file.id, createdBy: job.createdBy, completedAt: new Date() });
             await tx.update(documents).set({ status: 'pending_review', updatedAt: new Date() }).where(eq(documents.id, source.documentId));
-            item.exportId = exportId; item.fileId = file.id;
-          } else { item.exportId = source.existingExportId; item.fileId = source.file.id; }
+          }
+          item.exportId = exportId; item.fileId = file.id;
           item.status = 'completed'; item.stage = 'done'; item.error = null;
         }
         const groups = new Map<string, string>();
@@ -167,8 +189,8 @@ export async function publishDocumentBundle(job: Job, sources: Source[]) {
         }
         for (const [groupId, confirmationId] of [...groups].sort(([left], [right]) => left.localeCompare(right))) await freezeGroupForExport(tx, groupId, confirmationId, job.createdBy);
         const completedAt = new Date();
-        await tx.update(documentAutomationJobs).set({ items, status: 'completed', phase: 'completed', bundle: { status: 'completed', fileId: file.id, fileName: originalName, sheetCount: workbook.sheets.length, completedAt: completedAt.toISOString(), error: null }, error: null, completedAt, updatedAt: completedAt, version: sql`${documentAutomationJobs.version}+1` }).where(eq(documentAutomationJobs.id, job.id));
-        await tx.insert(operationAudit).values({ id: randomUUID(), action: 'document.bundle.publish', targetId: job.id, actorUserId: job.createdBy, requestHash: file.sha256, details: { fileId: file.id, documents: sources.map((source) => source.documentId).join(','), sheetCount: String(workbook.sheets.length) } });
+        await tx.update(documentAutomationJobs).set({ items, status: 'completed', phase: 'completed', bundle: { status: 'completed', fileId: file.id, fileName: originalName, fileCount: workbook.fileCount, sheetCount: workbook.sheets.length, completedAt: completedAt.toISOString(), error: null }, error: null, completedAt, updatedAt: completedAt, version: sql`${documentAutomationJobs.version}+1` }).where(eq(documentAutomationJobs.id, job.id));
+        await tx.insert(operationAudit).values({ id: randomUUID(), action: 'document.bundle.publish', targetId: job.id, actorUserId: job.createdBy, requestHash: file.sha256, details: { fileId: file.id, documents: sources.map((source) => source.documentId).join(','), fileCount: String(workbook.fileCount), sheetCount: String(workbook.sheets.length) } });
       });
       published = true;
     });

@@ -18,6 +18,24 @@ async function load(bytes: Buffer) { const book = new ExcelJS.Workbook(); await 
 const bytes = async (book: ExcelJS.Workbook) => Buffer.from(await book.xlsx.writeBuffer());
 
 describe('physical XLSX export', () => {
+  it('colors each FBA consistently across box rows, product rows and populated check templates', async () => {
+    const manifest = fixture(3);
+    manifest.source.boxes[1]!.fba = 'FBASECOND';
+    manifest.source.fingerprint = physicalSourceFingerprint(manifest.source);
+    const confirmation: PhysicalConfirmation = { id: randomUUID(), groupId: manifest.source.groupId, m2ConfirmationId: manifest.m2ConfirmationId, m3Version: 2, sourceFingerprint: manifest.source.fingerprint,
+      snapshot: { source: manifest.source, entries: manifest.entries.map((entry) => ({ ...entry, status: 'consistent' })), ruleVersion: PHYSICAL_RULE_VERSION }, createdBy: '核对管理员', createdAt: '2026-10-18T11:00:00.000Z' };
+    const book = await load(await createPhysicalWorkbook([confirmation])), boxes = book.getWorksheet('实物箱明细')!, items = book.getWorksheet('箱内商品')!;
+    const first = boxes.getCell('A2').fill, second = boxes.getCell('A3').fill;
+    expect(first).toMatchObject({ type: 'pattern', pattern: 'solid' }); expect(second).not.toEqual(first);
+    expect(boxes.getCell('AF2').fill).toEqual(first); expect(boxes.getCell('A4').fill).toEqual(first);
+    expect(items.getCell('A2').fill).toEqual(first); expect(items.getCell('M3').fill).toEqual(first);
+    expect(items.getCell('A4').fill).toEqual(second); expect(items.getCell('A6').fill).toEqual(first);
+    expect(boxes.getCell('A1').fill).toMatchObject({ fgColor: { argb: 'FF24344D' } });
+    expect(book.getWorksheet('版本与核对记录')!.getCell('A2').fill).not.toMatchObject({ type: 'pattern', pattern: 'solid' });
+    const template = await createPhysicalTemplate(manifest), sheet = (await load(template)).getWorksheet('逐箱核对')!;
+    expect(sheet.getCell('A2').fill).toEqual(first); expect(sheet.getCell('AA3').fill).toEqual(second);
+    expect(await parsePhysicalTemplate(template, manifest)).toEqual(manifest.entries);
+  });
   it('writes one row per actual box and a separate product sheet without duplicated box weights', async () => {
     const manifest = fixture(), confirmation: PhysicalConfirmation = { id: randomUUID(), groupId: manifest.source.groupId, m2ConfirmationId: manifest.m2ConfirmationId, m3Version: 2, sourceFingerprint: manifest.source.fingerprint,
       snapshot: { source: manifest.source, entries: manifest.entries.map((entry) => ({ ...entry, status: 'consistent' })), ruleVersion: PHYSICAL_RULE_VERSION }, createdBy: '核对管理员', createdAt: '2026-10-18T11:00:00.000Z' };

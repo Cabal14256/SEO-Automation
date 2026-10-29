@@ -1,17 +1,21 @@
 import { createHash } from 'node:crypto';
 import ExcelJS from 'exceljs';
-import { DOCUMENT_MAIN_HEADERS } from './workbook.js';
+import { applyDocumentAddressLayout, DOCUMENT_MAIN_HEADERS } from './workbook.js';
 import { DocumentWorkbookError } from './workbook-errors.js';
+import { createFbaRowFill } from '../../xlsx-fba-fill.js';
 
 export type BundleRange = { documentId: string; startRow: number; endRow: number; boxes: number; actualQuantity: number };
-export type BundleSheet = { name: string; documentIds: string[]; rows: number; boxes: number; actualQuantity: number; ranges: BundleRange[] };
-export type BundleSelection = { sheetName: string; startRow: number; endRow: number; boxes: number; actualQuantity: number };
-export type BundleWorkbookInput = { documentId: string; bytes: Buffer; selections?: BundleSelection[]; expectedHeaders?: Record<string, ExcelJS.CellValue> };
+export type BundleSheet = { name: string; fileName?: string; fileSha256?: string; documentIds: string[]; rows: number; boxes: number; actualQuantity: number; ranges: BundleRange[] };
+export type BundleSelection = { sheetName: string; fileName?: string; fileSha256?: string; startRow: number; endRow: number; boxes: number; actualQuantity: number };
+export type BundleWorkbookInput = { documentId: string; bytes: Buffer; selections?: BundleSelection[]; expectedHeaders?: Record<string, ExcelJS.CellValue>; expectedUnitPrice?: number };
 const digest = (value: unknown) => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
 const sum = (left: number, right: number) => { const value = left + right; if (!Number.isSafeInteger(value) || value < 0) throw new DocumentWorkbookError('整批箱数或实际数量超过安全整数范围。'); return value; };
 const integer = (value: ExcelJS.CellValue) => { if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new DocumentWorkbookError('原始发票缺少可核验的箱数或实际数量汇总。'); return value; };
 const rowValues = (sheet: ExcelJS.Worksheet, row: number) => Array.from({ length: 17 }, (_, index) => sheet.getCell(row, index + 1).value ?? null);
 const normalizedHeading = (value: ExcelJS.CellValue) => String(value ?? '').replace(/\s|\*/g, '');
+// XML readers normalize CRLF/CR to LF. Compare text using that same newline
+// convention while keeping numbers and all other field contents strict.
+const normalizedHeaderValue = (value: ExcelJS.CellValue | undefined) => typeof value === 'string' ? value.replace(/\r\n?/g, '\n') : value ?? '';
 function headerKey(sheet: ExcelJS.Worksheet) {
   return digest(Array.from({ length: 17 }, (_, row) => rowValues(sheet, row + 1).map((value, column) => row === 16 ? DOCUMENT_MAIN_HEADERS[column] : row === 15 && column >= 1 && column <= 3 || row === 14 && column >= 5 && column <= 7 ? null : value)));
 }
@@ -72,6 +76,7 @@ function addImages(book: ExcelJS.Workbook, source: ExcelJS.Worksheet, range: Bun
 export async function createDocumentBundleWorkbook(inputs: BundleWorkbookInput[]): Promise<{ bytes: Buffer; sheets: BundleSheet[] }> {
   if (!inputs.length || new Set(inputs.map((input) => input.documentId)).size !== inputs.length) throw new DocumentWorkbookError('整批发票范围为空或存在重复单据。');
   const output = new ExcelJS.Workbook(), sheets: BundleSheet[] = [], groups = new Map<string, { sheet: ExcelJS.Worksheet; metadata: BundleSheet }>();
+  const fillFba = createFbaRowFill();
   const expectedRows: Array<{ sheet: string; row: number; values: ExcelJS.CellValue[]; formats: string[]; height: number | undefined }> = [], expectedImages: ImageCheck[] = [];
   output.created = new Date('2026-10-25T00:00:00.000Z'); output.modified = output.created;
   for (const input of inputs) {
@@ -81,7 +86,7 @@ export async function createDocumentBundleWorkbook(inputs: BundleWorkbookInput[]
     for (const range of ranges) {
       const source = sourceBook.getWorksheet(range.sheetName);
       if (!source || range.startRow < 18 || range.endRow < range.startRow || range.endRow > source.rowCount) throw new DocumentWorkbookError('整批历史文件的单票明细范围无效。');
-      if (input.expectedHeaders && Object.entries(input.expectedHeaders).some(([address, value]) => (source.getCell(address).value ?? '') !== (value ?? ''))) throw new DocumentWorkbookError('已有发票表头与当前规则或保存资料不一致，请建立更正单据后生成整批文件。');
+      if (input.expectedHeaders && Object.entries(input.expectedHeaders).some(([address, value]) => normalizedHeaderValue(source.getCell(address).value) !== normalizedHeaderValue(value))) throw new DocumentWorkbookError('已有发票表头与当前规则或保存资料不一致，请建立更正单据后生成整批文件。');
       if (DOCUMENT_MAIN_HEADERS.some((label, index) => normalizedHeading(source.getCell(17, index + 1).value) !== label)) throw new DocumentWorkbookError('原始发票明细表头不属于当前受控制单格式。');
       integer(range.boxes); integer(range.actualQuantity);
       const key = headerKey(source);
@@ -94,7 +99,10 @@ export async function createDocumentBundleWorkbook(inputs: BundleWorkbookInput[]
       const firstRow = 18 + group.metadata.rows;
       for (let row = range.startRow; row <= range.endRow; row++) {
         if (!String(source.getCell(row, 1).value ?? '').trim()) throw new DocumentWorkbookError('原始发票明细中存在缺少货箱编号的空行。');
+        if (input.expectedUnitPrice !== undefined && source.getCell(row, 9).value !== input.expectedUnitPrice) throw new DocumentWorkbookError('已有发票申报单价与当前固定单价规则不一致，请建立更正单据后生成整批文件。');
         const targetRow = firstRow + row - range.startRow; copyRow(source, row, group.sheet, targetRow);
+        const fba = /^(FBA[A-Z0-9]+)U\d{6}(?:-\d+)?$/.exec(String(source.getCell(row, 1).value ?? '').trim().toUpperCase())?.[1];
+        fillFba(group.sheet.getRow(targetRow), fba, 17);
         expectedRows.push({ sheet: group.sheet.name, row: targetRow, values: rowValues(source, row), formats: Array.from({ length: 17 }, (_, column) => source.getCell(row, column + 1).numFmt), height: source.getRow(row).height });
       }
       addImages(sourceBook, source, range, output, group.sheet, firstRow, expectedImages);
@@ -105,11 +113,12 @@ export async function createDocumentBundleWorkbook(inputs: BundleWorkbookInput[]
   }
   for (const group of groups.values()) {
     group.sheet.getCell('B16').value = group.metadata.boxes; group.sheet.getCell('F15').value = group.metadata.actualQuantity;
-    group.sheet.pageSetup = { ...group.sheet.pageSetup, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, printArea: `A1:Q${17 + group.metadata.rows}`, printTitlesRow: '17:17' };
+    group.sheet.pageSetup = { ...group.sheet.pageSetup, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, printArea: `A1:Q${17 + group.metadata.rows}`, printTitlesRow: '1:17' };
+    applyDocumentAddressLayout(group.sheet);
   }
   const bytes = Buffer.from(await output.xlsx.writeBuffer()), verify = new ExcelJS.Workbook(); await verify.xlsx.load(bytes as unknown as Parameters<typeof verify.xlsx.load>[0]);
   if (verify.worksheets.length !== sheets.length) throw new DocumentWorkbookError('整批发票工作表回读数量不符。');
-  for (const sheet of sheets) { const written = verify.getWorksheet(sheet.name); if (!written || written.getCell('B16').value !== sheet.boxes || written.getCell('F15').value !== sheet.actualQuantity || written.pageSetup.printArea !== `A1:Q${17 + sheet.rows}`) throw new DocumentWorkbookError('整批发票汇总或打印范围回读不符。'); }
+  for (const sheet of sheets) { const written = verify.getWorksheet(sheet.name); if (!written || written.getCell('B16').value !== sheet.boxes || written.getCell('F15').value !== sheet.actualQuantity || written.pageSetup.printArea !== `A1:Q${17 + sheet.rows}` || written.pageSetup.printTitlesRow !== '1:17') throw new DocumentWorkbookError('整批发票汇总或打印范围回读不符。'); }
   for (const expected of expectedRows) {
     const written = verify.getWorksheet(expected.sheet)!;
     if (JSON.stringify(rowValues(written, expected.row)) !== JSON.stringify(expected.values) || written.getRow(expected.row).height !== expected.height || expected.formats.some((format, column) => written.getCell(expected.row, column + 1).numFmt !== format)) throw new DocumentWorkbookError('整批发票明细或格式回读不符。');

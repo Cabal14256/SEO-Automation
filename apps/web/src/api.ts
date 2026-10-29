@@ -87,7 +87,7 @@ function apiMessage(body: unknown, fallback: string): string {
   if (!isObject(body)) return fallback;
   if (isObject(body.error)) return apiMessage(body.error, fallback);
   const code = typeof body.code === 'string' ? body.code : body.error;
-  if (typeof code === 'string' && ['INVALID_WORKBOOK', 'FILE_TOO_LARGE', 'UNSUPPORTED_FILE_TYPE'].includes(code) && typeof body.message === 'string' && body.message) return body.message;
+  if (typeof code === 'string' && ['INVALID_WORKBOOK', 'FILE_TOO_LARGE', 'UNSUPPORTED_FILE_TYPE', 'VERSION_CONFLICT'].includes(code) && typeof body.message === 'string' && body.message) return body.message;
   if (typeof code === 'string' && errorMessages[code]) return errorMessages[code];
   if (typeof body.message === 'string' && body.message) return body.message;
   if (typeof body.error === 'string' && body.error) return body.error;

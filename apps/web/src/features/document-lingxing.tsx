@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowRight, ChevronRight, CircleAlert, CircleCheck, RefreshCw } from 'lucide-react';
-import type { DocumentLingxingPreview, DocumentRevisionData } from '@scm/contracts';
+import { documentInvoicePrice, type DocumentLingxingPreview, type DocumentRevisionData } from '@scm/contracts';
 import { ApiError } from '../api';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -24,10 +24,10 @@ const labels: Record<string, string> = {
   customsMode: '报关方式', clearanceMode: '清关方式', taxMode: '税务方式', tradeTerms: '贸易条款', remarks: '备注',
   unitPriceSourceLabel: '单价来源', salesPrice: 'Listing 普通售价', cartonQuantity: '标准箱规件数',
 };
-const productKeys = ['englishName', 'chineseName', 'material', 'hsCode', 'use', 'brand', 'model', 'unit', 'unitPrice', 'currency', 'salesLink'];
+const productKeys = ['englishName', 'chineseName', 'material', 'hsCode', 'use', 'brand', 'model', 'unit', 'salesLink'];
 const productIssueLabels: Record<string, string> = {
-  LISTING_PRICE_INVALID: '领星售价或币种缺失、无效，无法按售价的 20% 计算申报单价，请在领星维护后重新查询。',
-  LISTING_PRICE_UNAVAILABLE: '未取得可采用的领星售价，无法计算申报单价，请核对 Listing 资料与查询权限。',
+  LISTING_PRICE_INVALID: '领星售价或币种缺失、无效；本票仍按每件固定单价 2.00 申报。',
+  LISTING_PRICE_UNAVAILABLE: '未取得可采用的领星售价；本票仍按每件固定单价 2.00 申报。',
   CARTON_QUANTITY_UNAVAILABLE: '领星未返回有效的每箱件数，申报数量将回退为本箱全部商品的实际数量；混装请导出后核对。',
   LISTING_PRODUCT_IDENTITY_MISMATCH: '售价记录的店铺、MSKU、FNSKU 或本地 SKU 与本票商品不一致，未采用该售价。',
   LISTING_PRODUCT_AMBIGUOUS: '同一店铺和 MSKU 返回多条售价记录，未自动采用，请核对领星 Listing。',
@@ -95,24 +95,24 @@ export function DocumentLingxing({ documentId, version, data, disabledReason, on
   const querying = mutation.isPending && mutation.variables.phase === 'preview';
   const representatives = new Set(invoiceBoxPreview(data).flatMap(({ box, representative }) => representative ? [invoiceProductIdentity(box.sid, representative)] : []));
   const queryStatus = querying ? 'running' : preview ? preview.issues.length > 0 || preview.products.some((product) => representatives.has(invoiceProductIdentity(product.sid, product)) && product.issues.length > 0) ? 'partial' : 'completed' : mutation.isError && mutation.variables.phase === 'preview' ? 'failed' : null;
-  const priced = preview?.products.filter((product) => hasValue(product.data.unitPrice) && hasValue(product.data.currency)).length ?? 0;
+  const fixedPrice = documentInvoicePrice(data);
   return <section className="content-panel document-lingxing" aria-labelledby={`${id}-title`} aria-busy={mutation.isPending}>
     <div className="section-heading"><h3 id={`${id}-title`}>从领星补齐资料</h3><Button type="button" icon={RefreshCw} loading={querying} disabled={disabled} onClick={query}>{preview ? '重新查询领星资料' : '查询领星资料'}</Button></div>
-    <p className="mapping-help">按本票商品和店铺查询售价、标准箱规、申报资料与图片。申报单价按 Listing 普通售价 × 20% 自动计算，保留两位小数。先核对预览，再采用到当前单据。</p>
+    <p className="mapping-help">按本票商品和店铺查询标准箱规、申报资料与图片。申报单价固定为每件 2.00，沿用本票币种。先核对预览，再采用到当前单据。</p>
     {disabledReason && <p className="mapping-help">{disabledReason}</p>}
     {queryStatus && <LingxingProgress label="领星单据资料查询" status={queryStatus} startedAt={mutation.variables?.phase === 'preview' ? mutation.submittedAt : undefined} detail={querying ? '正在查询并整理领星商品、主体与图片资料，等待服务器返回并归档结果。' : queryStatus === 'failed' ? '本次查询未完成，请核对提示后重试。' : queryStatus === 'partial' ? '本次查询已结束，仍有资料需核对或补齐。' : '本次查询已结束，请核对结果后采用。'} />}
     {mutation.isError && <p className="form-note error-note" role="alert"><CircleAlert size={16} aria-hidden="true" />{messageOf(mutation.error)}{mutation.error instanceof ApiError && mutation.error.status === 409 ? ' 请重新读取单据，再查询最新资料。' : ' 可核对领星授权与资料后重试。'}</p>}
     {preview && <div className="document-lingxing-preview">
-      <p className="form-note" role="status"><CircleCheck size={16} aria-hidden="true" />已查询 {preview.products.length} 个商品身份 · {priced} 项返回单价与币种 · 当前单据 v{preview.documentVersion}</p>
+      <p className="form-note" role="status"><CircleCheck size={16} aria-hidden="true" />已查询 {preview.products.length} 个商品身份 · 固定申报单价 {fixedPrice.unitPrice} {fixedPrice.currency} / 件 · 当前单据 v{preview.documentVersion}</p>
       {preview.issues.length > 0 && <div className="document-lingxing-notices" aria-label="领星查询提示">{preview.issues.map((issue, index) => <p className="form-note error-note" key={`${issue.code}-${index}`}><CircleAlert size={16} aria-hidden="true" /><span>{issue.message}{issue.permission && <small>需开通权限：{issue.permission}</small>}</span></p>)}</div>}
       {preview.products.length === 0 ? <p className="mapping-help">本次没有返回商品资料，请检查商品映射和领星 API 权限。</p> : <div className="document-lingxing-products">{preview.products.map((product, index) => {
         const representative = representatives.has(invoiceProductIdentity(product.sid, product));
         const missing = representative ? productKeys.filter((key) => !hasValue(product.data[key])) : [];
         const hasImage = hasValue(product.data.imageBase64);
         return <details className="document-lingxing-product" key={`${product.sid}-${product.msku}-${product.fnsku}-${product.sku}-${index}`}>
-          <summary><span><ChevronRight size={14} aria-hidden="true" />{product.msku || product.sku || product.fnsku} <small>SID {product.sid} · {representative ? `输出代表商品 · ${productKeys.length - missing.length}/${productKeys.length} 项有值` : '箱内其他商品 · 不输出申报资料'} · {hasImage ? '图片已归档' : representative ? '图片待补齐' : '无需补充申报图片'}</small></span><span className="document-lingxing-price">申报单价 {valueText(product.data.unitPrice) || '缺失'} {valueText(product.data.currency) || '（币种缺失）'}<small>售价 {valueText(product.data.salesPrice) || '缺失'} × 20% · 箱规 {valueText(product.data.cartonQuantity) || '缺失，采用全箱实际数量'}</small>{hasValue(product.data.unitPriceSourceLabel) && <small>{valueText(product.data.unitPriceSourceLabel)}</small>}</span></summary>
+          <summary><span><ChevronRight size={14} aria-hidden="true" />{product.msku || product.sku || product.fnsku} <small>SID {product.sid} · {representative ? `输出代表商品 · ${productKeys.length - missing.length}/${productKeys.length} 项有值` : '箱内其他商品 · 不输出申报资料'} · {hasImage ? '图片已归档' : representative ? '图片待补齐' : '无需补充申报图片'}</small></span><span className="document-lingxing-price">固定申报单价 {fixedPrice.unitPrice} {fixedPrice.currency}<small>每件固定单价 · 箱规 {valueText(product.data.cartonQuantity) || '缺失，采用全箱实际数量'}</small></span></summary>
           <p className="mapping-help">MSKU：{product.msku || '—'} · FNSKU：{product.fnsku || '—'} · SKU：{product.sku || '—'}</p>
-          <PreviewValues values={product.data} />
+          <PreviewValues values={{ ...product.data, unitPrice: fixedPrice.unitPrice, currency: fixedPrice.currency, unitPriceSourceLabel: '每件固定单价' }} />
           <p className="mapping-help">{hasImage ? '商品图片已保存到资料快照。' : product.imageUrls.length ? `领星返回 ${product.imageUrls.length} 个图片地址，尚未取得可用于发票的图片。` : '领星未返回商品图片。'}</p>
           {missing.length > 0 && <p className="document-waiting">仍缺：{missing.map((key) => labels[key]).join('、')}</p>}
           {product.issues.map((issue, issueIndex) => <p className={`form-note${representative ? ' error-note' : ''}`} key={issueIndex}>{!representative && '箱内其他商品资料提示（不阻止本票生成）：'}{productIssueText(issue)}</p>)}
@@ -120,9 +120,9 @@ export function DocumentLingxing({ documentId, version, data, disabledReason, on
       })}</div>}
       {Object.values(preview.fields).some(hasValue) && <details className="document-field-group"><summary>单票候选资料</summary><PreviewValues values={preview.fields} /></details>}
       {preview.parties.length > 0 && <details className="document-field-group"><summary>备货主体候选 · {preview.parties.length} 项</summary><p className="mapping-help">此列表供核对公司备货主体，不会自动确定本票卖方主体。</p>{preview.parties.map((party, index) => <PreviewValues key={index} values={party} />)}</details>}
-      <p className="mapping-help">采用后更新售价、币种和标准箱规快照，按新规则自动计算申报单价，无需勾选价格确认。售价缺失或无效、币种冲突时须核对领星资料并重新查询。</p>
+      <p className="mapping-help">采用后更新商品资料和标准箱规快照。申报单价固定为每件 2.00，无需勾选价格确认或补充售价。</p>
       <div className="field document-reason"><label htmlFor={`${id}-reason`}>采用原因</label><Input id={`${id}-reason`} value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} disabled={disabled} /></div>
-      <div className="document-footer-actions"><Button type="button" icon={ArrowRight} variant="primary" loading={mutation.isPending && mutation.variables.phase === 'apply'} disabled={disabled || !reason.trim()} onClick={apply}>采用领星资料补齐空项</Button><span className="mapping-help">其他资料补齐空项；价格和箱规采用本次查询结果。采用后生成新修订，请重新校验。</span></div>
+      <div className="document-footer-actions"><Button type="button" icon={ArrowRight} variant="primary" loading={mutation.isPending && mutation.variables.phase === 'apply'} disabled={disabled || !reason.trim()} onClick={apply}>采用领星资料补齐空项</Button><span className="mapping-help">商品资料补齐空项，箱规采用本次查询结果。采用后生成新修订，请重新校验。</span></div>
     </div>}
   </section>;
 }

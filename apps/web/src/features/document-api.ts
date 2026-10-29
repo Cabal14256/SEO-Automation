@@ -65,11 +65,6 @@ async function file(path: string): Promise<Blob> {
 }
 
 export const documentApi = {
-  addresses: async (): Promise<DocumentProfile[]> => documentApi.profiles('address'),
-  createAddress: async (input: { operationId: string; key: string; data: Record<string, unknown>; reason: string }): Promise<DocumentProfile> => documentApi.writeProfile({ ...input, category: 'address' }),
-  updateAddress: async (id: string, input: { operationId: string; expectedVersion: number; key: string; data: Record<string, unknown>; reason: string }): Promise<DocumentProfile> => documentApi.writeProfile({ ...input, category: 'address', profileId: id }),
-  retireAddress: (id: string, input: { operationId: string; expectedVersion: number; reason: string }) => post(`/document-profiles/${pathId(id)}/retire`, input),
-  restoreAddress: (id: string, input: { operationId: string; expectedVersion: number; reason: string }) => post(`/document-profiles/${pathId(id)}/restore`, input),
   fieldOptions: async () => documentFieldOptionsSchema.parse(await request(`${base}/documents/field-options`)),
   previewProductImage: async (id: string, input: { expectedVersion: number; sid: number; msku: string; fnsku: string; sku: string; url: string }) => {
     const value = await post(`/documents/${pathId(id)}/product-image-preview`, documentProductImagePreviewInputSchema.parse(input));

@@ -14,6 +14,8 @@
 .document-delete-form h3 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
 .document-delete-form > p { font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
 .document-delete-form > .field, .document-delete-conflict { margin-top: 20px; }
+.document-delete-form .document-footer-actions { flex-wrap: wrap; }
+.document-delete-form .document-footer-actions > button { flex-shrink: 0; white-space: nowrap; }
 .document-delete-submit { color: #a32330; border-color: #c9858e; }
 .document-delete-submit:hover:not(:disabled) { color: #861c27; background: #fff2f1; }
 @media (max-width: 1100px) { .document-record-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

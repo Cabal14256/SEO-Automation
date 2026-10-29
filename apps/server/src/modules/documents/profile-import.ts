@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import ExcelJS from 'exceljs';
 import { and, eq } from 'drizzle-orm';
 import type { DocumentProfile, DocumentProfileCategory } from '@scm/contracts';
-import { documentAddressDataSchema, documentProfileCategorySchema, documentProfileWriteSchema } from '@scm/contracts';
+import { documentProfileCategorySchema, documentProfileWriteSchema } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { fileIndex } from '../../db/schema.js';
 import { BatchError } from '../batches/service.js';
@@ -44,7 +44,7 @@ export async function parseProfileImport(bytes: Buffer, existing: DocumentProfil
       return value === null || value === undefined ? '' : String(value).trim();
     };
     const categoryValue = cell(1), parsedCategory = documentProfileCategorySchema.safeParse(categoryValue), category = parsedCategory.success ? parsedCategory.data : 'product';
-    if (!parsedCategory.success) errors.push('资料类别须为 product、party、address、channel 或 tax');
+    if (!parsedCategory.success) errors.push('资料类别须为 product、party、channel 或 tax');
     const key = cell(2), rawVersion = cell(3), expectedVersion = rawVersion ? Number(rawVersion) : undefined;
     if (!key || key.length > 200) errors.push('资料键不能为空且不得超过 200 字');
     if (expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1)) errors.push('预期版本须为正整数');
@@ -52,12 +52,8 @@ export async function parseProfileImport(bytes: Buffer, existing: DocumentProfil
     const data: Record<string, unknown> = {};
     PROFILE_IMPORT_FIELDS.forEach((field, index) => { const value = cell(index + 4); if (value) data[field] = value; });
     if (!Object.keys(data).length) errors.push('资料内容不能为空');
-    if (category === 'address') {
-      const parsedAddress = documentAddressDataSchema.safeParse(data);
-      if (!parsedAddress.success) errors.push(...parsedAddress.error.issues.map((issue) => `${issue.path.join('.')}：${issue.message}`));
-    }
+    if (category === 'address') errors.push('收件地址以领星货件资料为准，不再导入本地地址簿');
     const old = existing.find((profile) => profile.category === category && profile.key === key);
-    if (category === 'address' && old?.status === 'retired') errors.push('地址已删除，请先在地址簿恢复后编辑');
     if (old && expectedVersion !== old.version || !old && expectedVersion !== undefined) errors.push('预期版本与当前档案不一致，请核对后重新预检');
     const changes = Object.keys({ ...old?.data, ...data }).filter((field) => documentDigest(old?.data[field] ?? null) !== documentDigest(data[field] ?? null));
     rows.push({ row, category, key, ...(expectedVersion ? { expectedVersion } : {}), data, errors, changes });
