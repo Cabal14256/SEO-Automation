@@ -1,0 +1,20 @@
+.ui-popover.scm-column-picker { display: flex; flex-direction: column; width: 320px; max-width: calc(100vw - 24px); max-height: min(640px, var(--radix-popover-content-available-height, calc(100dvh - 24px))); overflow: hidden; padding: 12px; }
+.scm-column-search { display: grid; gap: 7px; font-size: 13px; font-weight: 600; }
+.scm-column-search input { width: 100%; min-width: 0; min-height: 40px; padding: 9px 12px; border: 1px solid #858d7e; border-radius: 11px; background: var(--color-panel, #fff); color: var(--color-ink); font-size: 14px; }
+.scm-column-count { margin: 12px 0 7px; color: var(--color-muted); font-size: 12px; }
+.scm-column-search, .scm-column-count, .scm-column-actions { flex-shrink: 0; }
+.scm-column-list { display: grid; flex: 1 1 auto; min-height: 0; max-height: min(320px, 45dvh); overflow-y: auto; overscroll-behavior: contain; }
+.scm-column-option { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 8px; border-radius: 7px; font-size: 13px; cursor: pointer; }
+.scm-column-option:hover { background: #f0f4e8; }
+.scm-column-option input { width: 16px; height: 16px; margin: 0; accent-color: #526e2b; }
+.scm-column-option:has(input:disabled) { cursor: default; }
+.scm-column-option small { margin-left: auto; color: var(--color-muted); font-size: 12px; }
+.scm-column-actions { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--color-line); }
+.scm-column-actions button { min-height: 36px; padding: 6px; font-size: 12px; }
+.scm-record-menu-summary { padding: 12px; border-bottom: 1px solid var(--color-line); overflow-wrap: anywhere; font-size: 13px; }
+.scm-record-menu-summary p { margin: 6px 0 0; color: var(--color-muted); font-size: 12px; line-height: 1.6; }
+.scm-record-menu-summary .error-note { color: #b32936; }
+.scm-record-menu-actions { display: flex; flex-direction: column; gap: 2px; padding: 4px; }
+.scm-record-menu-actions [role="menuitem"] { justify-content: flex-start; width: 100%; min-height: 40px; padding: 9px 12px; border-radius: 7px; font-size: 13px; text-align: left; text-decoration: none; }
+.scm-record-menu-actions [role="menuitem"]:hover:not(:disabled):not([aria-disabled="true"]) { background: #f0f4e8; }
+@media (max-width: 768px) { .scm-column-option, .scm-record-menu-actions [role="menuitem"] { min-height: 44px; } }

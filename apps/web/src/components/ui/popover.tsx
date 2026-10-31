@@ -5,7 +5,7 @@ import { useControlDisabled } from './use-control-disabled';
 
 const PopoverContext = createContext<{ container: HTMLElement | null; setAnchor: (node: HTMLElement | null) => void; close: () => void } | null>(null);
 
-export function Popover({ open: controlledOpen, defaultOpen = false, onOpenChange, ...props }: ComponentPropsWithoutRef<typeof PopoverPrimitive.Root>) {
+export function Popover({ open: controlledOpen, defaultOpen = false, onOpenChange, portalContainer, ...props }: ComponentPropsWithoutRef<typeof PopoverPrimitive.Root> & { portalContainer?: HTMLElement | null }) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
   const [container, setContainer] = useState<HTMLElement | null>(null);
   const inherited = useControlDisabled();
@@ -13,7 +13,7 @@ export function Popover({ open: controlledOpen, defaultOpen = false, onOpenChang
   const setAnchor = useCallback((node: HTMLElement | null) => { setContainer(node?.closest('dialog') ?? null); inheritedRef(node); }, [inheritedRef]);
   const setOpen = (value: boolean) => { setUncontrolledOpen(value); onOpenChange?.(value); };
   useEffect(() => { if (inherited.disabled) { setUncontrolledOpen(false); onOpenChange?.(false); } }, [inherited.disabled]);
-  return <PopoverContext.Provider value={{ container, setAnchor, close: () => setOpen(false) }}>
+  return <PopoverContext.Provider value={{ container: portalContainer ?? container, setAnchor, close: () => setOpen(false) }}>
     <PopoverPrimitive.Root {...props} open={!inherited.disabled && (controlledOpen ?? uncontrolledOpen)} onOpenChange={setOpen} />
   </PopoverContext.Provider>;
 }
@@ -46,3 +46,4 @@ export const PopoverContent = forwardRef<ComponentRef<typeof PopoverPrimitive.Co
 );
 
 export const PopoverClose = PopoverPrimitive.Close;
+export const PopoverAnchor = PopoverPrimitive.Anchor;

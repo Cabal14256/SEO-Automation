@@ -8,6 +8,7 @@ import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { chromium, expect } from '@playwright/test';
 import * as c from '../../packages/contracts/dist/index.js';
+import { closeGridDetails, findGridRow } from '../shared/grid.mjs';
 
 // Isolated UI verification. Every API is a fictitious fixture; no ERP or database access.
 const root = resolve(import.meta.dirname, '../..');
@@ -119,18 +120,20 @@ try {
   const original = structuredClone(state.manualBodies[0]); assert.equal(original.demandIds.length, 2); assert.deepEqual(new Set(original.demandIds), new Set([demands[0].id, demands[1].id])); assert.equal(state.runs.length, 2);
   await page.reload(); await page.getByRole('dialog', { name: '建立发货批次', exact: true }).getByRole('button', { name: '重试原建立请求', exact: true }).click();
   await expect(page.getByRole('heading', { name: '发货批次已建立', exact: true })).toBeVisible(); assert.deepEqual(state.manualBodies[1], original); assert.equal(state.runs.length, 2); note('cross-month manual creation and lost-response refresh replay preserve operation and occurrence');
-  await page.goto(`${baseURL}/shipping`); await expect(page.getByRole('checkbox', { name: '选择货件 FBAMONTH3', exact: true })).toBeVisible(); await page.getByRole('checkbox', { name: '选择货件 FBAMONTH3', exact: true }).check(); await page.getByRole('button', { name: '加入已有批次', exact: true }).click();
+  await page.goto(`${baseURL}/shipping`); await expect(page.getByRole('button', { name: '展示过滤条件', exact: true })).toBeVisible();
+  const unassigned = await findGridRow(page, '发货明细表', 'FBAMONTH3'); await expect(unassigned.getByRole('checkbox', { name: '选择货件 FBAMONTH3', exact: true })).toBeVisible(); await unassigned.getByRole('checkbox', { name: '选择货件 FBAMONTH3', exact: true }).check(); await closeGridDetails(page, '发货明细表'); await page.getByRole('button', { name: '加入已有批次', exact: true }).click();
   const assignment = page.getByRole('dialog', { name: '安排发货批次', exact: true }); await assignment.getByRole('combobox', { name: '目标发货批次', exact: true }).click(); await page.getByRole('option', { name: /十月已有手工批次/ }).click();
   await assignment.getByRole('checkbox', { name: '已核对发货次和完整成员，确认追加所选需求。', exact: true }).check(); await assignment.getByRole('button', { name: '确认加入批次', exact: true }).click();
   await expect(assignment.getByRole('heading', { name: '需求已加入发货批次', exact: true })).toBeVisible(); assert.deepEqual(state.appendBodies[0].demandIds, [demands[2].id]); assert.equal(existing.run.sequence, 2); assert.equal(existing.tickets[0].members.length, 2); assert.equal(state.runs.length, 2); note('cross-month append keeps existing occurrence and ticket and sends new members only');
   await assignment.getByRole('button', { name: '完成，返回需求池', exact: true }).click();
-  const existingRow = page.getByRole('region', { name: '本次发货记录，可横向滚动', exact: true }).getByRole('row').filter({ hasText: '2026-10 第 2 次发货' }); await existingRow.getByRole('button', { name: '查看进度与处理', exact: true }).click();
+  const openExistingRun = async () => { await page.getByRole('button', { name: '本次发货与票号', exact: true }).click(); const runs = page.getByRole('dialog', { name: '本次发货与票号', exact: true }); const existingRow = await findGridRow(runs, '本次发货记录', '2026-10 第 2 次发货'); await existingRow.getByRole('button', { name: '查看进度与处理', exact: true }).click(); };
+  await openExistingRun();
   const panel = page.getByRole('dialog', { name: '本次发货表', exact: true }); await expect(panel.getByRole('button', { name: '继续后台整理', exact: true })).toBeVisible(); assert.equal(await panel.getByRole('button', { name: '修正清单并继续', exact: true }).count(), 0); assert.equal(await panel.getByRole('link', { name: '核对源行与导入资料', exact: true }).count(), 0); note('manual draft offers processing without import-source correction');
   await panel.getByRole('button', { name: '关闭本次发货表', exact: true }).click(); existing.run.membershipFrozenAt = now; existing.run.version++;
-  await page.reload(); await page.getByRole('region', { name: '本次发货记录，可横向滚动', exact: true }).getByRole('row').filter({ hasText: '2026-10 第 2 次发货' }).getByRole('button', { name: '查看进度与处理', exact: true }).click();
+  await page.reload(); await openExistingRun();
   await panel.getByRole('textbox', { name: '更正说明', exact: true }).fill('更正本次成员安排'); await panel.getByRole('button', { name: '建立发货次更正版本', exact: true }).click(); await expect(panel.getByRole('button', { name: '重试原更正请求', exact: true })).toBeVisible();
   await page.screenshot({ path: resolve(evidence, 'frozen-correction-desktop.png'), fullPage: true });
-  await page.reload(); await page.getByRole('region', { name: '本次发货记录，可横向滚动', exact: true }).getByRole('row').filter({ hasText: '2026-10 第 2 次发货' }).getByRole('button', { name: '查看进度与处理', exact: true }).click(); await panel.getByRole('button', { name: '重试原更正请求', exact: true }).click();
+  await page.reload(); await openExistingRun(); await panel.getByRole('button', { name: '重试原更正请求', exact: true }).click();
   await expect(panel.getByRole('button', { name: '重试原更正请求', exact: true })).toHaveCount(0); assert.deepEqual(state.correctionBodies[0], state.correctionBodies[1]); assert.equal(existing.run.sequence, 2); note('published occurrence correction survives refresh and replays original request');
   await panel.getByRole('button', { name: '关闭本次发货表', exact: true }).click();
   const legacyDemand = record(5, '2026-09-15', '2026-09-14', '2026-09-20'); demands.push(legacyDemand);

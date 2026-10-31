@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
 import { documentSchema, documentRevisionInputSchema, documentAutomationJobSchema, documentManualSalesPriceSchema, documentManualSalesPriceSources, documentInvoicePrice, withDocumentInvoiceDefaults } from '../../packages/contracts/dist/index.js';
 import { buildDocumentAutomationRequirements } from '../../apps/server/dist/modules/documents/automation-supplement.js';
+import { selectGridRow } from '../shared/grid.mjs';
 
 // Local memory fixtures use the real pure requirement and fixed-price helpers.
 // Archive references below are technical fixtures; no database or real API is used.
@@ -114,7 +115,13 @@ const wizard = () => page.getByRole('dialog', { name: '发票与单据向导', e
 const save = () => wizard().getByRole('button', { name: '保存草稿', exact: true });
 const pricePanel = (identity = shared) => wizard().getByLabel(identity.msku + ' 自动申报单价', { exact: true });
 const material = () => wizard().getByLabel('材质', { exact: true });
-async function openJob() { await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 30_000 }); await page.getByRole('region', { name: '最近自动出单任务', exact: true }).getByRole('button', { name: '查看进度', exact: true }).click(); await expect(jobDialog()).toBeVisible(); }
+async function openJob() {
+  await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.getByRole('button', { name: '自动出单任务', exact: true }).click();
+  const row = await selectGridRow(page, '最近自动出单任务', 0);
+  await row.getByRole('button', { name: '查看进度', exact: true }).click();
+  await expect(jobDialog()).toBeVisible();
+}
 async function openDocument(record, identity = shared) {
   await page.goto('/shipping?view=documents&documentId=' + record.id, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await wizard().getByRole('navigation', { name: '单据制作步骤', exact: true }).getByRole('button', { name: '单票资料', exact: true }).click();

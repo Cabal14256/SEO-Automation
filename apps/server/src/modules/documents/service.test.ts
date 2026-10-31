@@ -18,7 +18,8 @@ vi.mock('../imports/service.js', () => ({ checkedFileBytes: mocks.checked }));
 vi.mock('./sources.js', () => ({ loadDocumentSourceCandidates: mocks.sourceCandidates }));
 vi.mock('./domain.js', async (original) => ({ ...await original<typeof import('./domain.js')>(), validateDocumentData: () => [] }));
 vi.mock('./workbook.js', async (original) => ({ DOCUMENT_HEADER_FIELDS: (await original<typeof import('./workbook.js')>()).DOCUMENT_HEADER_FIELDS, validateWorkbookData: () => [], reviseDocumentProductFields: (_previous: DocumentRevisionData, next: DocumentRevisionData) => ({ ...next.fields }) }));
-import { appendDocumentRevisionInTx, applyDocumentAutomaticDefaultsInTx, cancelDocument, listDocumentCandidates, listDocuments, reviseDocumentInTx, serializeDocument } from './service.js';
+import { appendDocumentRevisionInTx, applyDocumentAutomaticDefaultsInTx, cancelDocument, documentCandidatesInTx, listDocumentCandidates, listDocuments, reviseDocumentInTx, serializeDocument } from './service.js';
+import { DocumentReadContext } from './read-context.js';
 import type { BatchTx } from '../batches/service.js';
 
 type Selection = { fields: unknown; table?: unknown; condition?: SQL; limit?: number; offset?: number; joined?: boolean };
@@ -52,7 +53,7 @@ function fixture(status = 'draft', stale = false) {
 // The real dependency projection runs; these reads represent a saved file whose
 // source is either still available (no members) or has disappeared (one member).
 function dependencyReads(value: ReturnType<typeof fixture>) {
-  selected.push([value.record], [value.revision], [value.record], [value.revision], []);
+  selected.push([value.record], [value.revision], []);
 }
 
 beforeEach(() => {
@@ -156,16 +157,32 @@ describe('document list effective-status pagination', () => {
 });
 
 describe('invoice M2 box sources', () => {
+  it('reuses the complete confirmed group while hydrating only each requested document member', async () => {
+    const groupId = randomUUID(), members = [0, 1].map((index) => ({ id: randomUUID(), version: 1, snapshot: { sid: 12, fba: `FBA${index}` } }));
+    const groups = [{ id: groupId, name: 'Shared', version: 2, confirmedVersion: 2, status: 'confirmed' }];
+    selected.push([{ id: randomUUID() }], groups, [{ id: randomUUID() }], groups);
+    mocks.confirmedGroup.mockResolvedValue({ members, shipments: members.map((member) => ({ demandId: member.id, revision: { id: randomUUID(), data: { sid: 12, fba: member.snapshot.fba, items: [], boxes: [], observedAt: '2026-10-24T00:00:00Z' } } })), codes: [], confirmation: { id: randomUUID(), groupVersion: 2 } });
+    mocks.sourceCandidates.mockResolvedValue({ addresses: [], products: [], issues: [], po: null });
+    const tx = { select: mocks.select } as unknown as BatchTx, context = new DocumentReadContext(tx);
+    const first = await documentCandidatesInTx(tx, 'admin', {}, { context, demandIds: [members[0]!.id] });
+    const second = await documentCandidatesInTx(tx, 'admin', {}, { context, demandIds: [members[1]!.id] });
+    expect(first.items.map((item) => item.demandId)).toEqual([members[0]!.id]);
+    expect(second.items.map((item) => item.demandId)).toEqual([members[1]!.id]);
+    expect(mocks.confirmedGroup).toHaveBeenCalledTimes(1); expect(mocks.sourceCandidates).toHaveBeenCalledTimes(2);
+    expect(selected).toEqual([]);
+  });
+
   it('selects exact occurrence members across import weeks and excludes unlinked members of a legacy source group', async () => {
     const runId = randomUUID(), groupId = randomUUID(), ids = [randomUUID(), randomUUID(), randomUUID()];
     const members = ids.map((id, index) => ({ id, version: 1, weekStartDate: index === 0 ? '2026-09-07' : '2026-10-19', weekEndDate: index === 0 ? '2026-09-13' : '2026-10-25', snapshot: { sid: 12, fba: `FBA${index}` } }));
-    selected.push([{ id: randomUUID(), shippingRunId: runId }], [{ id: runId, month: '2026-10', sequence: 3 }], ids.slice(0, 2).map((demandId) => ({ runId, groupId, demandId })), [{ id: groupId, name: 'Source', status: 'confirmed' }]);
+    selected.push([{ id: runId, month: '2026-10', sequence: 3 }], ids.slice(0, 2).map((demandId) => ({ runId, groupId, demandId })), [{ id: groupId, name: 'Source', status: 'confirmed' }]);
     mocks.confirmedGroup.mockResolvedValue({ members, shipments: members.map((demand) => ({ demandId: demand.id, revision: { id: randomUUID(), data: { sid: 12, fba: demand.snapshot.fba, items: [], boxes: [], observedAt: '2026-10-24T00:00:00Z' } } })), codes: [], confirmation: { id: randomUUID(), groupVersion: 1 } });
     mocks.sourceCandidates.mockResolvedValue({ addresses: [], products: [], issues: [], po: null });
     const result = await listDocumentCandidates('admin', { shippingRunId: runId });
     expect(result.items.map((item) => item.demandId)).toEqual(ids.slice(0, 2));
     expect(result.items.map((item) => item.weekStartDate)).toEqual(['2026-09-07', '2026-10-19']);
     expect(result.items.every((item) => item.shippingRunId === runId && item.shippingRunMonth === '2026-10' && item.shippingRunSequence === 3)).toBe(true);
+    expect(selections.some((selection) => selection.table === weeklyBatches)).toBe(false);
     expect(selected).toEqual([]);
   });
   it('builds candidates from confirmed M2 with no M3 lookup and freezes the archived PO beside original dimensions', async () => {

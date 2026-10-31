@@ -4,12 +4,13 @@ import type { BatchTx } from '../batches/service.js';
 import { resolveDocumentAddressCode, type DocumentAddressCodeCatalog } from './address-code.js';
 import { loadDocumentAddressCodeCatalog } from './address-code-catalog.js';
 import { loadDocumentSourceCandidates } from './sources.js';
+import type { DocumentReadContext } from './read-context.js';
 
 type Resolution = ReturnType<typeof resolveDocumentAddressCode>;
 const trusted = new Set(['listShipments', 'getShipmentDetails']);
 
 /** Re-read only an invoice's bound immutable files; never query Lingxing here. */
-export async function hydrateDocumentAddressCodeSourcesInTx(tx: BatchTx, data: DocumentRevisionData, verifyArchives = false): Promise<DocumentRevisionData> {
+export async function hydrateDocumentAddressCodeSourcesInTx(tx: BatchTx, data: DocumentRevisionData, verifyArchives = false, context?: DocumentReadContext): Promise<DocumentRevisionData> {
   if (data.generationRulesVersion !== 'v2') return data;
   const members = [];
   for (const member of data.members) {
@@ -17,7 +18,7 @@ export async function hydrateDocumentAddressCodeSourcesInTx(tx: BatchTx, data: D
     const candidates = addresses.filter((entry) => trusted.has(entry.source));
     const parsedFc = candidates.length > 0 && candidates.every((entry) => Object.hasOwn(entry.data, 'destinationFc'));
     if (parsedFc && !verifyArchives || !member.shipment?.snapshotIds?.length) { members.push(member); continue; }
-    const historical = await loadDocumentSourceCandidates(tx, member);
+    const historical = await (context ? loadDocumentSourceCandidates(tx, member, context) : loadDocumentSourceCandidates(tx, member));
     if (!historical) { members.push(member); continue; }
     members.push({ ...member, sourceCandidates: { ...member.sourceCandidates, ...historical } });
   }

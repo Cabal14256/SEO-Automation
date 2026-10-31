@@ -1,0 +1,38 @@
+.scm-data-grid { --grid-line: var(--color-line, #dddfd5); --grid-accent: #526e2b; --grid-group: #edf3e1; --grid-hover: #f0f4e8; --grid-control-line: #858d7e; min-width: 0; width: 100%; margin: 14px 0; color: var(--color-ink); font-variant-numeric: tabular-nums; }
+.scm-grid-navigation { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 9px 12px; border: 1px solid var(--grid-line); border-bottom: 0; border-radius: 11px 11px 0 0; background: var(--color-canvas, #f5f5f0); font-size: 12px; }
+.scm-grid-header-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; min-width: 0; max-width: 100%; margin-left: auto; }
+.shipping-workbench-grid .scm-grid-header-actions > button { min-height: 32px; padding: 5px 10px; font-size: 12px; }
+.scm-grid-row-controls, .scm-grid-row-controls label { display: flex; align-items: center; gap: 8px; }
+.scm-grid-row-controls { flex-wrap: wrap; }
+.scm-grid-row-controls button { min-height: 30px; padding: 5px 9px; border: 1px solid var(--grid-control-line); border-radius: 8px; background: var(--color-panel, #fff); color: var(--color-ink); font: inherit; cursor: pointer; }
+.scm-grid-row-controls button:hover:not(:disabled) { background: var(--grid-hover); border-color: var(--grid-accent); }
+.scm-grid-row-controls button[aria-haspopup] { font-weight: 600; }
+.scm-grid-row-controls button:disabled { opacity: .5; cursor: default; }
+.scm-grid-row-controls input { width: 62px; min-width: 0; min-height: 30px; padding: 4px 7px; border: 1px solid var(--grid-control-line); border-radius: 8px; background: var(--color-panel, #fff); color: var(--color-ink); font: inherit; font-variant-numeric: tabular-nums; accent-color: var(--grid-accent); }
+.scm-grid-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 18px; padding: 12px; border: 1px solid var(--grid-line); border-top: 0; border-radius: 0 0 11px 11px; background: var(--color-canvas, #f5f5f0); font-size: 12px; }
+.scm-grid-footer-start, .scm-grid-footer-end { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; min-width: 0; }
+.scm-grid-footer-end { margin-left: auto; justify-content: flex-end; }
+.scm-grid-announcement { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ui-popover.scm-grid-row-menu { width: max-content; min-width: 160px; max-width: min(360px, calc(100vw - 24px)); max-height: min(520px, 70dvh); overflow-y: auto; overscroll-behavior: contain; padding: 6px; }
+.scm-grid-row-menu [role="menuitem"] { display: flex; align-items: center; justify-content: flex-start; gap: 9px; width: 100%; min-height: 40px; padding: 9px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--color-ink); font: inherit; font-size: 13px; text-align: left; text-decoration: none; }
+.scm-grid-row-menu [role="menuitem"]:hover:not(:disabled), .scm-grid-row-menu [role="menuitem"]:focus-visible { background: var(--grid-hover, #f0f4e8); outline-offset: -2px; }
+.scm-grid-row-menu [role="menuitem"]:disabled { opacity: .5; }
+.scm-grid-row-menu [role="menuitem"] > svg { flex-shrink: 0; }
+.scm-grid-panning, .scm-grid-panning canvas { cursor: grabbing !important; user-select: none; }
+.scm-grid-canvas { position: relative; min-width: 0; width: 100%; max-width: 100%; overflow: hidden; border: 1px solid var(--grid-line); background: #fff; }
+.scm-grid-canvas:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+.scm-grid-canvas[aria-busy="true"]::before { position: absolute; top: 18px; left: 14px; content: '正在加载表格…'; color: var(--color-muted); font-size: 13px; }
+.scm-grid-cell-editor { position: absolute; z-index: 5; margin: 0; padding: 4px 9px; box-sizing: border-box; border: 2px solid var(--grid-accent); border-radius: 0; outline: 0; background: var(--color-panel, #fff); color: var(--color-ink, #0a0a0a); font-family: inherit; font-size: 13px; font-variant-numeric: tabular-nums; caret-color: var(--grid-accent); }
+.scm-grid-record { min-width: 0; padding: 12px; border: 1px solid var(--grid-line); border-top: 0; background: #fcfcf9; font-size: 13px; overflow-wrap: anywhere; }
+.scm-grid-dialog .scm-grid-record { padding: 0; border: 0; background: var(--color-panel, #fff); }
+.scm-grid-dialog.import-dialog-wide { width: min(1120px, calc(100vw - 32px)); }
+.scm-grid-record:empty { display: none; }
+.scm-grid-record .mapping-subtext { display: block; }
+.scm-grid-record .shipping-shipment-actions { flex-direction: row; flex-wrap: wrap; }
+.scm-grid-record .shipping-demand-record-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.scm-grid-record-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px 18px; }
+.scm-grid-record-field { min-width: 0; }
+.scm-grid-record-field > dt { margin-bottom: 5px; color: var(--color-muted); font-size: 12px; }
+.scm-grid-record-field > dd { margin: 0; }
+.scm-grid-empty { padding: 16px; margin: 0; border: 1px solid var(--grid-line); border-top: 0; color: var(--color-muted); font-size: 13px; }
+@media (max-width: 768px) { .scm-grid-navigation { align-items: flex-start; } .scm-grid-row-controls button, .scm-grid-row-controls input { min-height: 44px; } .scm-grid-record { padding: 12px 10px; } .scm-grid-footer-end { flex-basis: 100%; } .scm-grid-row-menu [role="menuitem"] { min-height: 44px; } }

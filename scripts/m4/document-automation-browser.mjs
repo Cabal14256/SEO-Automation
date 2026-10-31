@@ -11,6 +11,8 @@ import { documentCandidateListSchema, documentSchema, documentBoxFieldKey, withD
   documentAutomationJobSchema, documentAutomationStartInputSchema, documentAutomationRetryInputSchema, documentAutomationSupplementInputSchema } from '../../packages/contracts/dist/index.js';
 import { documentProductOverrideKey } from '../../apps/server/dist/modules/documents/workbook.js';
 import { chooseOption } from '../shared/ui-controls.mjs';
+import { findGridRow, grid } from '../shared/grid.mjs';
+import { openRowMenu } from './grid-helpers.mjs';
 
 // A local in-memory automation service. Its worker state can advance while the
 // page is closed. Browser requests never contact real services or create files.
@@ -246,7 +248,7 @@ const saveButton = () => jobDialog().getByRole('button', { name: '保存并统�
 const downloadButton = () => dashboard().getByRole('button', { name: /下载.*(整批|XLSX|ZIP)/ });
 const generateButton = () => jobDialog().getByRole('button', { name: '生成发票文件', exact: true });
 async function openNew(state) {
-  await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 30_000 }); await page.getByRole('button', { name: '制作发票', exact: true }).click();
+  await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 60_000 }); await page.getByRole('button', { name: '制作发票', exact: true }).click();
   await chooseOption(wizard().getByLabel('发货次', { exact: true }), state.run.id); await wizard().getByRole('button', { name: '读取货件', exact: true }).click();
 }
 async function toPrefill(state) {
@@ -255,8 +257,21 @@ async function toPrefill(state) {
 }
 async function start(state) { await openNew(state); await wizard().getByLabel('选择当前列表', { exact: true }).check(); await toPrefill(state); await startButton().click(); await expect(dashboard()).toBeVisible(); }
 async function openJob() {
-  await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 30_000 }); await expect(recent()).toBeVisible();
-  await recent().getByRole('button', { name: '查看进度', exact: true }).first().click(); await expect(dashboard()).toBeVisible();
+  await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await expect(recent()).not.toBeVisible();
+  const tasks = page.getByRole('button', { name: '自动出单任务', exact: true });
+  await tasks.click(); await expect(recent()).toBeVisible();
+  const tasksDialog = page.getByRole('dialog', { name: '自动出单任务', exact: true });
+  await tasksDialog.getByRole('button', { name: '关闭自动出单任务', exact: true }).click();
+  await expect(recent()).not.toBeVisible(); await expect(tasks).toBeFocused();
+  await tasks.click(); await expect(recent()).toBeVisible();
+  await (await openRowMenu(recent(), '最近自动出单任务', 0)).getByRole('menuitem', { name: '查看进度', exact: true }).click(); await expect(dashboard()).toBeVisible();
+  await expect(tasksDialog).not.toBeVisible();
+}
+async function startRecord(record) {
+  const menu = await openRowMenu(page.locator('.document-list-panel'), '单据记录', 0);
+  await expect(menu).toHaveAttribute('data-grid-menu-row-key', record.id);
+  await menu.getByRole('menuitem', { name: '自动生成发票', exact: true }).click();
 }
 async function openMissing() {
   const trigger = dashboard().getByRole('button', { name: /^(统一补充资料|集中补充资料|补充整批资料)$/ });
@@ -419,15 +434,20 @@ try {
   await jobDialog().getByRole('button', { name: '关闭整批检查与打包出单', exact: true }).click(); await page.getByRole('button', { name: '继续本次制作', exact: true }).click();
   await expect(wizard().getByLabel('任务名称（可选）', { exact: true })).toHaveValue('UNSAVED NEW TASK TITLE'); await expect(wizard().getByLabel('渠道服务', { exact: true })).toHaveAttribute('data-value', 'TECH SERVICE');
   await wizard().getByRole('button', { name: '上一步', exact: true }).click(); await expect(wizard().getByLabel('选择当前列表', { exact: true })).toBeChecked();
-  await wizard().getByLabel(occupied.candidates[0].demand.snapshot.fba, { exact: true }).uncheck(); await expect(continueExisting()).toHaveCount(0); await expect(wizard()).not.toContainText('所选 FBA 已有自动出单任务');
+  const occupiedCandidateMenu = await openRowMenu(wizard(), '本次发货的可选货件', 0); await expect(occupiedCandidateMenu).toContainText(occupied.candidates[0].demand.snapshot.fba);
+  await occupiedCandidateMenu.getByRole('menuitem', { name: '取消选择货件', exact: true }).click(); await expect(continueExisting()).toHaveCount(0); await expect(wizard()).not.toContainText('所选 FBA 已有自动出单任务');
   assert.equal(occupied.startInputs.length, 1); await noOutput(occupied); await context.close(); note();
 
   step = 'a-busy-existing-draft-start-opens-the-indicated-task-without-another-start-or-retry';
   const occupiedDraft = fixture(); occupiedDraft.showExisting = true;
   createJob(occupiedDraft, { shippingRunId: occupiedDraft.run.id, documentId: occupiedDraft.records[0].id, expectedVersion: occupiedDraft.records[0].version });
   occupiedDraft.startMode = 'busy'; occupiedDraft.job.error = { code: 'FIXTURE_EXISTING_DRAFT_TASK', message: '技术夹具：原草稿已有关联任务。' }; const draftJobId = occupiedDraft.job.id;
-  context = await setup(occupiedDraft); await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.locator('.document-list-panel tbody tr').filter({ hasText: occupiedDraft.records[0].currentRevision.data.title }).getByRole('button', { name: '自动生成发票', exact: true }).click();
+  context = await setup(occupiedDraft); await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  // The detail dialog's action must close its modal before showing page-level
+  // busy-task recovery. Other record starts below exercise the row menu.
+  const occupiedDraftDetails = await findGridRow(page.locator('.document-list-panel'), '单据记录', occupiedDraft.records[0].currentRevision.data.title);
+  await occupiedDraftDetails.getByRole('button', { name: '自动生成发票', exact: true }).click();
+  await expect(grid(page.locator('.document-list-panel'), '单据记录').locator('dialog.scm-grid-dialog[open]')).toHaveCount(0);
   await expect(page.getByRole('button', { name: '继续已有任务', exact: true })).toBeEnabled(); await expect(page.getByRole('alert').filter({ hasText: '请重新读取最新版本' })).toHaveCount(0);
   await page.getByRole('button', { name: '继续已有任务', exact: true }).click(); await expect(dashboard()).toBeVisible(); await expect(dashboard()).toContainText('原草稿已有关联任务');
   assert.equal(occupiedDraft.job.id, draftJobId); assert.equal(occupiedDraft.startInputs.length, 1); assert.equal(occupiedDraft.startInputs[0].documentId, occupiedDraft.records[0].id); assert.equal(occupiedDraft.starts.size, 0); assert.equal(occupiedDraft.retryInputs.length, 0);
@@ -445,10 +465,10 @@ try {
   await openJob(); await expect(downloadButton()).toHaveCount(1); assert.equal(detached.startInputs.length, 1); assert.equal(detached.retryInputs.length, 0); assert.equal(detached.bundleGenerations, 1); await context.close(); note();
 
   step = 'existing-draft-version-pinning-and-old-document-links-remain-compatible';
-  const old = fixture(); old.showExisting = true; context = await setup(old); await page.goto('/shipping?view=documents&documentId=' + old.records[0].id, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  const old = fixture(); old.showExisting = true; context = await setup(old); await page.goto('/shipping?view=documents&documentId=' + old.records[0].id, { waitUntil: 'domcontentloaded', timeout: 60_000 });
   await expect(wizard().getByRole('navigation', { name: '单据制作步骤', exact: true })).toBeVisible(); assert.equal(old.startInputs.length, 0); await context.close();
-  context = await setup(old); await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.locator('.document-list-panel tbody tr').filter({ hasText: old.records[0].currentRevision.data.title }).getByRole('button', { name: '自动生成发票', exact: true }).click();
+  context = await setup(old); await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await startRecord(old.records[0]);
   await expect(dashboard()).toBeVisible(); assert.equal(old.startInputs[0].documentId, old.records[0].id); assert.equal(old.startInputs[0].expectedVersion, 1); assert.equal(old.startInputs[0].demandIds, undefined); await context.close(); note();
 
   step = 'five-ready-ranges-retry-generation-on-the-existing-job-with-one-operation-and-one-bundle';

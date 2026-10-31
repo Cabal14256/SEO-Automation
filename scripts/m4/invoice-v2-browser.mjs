@@ -7,6 +7,8 @@ import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
+import { closeGridDetails, grid, gridRowCount, findGridRow, activeGridRow } from '../shared/grid.mjs';
+import { assertBottomNavigation, setColumnVisible } from './grid-helpers.mjs';
 import { documentSchema, documentLingxingApplyInputSchema, documentLingxingPreviewSchema, withDocumentDefaults as documentFlagDefaults } from '../../packages/contracts/dist/index.js';
 
 const withDocumentDefaults = (fields = {}) => documentFlagDefaults({ orderNumber: null, reference: null, tradeTerms: null, currency: 'USD', ...fields });
@@ -80,8 +82,8 @@ async function setupRoutes(context) {
 }
 const wizard = () => page.getByRole('dialog', { name: '发票与单据向导', exact: true });
 const stage = (label) => wizard().getByRole('navigation', { name: '单据制作步骤', exact: true }).getByRole('button', { name: label, exact: true }).click();
-const quantities = () => wizard().getByRole('region', { name: '逐箱申报数量，可横向滚动', exact: true }).getByRole('table');
-async function openAdjustment(msku) { const section = wizard().locator('.document-product-adjustments'); if (await section.getAttribute('open') === null) await section.locator(':scope > summary').click(); const item = section.locator('.document-product-adjustment').filter({ hasText: msku }); if (await item.getAttribute('open') === null) await item.locator(':scope > summary').click(); }
+const quantities = () => grid(wizard(), '逐箱申报数量');
+async function openAdjustment(msku) { await closeGridDetails(wizard(), '逐箱申报数量'); const section = wizard().locator('.document-product-adjustments'); if (await section.getAttribute('open') === null) await section.locator(':scope > summary').click(); const item = section.locator('.document-product-adjustment').filter({ hasText: msku }); if (await item.getAttribute('open') === null) await item.locator(':scope > summary').click(); }
 async function open(id) { await page.goto('/shipping?view=documents&documentId=' + id); await stage('单票资料'); }
 try {
   await mkdir(evidence, { recursive: true });
@@ -92,14 +94,17 @@ try {
   const context = await browser.newContext({ baseURL, locale: 'zh-CN', timezoneId: 'Asia/Shanghai', viewport: { width: 1440, height: 1000 } }); await setupRoutes(context); page = await context.newPage(); page.on('pageerror', (error) => browserErrors.push(error.message));
 
   step = 'mixed-carton-one-representative-and-distinct-default-declaration-quantity';
-  await open(main.id); await expect(quantities().getByRole('row')).toHaveCount(3);
-  const firstRow = quantities().getByRole('row').filter({ hasText: 'A-FIRST' });
-  await expect(firstRow.getByRole('cell').nth(2)).toHaveText('300'); await expect(firstRow.getByRole('cell').nth(3)).toHaveText('500'); await expect(firstRow.getByRole('cell').nth(4)).toContainText('500');
+  await open(main.id); await expect.poll(() => gridRowCount(wizard(), '逐箱申报数量')).toBe(2);
+  await assertBottomNavigation(wizard(), '逐箱申报数量');
+  await setColumnVisible(wizard(), '逐箱申报数量', '标准箱规件数', 'column:标准箱规件数', false);
+  await setColumnVisible(wizard(), '逐箱申报数量', '标准箱规件数', 'column:标准箱规件数', true);
+  const firstRow = await findGridRow(wizard(), '逐箱申报数量', 'A-FIRST');
+  await expect(firstRow.locator('dd').nth(2)).toHaveText('300'); await expect(firstRow.locator('dd').nth(3)).toHaveText('500'); await expect(firstRow.locator('dd').nth(4)).toContainText('500');
   await expect(firstRow).toContainText('混装'); await expect(firstRow).toContainText('箱规与实际数量不同'); await expect(quantities()).not.toContainText('Z-HIDDEN'); note();
 
   step = 'missing-carton-quantity-falls-back-to-all-actual-items';
-  const fallbackRow = quantities().getByRole('row').filter({ hasText: 'C-FALLBACK' });
-  await expect(fallbackRow.getByRole('cell').nth(2)).toHaveText('300'); await expect(fallbackRow.getByRole('cell').nth(4)).toContainText('300'); await expect(fallbackRow).toContainText('来源：全箱实际数量合计'); await expect(fallbackRow).toContainText('已回退实际数量');
+  const fallbackRow = await findGridRow(wizard(), '逐箱申报数量', 'C-FALLBACK');
+  await expect(fallbackRow.locator('dd').nth(2)).toHaveText('300'); await expect(fallbackRow.locator('dd').nth(4)).toContainText('300'); await expect(fallbackRow).toContainText('来源：全箱实际数量合计'); await expect(fallbackRow).toContainText('已回退实际数量');
   await expect(wizard()).toContainText('F15“亚马逊上架总数量”仍为所有箱内商品的实际总量'); note();
 
   step = 'fixed-unit-price-is-readonly-and-legacy-overrides-are-ignored';
@@ -136,7 +141,8 @@ try {
   for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: 1000 }); await wizard().locator('.document-invoice-quantities').evaluate((element) => element.scrollIntoView({ block: 'start' }));
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
-    for (const cell of await quantities().locator('tbody tr').first().locator('td').all()) { const bounds = await cell.boundingBox(); assert(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width, 'every declaration quantity and source fits the viewport'); }
+    await findGridRow(wizard(), '逐箱申报数量', 'A-FIRST');
+    for (const cell of await activeGridRow(wizard(), '逐箱申报数量').locator('dd').all()) { const bounds = await cell.boundingBox(); assert(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width, 'every declaration quantity and source fits the viewport'); }
     await page.screenshot({ path: resolve(evidence, `invoice-quantities-${width}.png`) });
     await openAdjustment('A-FIRST');
     await wizard().getByLabel('A-FIRST 自动申报单价', { exact: true }).evaluate((element) => { const body = element.closest('.import-dialog-body'); const navigation = body?.querySelector('.document-details-progress'); if (body) body.scrollTop += element.getBoundingClientRect().top - body.getBoundingClientRect().top - (navigation?.getBoundingClientRect().height ?? 0) - 32; }); await expect(wizard().getByLabel('A-FIRST 自动申报单价', { exact: true })).toBeInViewport(); await page.screenshot({ path: resolve(evidence, `invoice-price-${width}.png`) });

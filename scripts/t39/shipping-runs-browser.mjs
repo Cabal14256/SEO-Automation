@@ -8,6 +8,7 @@ import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
 import * as contracts from '../../packages/contracts/dist/index.js';
+import { grid, gridRowCount, selectGridRow, findGridRow } from '../shared/grid.mjs';
 
 // Offline UI acceptance: all API requests are fixtures, and traffic outside the
 // isolated Vite origin is rejected. No database, credentials or ERP is accessed.
@@ -215,7 +216,7 @@ async function contextFor(state) {
 
 const wizard = () => page.getByRole('dialog', { name: '导入向导', exact: true });
 const result = () => page.getByRole('region', { name: '本次发货整理结果', exact: true });
-const productTable = () => page.getByRole('region', { name: '本次发货商品表，可横向滚动', exact: true });
+const productTable = () => grid(page, '本次发货商品表');
 const generate = () => page.getByRole('button', { name: '生成本次发货 XLSX', exact: true });
 const progress = () => result().getByRole('status', { name: '自动整理进度', exact: true });
 const stepper = () => result().getByLabel('整理步骤', { exact: true });
@@ -223,7 +224,8 @@ const stepper = () => result().getByLabel('整理步骤', { exact: true });
 async function automaticChecks(state) {
   step = 'new-import-defaults-to-automatic-and-previews-blank-line-ticket-boundaries';
   await page.goto('/shipping');
-  await expect(page.getByRole('heading', { name: '本次发货与票号', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '本次发货与票号', exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: '本次发货与票号', exact: true })).not.toBeVisible();
   await expect(page.getByRole('button', { name: '新增需求', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '导入本次发货', exact: true })).toHaveCount(1);
   await page.getByRole('button', { name: '导入本次发货', exact: true }).click();
@@ -263,22 +265,22 @@ async function automaticChecks(state) {
   assert(state.deliveredStatuses.includes('queued')); assert.equal(state.createBodies.length, 1); note();
 
   step = 'whole-run-product-table-keeps-tickets-contiguous-orders-by-box-count-and-retains-twelve-local-columns';
-  await expect(productTable()).toContainText('20261023-3-US-1'); await expect(productTable()).toContainText('20261023-3-UK-1');
-  await expect(productTable().getByRole('columnheader', { name: '箱 12', exact: true })).toHaveCount(1);
-  await expect(productTable().locator('tbody tr')).toHaveCount(3);
-  const textRows = await productTable().locator('tbody tr').allTextContents();
+  await expect(await findGridRow(page, '本次发货商品表', '20261023-3-US-1')).toContainText('20261023-3-US-1'); await expect(await findGridRow(page, '本次发货商品表', '20261023-3-UK-1')).toContainText('20261023-3-UK-1');
+  await expect((await selectGridRow(page, '本次发货商品表', 0)).locator('dt').filter({ hasText: /^箱 12$/ })).toHaveCount(1);
+  await expect(productTable()).toHaveAttribute('data-row-count', '3');
+  const textRows = []; for (let index = 0; index < await gridRowCount(page, '本次发货商品表'); index++) textRows.push(await (await selectGridRow(page, '本次发货商品表', index)).textContent());
   [state.fbas[1], state.fbas[0], state.fbas[2]].forEach((fba, index) => assert(textRows[index].includes(fba), 'FBA rows stay inside their ticket and sort by actual box count'));
-  const ticketRangeColumn = (await productTable().getByRole('columnheader').allTextContents()).indexOf('整票编码范围');
+  const ticketRangeColumn = (await (await selectGridRow(page, '本次发货商品表', 0)).locator('dt').allTextContents()).indexOf('整票编码范围');
   assert(ticketRangeColumn >= 0);
-  await expect(productTable().locator('tbody tr').nth(0).getByRole('cell').nth(ticketRangeColumn)).toHaveText('A1-A12、B1-B2');
-  await expect(productTable().locator('tbody tr').nth(1).getByRole('cell').nth(ticketRangeColumn)).toHaveText('');
-  await expect(productTable().locator('tbody tr').nth(2).getByRole('cell').nth(ticketRangeColumn)).toHaveText('C1');
+  await expect((await selectGridRow(page, '本次发货商品表', 0)).locator('dd').nth(ticketRangeColumn)).toHaveText('A1-A12、B1-B2');
+  await expect((await selectGridRow(page, '本次发货商品表', 1)).locator('dd').nth(ticketRangeColumn)).toHaveText('');
+  await expect((await selectGridRow(page, '本次发货商品表', 2)).locator('dd').nth(ticketRangeColumn)).toHaveText('C1');
   await expect(generate()).toBeEnabled();
   await productTable().scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(evidence, 'ready-products-1440.png') });
-  await productTable().evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+  await productTable().locator('canvas').dispatchEvent('wheel', { deltaX: 10000, deltaY: 0 });
   await page.screenshot({ path: resolve(evidence, 'ready-products-box-12-1440.png') });
-  await productTable().evaluate((element) => { element.scrollLeft = 0; });
+  await productTable().locator('canvas').dispatchEvent('wheel', { deltaX: -10000, deltaY: 0 });
   await page.setViewportSize({ width: 390, height: 844 });
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'wide tables must scroll internally at mobile width');
   await productTable().scrollIntoViewIfNeeded();
@@ -294,14 +296,23 @@ async function automaticChecks(state) {
 
   step = 'close-and-reopen-the-same-run-from-shipping-history';
   await wizard().getByRole('button', { name: '关闭导入向导', exact: true }).click(); await expect(wizard()).not.toBeVisible();
-  await page.getByRole('button', { name: '刷新发货记录', exact: true }).click();
+  await page.getByRole('button', { name: '本次发货与票号', exact: true }).click();
+  await page.getByRole('dialog', { name: '本次发货与票号', exact: true }).getByRole('button', { name: '刷新发货记录', exact: true }).click();
+  await expect(grid(page, '本次发货记录').getByRole('grid')).toHaveAttribute('aria-busy', 'false', { timeout: 30_000 });
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 });
+    await expect(page.getByRole('dialog', { name: '本次发货与票号', exact: true })).toBeVisible();
+    assert((await page.evaluate(() => document.documentElement.scrollWidth)) <= width + 1, 'the shipping run manager fits the viewport');
+    await page.screenshot({ path: resolve(evidence, 'shipping-run-manager-' + width + '.png'), animations: 'disabled' });
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole('button', { name: '查看发货表', exact: true }).click();
   const recovered = page.getByRole('dialog', { name: '本次发货表', exact: true });
-  await expect(recovered).toBeVisible(); await expect(productTable()).toContainText('20261023-3-UK-1');
+  await expect(recovered).toBeVisible(); await expect(await findGridRow(page, '本次发货商品表', '20261023-3-UK-1')).toContainText('20261023-3-UK-1');
   assert.equal(state.createBodies.length, 1, 'history recovery must not create another run');
   await recovered.getByRole('button', { name: '逐箱明细', exact: true }).click();
-  const boxTable = recovered.getByRole('region', { name: '本次发货逐箱表，可横向滚动', exact: true });
-  await expect(boxTable.locator('tbody tr')).toHaveCount(15); await expect(boxTable).toContainText('箱 12 · A12');
+  const boxTable = grid(recovered, '本次发货逐箱表');
+  await expect(boxTable).toHaveAttribute('data-row-count', '15'); await expect(await findGridRow(page, '本次发货逐箱表', '箱 12 · A12')).toContainText('箱 12 · A12');
   await boxTable.scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(evidence, 'recovered-boxes-1440.png') }); note();
 }
@@ -309,12 +320,12 @@ async function automaticChecks(state) {
 async function needsReviewChecks(state) {
   step = 'needs-review-retains-progress-and-disables-whole-run-export';
   state.blocked = pendingBlockers(state);
-  await page.goto('/shipping'); await page.getByRole('button', { name: '查看进度与处理', exact: true }).click();
+  await page.goto('/shipping'); await page.getByRole('button', { name: '本次发货与票号', exact: true }).click(); await page.getByRole('button', { name: '查看进度与处理', exact: true }).click();
   await expect(result()).toContainText('箱序尚未确认，请处理后继续整理。');
   await expect(result()).toContainText('请先确认子批次。'); await expect(result()).toContainText('请先分配全部箱码。');
   await expect(result().getByRole('link', { name: '处理相关批次', exact: true }).first()).toBeVisible();
   await expect(result().getByRole('button', { name: '处理后继续整理', exact: true })).toBeEnabled();
-  await expect(productTable()).toContainText(state.fbas[0]); await expect(generate()).toBeDisabled();
+  await expect(await findGridRow(page, '本次发货商品表', state.fbas[0])).toContainText(state.fbas[0]); await expect(generate()).toBeDisabled();
   assert.equal(state.exportBodies.length, 0); assert.equal(state.createBodies.length, 0);
   await productTable().scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(evidence, 'needs-review-1440.png') }); note();
@@ -324,16 +335,16 @@ async function normalProgressChecks(state) {
   const syncMessage = '正在同步商品与箱数据，完成后将自动校验并分配箱码。';
   const confirmationMessage = '正在校验数量与箱序，并自动确认、分配箱码。';
   step = 'numbered-sync-progress-shows-completed-preview-without-transient-error-messages';
-  await page.goto('/shipping'); await page.getByRole('button', { name: '查看进度与处理', exact: true }).click();
+  await page.goto('/shipping'); await page.getByRole('button', { name: '本次发货与票号', exact: true }).click(); await page.getByRole('button', { name: '查看进度与处理', exact: true }).click();
   await expect(progress()).toContainText(syncMessage); await expect(stepper()).toBeVisible();
   await expect(progress()).toContainText('1 / 3 个 FBA 已就绪');
   await expect(stepper().locator('[aria-current="step"]')).toContainText('同步商品与箱');
   await expect(result()).not.toContainText('请先确认子批次'); await expect(result()).not.toContainText('请先分配全部箱码');
   await expect(result().getByRole('alert')).toHaveCount(0);
-  await expect(productTable().locator('tbody tr')).toHaveCount(2);
-  await expect(productTable()).toContainText(state.fbas[0]); await expect(productTable()).toContainText('MSKU-1');
-  await expect(productTable()).toContainText('MSKU-1-SECOND');
-  await expect(productTable()).not.toContainText(state.fbas[1]); await expect(generate()).toBeDisabled();
+  await expect(productTable()).toHaveAttribute('data-row-count', '2');
+  await expect(await findGridRow(page, '本次发货商品表', state.fbas[0])).toContainText(state.fbas[0]); await expect(await findGridRow(page, '本次发货商品表', 'MSKU-1')).toContainText('MSKU-1');
+  await expect(await findGridRow(page, '本次发货商品表', 'MSKU-1-SECOND')).toContainText('MSKU-1-SECOND');
+  await expect(await findGridRow(page, '本次发货商品表', state.fbas[1])).toHaveCount(0); await expect(generate()).toBeDisabled();
   await progress().scrollIntoViewIfNeeded(); await page.screenshot({ path: resolve(evidence, 'progress-sync-1440.png') });
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 844 });
@@ -347,12 +358,12 @@ async function normalProgressChecks(state) {
   await expect(progress()).toContainText(confirmationMessage);
   await expect(stepper().locator('[aria-current="step"]')).toContainText('校验与箱码');
   await expect(result()).not.toContainText('请先确认子批次'); await expect(result()).not.toContainText('请先分配全部箱码');
-  await expect(productTable().locator('tbody tr')).toHaveCount(2); await expect(generate()).toBeDisabled();
+  await expect(productTable()).toHaveAttribute('data-row-count', '2'); await expect(generate()).toBeDisabled();
   await progress().scrollIntoViewIfNeeded(); await page.screenshot({ path: resolve(evidence, 'progress-confirmation-1440.png') }); note();
 
   step = 'ready-transition-automatically-clears-normal-progress-and-enables-complete-export';
   state.controlledStatus = 'ready'; state.controlledVersion += 1; state.blocked = []; state.partialPreview = false;
-  await expect(productTable().locator('tbody tr')).toHaveCount(4);
+  await expect(productTable()).toHaveAttribute('data-row-count', '4');
   await expect(generate()).toBeEnabled();
   await expect(result()).not.toContainText(syncMessage); await expect(result()).not.toContainText(confirmationMessage);
   await expect(result()).not.toContainText('请先确认子批次'); await expect(result()).not.toContainText('请先分配全部箱码');
@@ -364,18 +375,18 @@ async function runningIssueChecks(state) {
   step = 'running-preserves-real-confirmation-errors-and-links-to-the-related-group';
   const stale = { groupId: state.groupIds[1], name: '本次发货来源组', code: 'CONFIRMATION_STALE', message: '确认之后需求或候选数据发生变化，请重新确认。' };
   state.blocked = [stale, pendingBlockers(state)[1]];
-  await page.goto('/shipping'); await page.getByRole('button', { name: '查看进度与处理', exact: true }).click();
+  await page.goto('/shipping'); await page.getByRole('button', { name: '本次发货与票号', exact: true }).click(); await page.getByRole('button', { name: '查看进度与处理', exact: true }).click();
   await expect(progress()).toContainText('发货表需要核对');
   await expect(result()).toContainText(stale.message); await expect(result()).not.toContainText('请先分配全部箱码');
   const link = result().getByRole('link', { name: '处理相关批次', exact: true });
   await expect(link).toHaveCount(1); await expect(link).toHaveAttribute('href', new RegExp(`groupId=${stale.groupId}`));
-  await expect(productTable()).toContainText(state.fbas[0]); await expect(generate()).toBeDisabled();
+  await expect(await findGridRow(page, '本次发货商品表', state.fbas[0])).toContainText(state.fbas[0]); await expect(generate()).toBeDisabled();
   await progress().scrollIntoViewIfNeeded(); await page.screenshot({ path: resolve(evidence, 'running-real-issue-1440.png') }); note();
 }
 
 async function readyBlockedChecks(state) {
   step = 'ready-with-blocked-confirmations-keeps-errors-visible-and-export-disabled';
-  await page.goto('/shipping'); await page.getByRole('button', { name: '查看发货表', exact: true }).click();
+  await page.goto('/shipping'); await page.getByRole('button', { name: '本次发货与票号', exact: true }).click(); await page.getByRole('button', { name: '查看发货表', exact: true }).click();
   await expect(result()).toContainText('请先确认子批次。'); await expect(result()).toContainText('请先分配全部箱码。');
   await expect(progress()).toContainText('发货表需要核对');
   await expect(result().getByRole('link', { name: '处理相关批次', exact: true })).toHaveCount(2);
@@ -414,7 +425,7 @@ async function runningDetailIssueChecks(state) {
   assert.equal(detail.tickets.flatMap((ticket) => ticket.members).filter((member) => member.groupId === state.groupIds[0]).length, 2);
   assert(state.report().confirmations.some((ref) => ref.groupId === missing.groupId));
   assert(!state.report().boxes.some((box) => box.demandId === missing.demandId));
-  await page.goto('/shipping'); await page.getByRole('button', { name: '查看进度与处理', exact: true }).click();
+  await page.goto('/shipping'); await page.getByRole('button', { name: '本次发货与票号', exact: true }).click(); await page.getByRole('button', { name: '查看进度与处理', exact: true }).click();
   await expect(progress()).toContainText('发货表需要核对');
   await expect(progress()).toContainText('1 / 3 个 FBA 已就绪'); await expect(progress()).not.toContainText('2 / 3 个 FBA 已就绪');
   await expect(result()).toContainText('本票的 FBA 已从其内部处理组移除，请恢复正确归属后重试。');
@@ -428,7 +439,7 @@ async function runningDetailIssueChecks(state) {
 
 async function correctionChecks(state) {
   step = 'replace-invalid-ticket-source-and-retry-the-original-unnumbered-run';
-  await page.goto('/shipping'); await page.getByRole('button', { name: '查看进度与处理', exact: true }).click();
+  await page.goto('/shipping'); await page.getByRole('button', { name: '本次发货与票号', exact: true }).click(); await page.getByRole('button', { name: '查看进度与处理', exact: true }).click();
   await expect(result()).toContainText('同一段包含不同国家'); await expect(generate()).toBeDisabled();
   await result().getByRole('button', { name: '修正清单并继续', exact: true }).click();
   const correction = page.getByRole('dialog', { name: '修正本次发货清单', exact: true });
@@ -440,7 +451,7 @@ async function correctionChecks(state) {
   await expect.poll(() => state.retryBodies.length, { timeout: 15000 }).toBe(1);
   await expect(correction).not.toBeVisible();
   await expect.poll(() => state.currentStatus, { timeout: 15000 }).toBe('ready');
-  await expect(productTable()).toContainText('20261023-3-UK-1'); await expect(generate()).toBeEnabled();
+  await expect(await findGridRow(page, '本次发货商品表', '20261023-3-UK-1')).toContainText('20261023-3-UK-1'); await expect(generate()).toBeEnabled();
   assert.equal(state.replacementUploads, 1); assert.equal(state.createBodies.length, 0, 'a source correction must resume the original run rather than create another');
   assert.equal(state.detail('ready').run.id, state.runId); assert.equal(state.detail('ready').run.importId, state.replacementImportId);
   await productTable().scrollIntoViewIfNeeded(); await page.screenshot({ path: resolve(evidence, 'corrected-original-run-1440.png') }); note();
@@ -448,10 +459,10 @@ async function correctionChecks(state) {
 
 async function allocationColumnChecks(state) {
   step = 'per-fba-box-columns-reset-to-one-with-five-columns-and-one-code-range-per-ticket';
-  await page.goto('/shipping'); await page.getByRole('button', { name: '查看发货表', exact: true }).click();
-  await expect(productTable().locator('tbody tr')).toHaveCount(3);
+  await page.goto('/shipping'); await page.getByRole('button', { name: '本次发货与票号', exact: true }).click(); await page.getByRole('button', { name: '查看发货表', exact: true }).click();
+  await expect(productTable()).toHaveAttribute('data-row-count', '3');
   await expect(generate()).toBeEnabled();
-  const headers = await productTable().getByRole('columnheader').allTextContents();
+  const headers = await (await selectGridRow(page, '本次发货商品表', 0)).locator('dt').allTextContents();
   const column = (name) => { const index = headers.indexOf(name); assert(index >= 0, `missing product column ${name}`); return index; };
   const expected = [
     ['15', '15', '—', '—', '—'],
@@ -462,7 +473,7 @@ async function allocationColumnChecks(state) {
   const expectedQuantities = ['30', '22', '18'];
   assert.deepEqual(headers.filter((header) => /^箱 \d+$/.test(header)), ['箱 1', '箱 2', '箱 3', '箱 4', '箱 5']);
   for (let index = 0; index < 3; index++) {
-    const row = productTable().locator('tbody tr').nth(index), cells = row.getByRole('cell');
+    const row = await selectGridRow(page, '本次发货商品表', index), cells = row.locator('dd');
     await expect(cells.nth(column('FBA / 目的仓'))).toContainText(state.fbas[index]);
     await expect(cells.nth(column('商品数量'))).toHaveText(expectedQuantities[index]);
     await expect(cells.nth(column('整票编码范围'))).toHaveText(expectedRanges[index]);
@@ -473,15 +484,15 @@ async function allocationColumnChecks(state) {
   assert.equal(state.report().rows.reduce((total, row) => total + row.quantity, 0), 70);
   assert.equal(new Set(state.report().boxes.map((box) => box.demandId)).size, 3);
   await productTable().scrollIntoViewIfNeeded();
-  await productTable().evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+  await productTable().locator('canvas').dispatchEvent('wheel', { deltaX: 10000, deltaY: 0 });
   await page.screenshot({ path: resolve(evidence, 'per-fba-box-columns-1440.png') });
   await result().getByRole('button', { name: '逐箱明细', exact: true }).click();
-  const boxTable = result().getByRole('region', { name: '本次发货逐箱表，可横向滚动', exact: true });
-  await expect(boxTable.locator('tbody tr')).toHaveCount(6);
+  const boxTable = grid(result(), '本次发货逐箱表');
+  await expect(boxTable).toHaveAttribute('data-row-count', '6');
   for (let index = 0; index < 3; index++) {
     for (let localOrder = 1; localOrder <= 2; localOrder++) {
       const displayOrder = 7 + index * 2 + localOrder - 1;
-      const row = boxTable.locator('tbody tr').nth(index * 2 + localOrder - 1), cells = row.getByRole('cell');
+      const row = await selectGridRow(page, '本次发货逐箱表', index * 2 + localOrder - 1), cells = row.locator('dd');
       await expect(cells.nth(0)).toContainText(state.fbas[index]);
       await expect(cells.nth(1)).toHaveText(`箱 ${localOrder} · G${displayOrder}`);
       await expect(cells.nth(3)).toHaveText(String([15, 11, 9][index]));

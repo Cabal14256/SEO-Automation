@@ -15,8 +15,9 @@
 .document-automation-issues [data-severity="error"] { color: #a32330; }
 .document-automation-issues [data-severity="warning"] { color: #805500; }
 .document-automation .document-footer-actions { flex-wrap: wrap; margin-top: 16px; }
-.document-automation-recent { margin-bottom: 24px; }
-.document-automation-recent .section-heading { flex-wrap: wrap; }
+.document-automation-recent .section-heading { flex-wrap: wrap; align-items: flex-start; gap: 16px; margin-top: 0; }
+.document-automation-recent h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.document-automation-recent .section-heading p { margin: 7px 0 0; }
 .document-automation-recent .section-heading span { color: var(--color-muted); font-size: 13px; }
 .document-automation-supplement { min-width: 0; margin: 24px 0; }
 .document-automation-field-group { min-width: 0; margin: 22px 0; padding: 16px 0 0; border: 0; border-top: 1px solid var(--color-line); }

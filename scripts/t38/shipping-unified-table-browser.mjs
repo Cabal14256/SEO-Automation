@@ -8,7 +8,8 @@ import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
 import * as contracts from '../../packages/contracts/dist/index.js';
-import { chooseOption } from '../shared/ui-controls.mjs';
+import { chooseOption as chooseFieldOption } from '../shared/ui-controls.mjs';
+import { closeGridDetails, closeGridMenu, selectGridRow, findGridRow, showShippingFilters } from '../shared/grid.mjs';
 
 // Every API call is intercepted. This check never reads a database, account file,
 // real shipment, or remote service, and refuses any request outside its Vite origin.
@@ -20,7 +21,8 @@ const id = () => randomUUID();
 const copy = (value) => structuredClone(value);
 const checks = [], unexpectedRequests = [], browserErrors = [];
 const entryOnly = process.env.SHIPPING_UNIFIED_ENTRY_ONLY === '1';
-let browser, viteProcess, page, baseURL, activeCrudState, step = 'setup', failed = false;
+const interactionsOnly = process.env.SHIPPING_UNIFIED_INTERACTIONS_ONLY === '1';
+let browser, viteProcess, page, baseURL, activeCrudState, step = 'setup', failed = false, currentRows = [];
 const note = () => { checks.push({ name: step, result: 'passed' }); console.log('PASS ' + step); };
 
 function fixture() {
@@ -91,6 +93,7 @@ function fixture() {
 }
 
 async function contextFor(state) {
+  currentRows = [];
   const context = await browser.newContext({ baseURL, locale: 'zh-CN', timezoneId: 'Asia/Shanghai', viewport: { width: 1440, height: 1000 } });
   await context.route('**/*', async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
@@ -98,9 +101,9 @@ async function contextFor(state) {
     if (url.origin !== baseURL && !['blob:', 'data:'].includes(url.protocol)) { unexpectedRequests.push(`${method} EXTERNAL ${url.origin}`); return route.abort('blockedbyclient'); }
     if (!path.startsWith('/api/')) return route.continue();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) state.mutations.push(`${method} ${path}`);
-    if (method === 'GET' && path === '/api/v1/session') return json({ user: { id: 'technical-workbench', name: '发货工作台技术验证', email: 'workbench@acceptance.invalid', role: 'admin' } });
+    if (method === 'GET' && path === '/api/v1/session') return json({ user: { id: state.actor ?? 'technical-workbench', name: '发货工作台技术验证', email: 'workbench@acceptance.invalid', role: 'admin' } });
     if (method === 'GET' && path === '/api/v1/shipping-runs') return json({ items: [] });
-    if (method === 'GET' && path === '/api/v1/demands') { if (state.delayDemand) await delay(state.delayDemand); return json(state.demandRows(Object.fromEntries(url.searchParams))); }
+    if (method === 'GET' && path === '/api/v1/demands') { if (state.delayDemand) await delay(state.delayDemand); const result = state.demandRows(Object.fromEntries(url.searchParams)); currentRows = result.rows; return json(result); }
     if (method === 'GET' && path === '/api/v1/batches/workspace') return json(state.workspace(Object.fromEntries(url.searchParams)));
     if (method === 'GET' && path === '/api/v1/batch-reports') return json(state.report(Object.fromEntries(url.searchParams)));
     if (method === 'GET' && path === '/api/v1/batch-reports/exports') return json({ items: state.exports });
@@ -132,18 +135,207 @@ async function contextFor(state) {
   page = await context.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', (error) => browserErrors.push(error.message)); return context;
 }
 
+const closeRecord = async () => { await closeGridMenu(page, '发货明细表'); await closeGridDetails(page, '发货明细表'); };
+const chooseOption = async (target, value) => { if (!await target.locator('xpath=ancestor::dialog[@open]').count()) { await closeRecord(); await showShippingFilters(page); } return chooseFieldOption(target, value); };
+const openBatchPicker = async () => { await closeRecord(); const trigger = nav().getByRole('button', { name: '发货批次', exact: true }); if (await trigger.getAttribute('aria-expanded') !== 'true') await trigger.click(); };
 const form = () => page.getByRole('form', { name: '筛选发货工作台', exact: true });
 const nav = () => page.getByRole('navigation', { name: '需求与批次导航', exact: true });
-const table = () => page.getByRole('region', { name: '发货明细表，可横向滚动', exact: true });
+const scopes = () => page.getByRole('group', { name: '发货范围切换', exact: true });
+const table = () => page.locator('[data-grid-label="发货明细表"]');
 const presentation = () => page.getByLabel('展示方式', { exact: true });
 const generate = () => page.getByRole('button', { name: '生成所选批次 XLSX', exact: true });
 const newBatch = () => page.getByRole('button', { name: '新建发货批次', exact: true });
-const demandCheck = (fba) => page.getByRole('checkbox', { name: `选择货件 ${fba}`, exact: true });
-const exportCheck = (name) => page.getByRole('checkbox', { name: `选择导出批次 ${name}`, exact: true });
+const demandCheck = async (fba) => { await locateShipment(fba); return table().getByRole('checkbox', { name: `选择货件 ${fba}`, exact: true }); };
+const exportCheck = async (name) => {
+  await expect.poll(() => currentRows.some((row) => row.groupName === name)).toBe(true);
+  await locateShipment(currentRows.find((row) => row.groupName === name).fba);
+  return table().getByRole('checkbox', { name: `选择导出批次 ${name}`, exact: true });
+};
 const allExports = () => page.getByRole('checkbox', { name: /(?:全选|选择本页).*导出/ }).first();
-const reset = async () => { await form().getByRole('button', { name: '重置', exact: true }).click(); };
+const reset = async () => { await closeRecord(); await showShippingFilters(page); await form().getByRole('button', { name: '重置', exact: true }).click(); };
 const noOverflow = async () => assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'the viewport must fit the page; wide tables scroll internally');
-const resetScroll = async () => { await table().evaluate((element) => { element.scrollLeft = 0; }); await page.getByRole('heading', { level: 1, name: '发货工作台', exact: true }).click(); };
+const resetScroll = async () => { await closeRecord(); await table().getByLabel('发货明细表 定位行', { exact: true }).fill('1'); await expect(table().getByLabel('发货明细表 定位行', { exact: true })).toHaveValue('1'); await page.getByRole('heading', { level: 1, name: '发货工作台', exact: true }).click(); };
+
+// A Canvas renders visible cells only. Exercise the public record navigation and
+// the accessible current-record detail instead of expecting thousands of DOM rows.
+async function gridRecords() {
+  const view = await presentation().getAttribute('data-value');
+  if (view === 'products') return currentRows.map((source) => ({ source }));
+  if (view === 'boxes') return currentRows.flatMap((source) => source.boxes.length ? source.boxes.map((box) => ({ source, box })) : [{ source }]);
+  const shipments = new Map();
+  for (const source of currentRows) { const group = shipments.get(source.demandId); if (group) group.push(source); else shipments.set(source.demandId, [source]); }
+  return [...shipments.values()].flatMap((members) => [{ source: members[0], summary: true }, ...members.map((source) => ({ source }))]);
+}
+async function locateRecord(predicate) {
+  await expect(table()).toBeVisible();
+  let models = [];
+  await expect.poll(async () => { models = await gridRecords(); return models.findIndex(predicate); }).toBeGreaterThanOrEqual(0);
+  const index = models.findIndex(predicate), model = models[index];
+  await expect(table()).toHaveAttribute('data-row-count', String(models.length));
+  await selectGridRow(page, '发货明细表', index);
+  await expect(table().locator('.scm-grid-record')).toHaveAttribute('data-grid-row-index', String(index + 1));
+  await expect(table().locator('.shipping-grid-details')).toHaveAttribute('data-demand-id', model.source.demandId);
+  return model;
+}
+async function locateShipment(fba) { return locateRecord((entry) => entry.source.fba === fba); }
+async function expectGridValue(value, keepOpen = false) {
+  const text = String(value);
+  await locateRecord((entry) => !entry.summary && JSON.stringify(entry).includes(text));
+  await expect(table()).toContainText(text);
+  if (!keepOpen) await closeRecord();
+}
+async function expectGridAbsent(value) {
+  await expect.poll(() => JSON.stringify(currentRows).includes(String(value))).toBe(false);
+  if (currentRows.length) await expect(table()).toHaveAttribute('data-row-count', String((await gridRecords()).length));
+}
+
+function interactionFixture() {
+  const state = fixture(), original = state.demandRows({}), prototype = original.rows.find((row) => !row.groupId);
+  state.queries.length = 0; state.maxBoxes = 10; state.newBoxId = id();
+  state.uiDemandIds = Array.from({ length: 105 }, id);
+  const rows = state.uiDemandIds.flatMap((demandId, index) => [0, 1].map((product) => ({ ...copy(prototype), id: `${demandId}:${product}`, demandId, fba: `FBA-UI-${String(index + 1).padStart(4, '0')}`, sku: `UI-SKU-${index + 1}-${product}`, msku: `UI-MSKU-${index + 1}-${product}`, fnsku: `UI-FNSKU-${index + 1}-${product}`, productName: `交互验收商品 ${index + 1}-${product}`, groupId: null, groupName: null, groupVersion: null, batchId: null })));
+  state.demandRows = (raw) => {
+    state.queries.push(copy(raw));
+    const matched = new Set(rows.filter((row) => !raw.q || [row.fba, row.sku].some((value) => value.toLowerCase().includes(raw.q.trim().toLowerCase()))).map((row) => row.demandId));
+    const pageNumber = Number(raw.page || 1), pageSize = Number(raw.pageSize || 20), pageIds = new Set([...matched].slice((pageNumber - 1) * pageSize, pageNumber * pageSize));
+    const pageRows = rows.filter((row) => pageIds.has(row.demandId)).map((row, index) => state.maxBoxes > 10 && index === 0 ? { ...row, boxes: [...row.boxes, { ...row.boxes[0], boxId: state.newBoxId, boxOrder: 12, quantity: 3 }] } : row);
+    return contracts.demandWorkspaceSchema.parse({ ...original, rows: pageRows, total: matched.size * 2, demandTotal: matched.size, page: pageNumber, pageSize, maxBoxes: state.maxBoxes, generatedAt: now });
+  };
+  return state;
+}
+
+async function interactionChecks(state) {
+  const keys = async () => JSON.parse(await table().getAttribute('data-grid-column-keys'));
+  const ready = async () => expect(table().getByRole('grid')).toHaveAttribute('aria-busy', 'false');
+  const capacity = () => page.getByRole('combobox', { name: '每页票数', exact: true });
+  const menu = () => page.getByRole('menu', { name: '发货明细表 行操作', exact: true });
+  const picker = () => page.getByRole('dialog', { name: '列展示设置', exact: true });
+  const openColumns = async () => { await closeRecord(); await page.getByRole('button', { name: '列展示设置', exact: true }).click(); await expect(picker()).toBeVisible(); };
+  const closeColumns = async () => { await picker().press('Escape'); await expect(picker()).not.toBeVisible(); await ready(); };
+  const preference = async (actor = 'technical-workbench', view = 'shipments') => page.evaluate((key) => JSON.parse(localStorage.getItem(key) || 'null'), `scm-shipping-grid:v1:${actor}:${view}`);
+  step = 'filters-start-collapsed-retain-draft-and-never-apply-on-collapse';
+  await page.goto('/shipping?view=demands'); await ready();
+  await expect(page.getByRole('button', { name: '展示过滤条件', exact: true })).toBeVisible(); await expect(form()).not.toBeVisible(); await expect(presentation()).toBeVisible();
+  const toggle = page.getByRole('button', { name: '展示过滤条件', exact: true });
+  assert(await toggle.evaluate((element) => Boolean(element.closest('.shipping-workbench-actions'))), 'filter disclosure belongs to the main business-action row');
+  assert(await scopes().evaluate((element) => Boolean(element.closest('.shipping-table-selection'))), 'scope switches belong to the selection bar');
+  assert(await nav().evaluate((element) => Boolean(element.closest('.shipping-table-selection'))), 'batch picker belongs to the scope and selection bar');
+  assert(await presentation().evaluate((element) => Boolean(element.closest('.shipping-table-selection'))), 'presentation belongs to the selection bar');
+  assert(await page.getByRole('button', { name: '列展示设置', exact: true }).evaluate((element) => Boolean(element.closest('.scm-grid-navigation') && element.closest('.scm-grid-header-actions'))), 'column settings belong to the grid title row');
+  const append = page.getByRole('button', { name: '加入已有批次', exact: true });
+  assert(await append.evaluate((element) => Boolean(element.compareDocumentPosition(document.querySelector('[role="group"][aria-label="发货范围切换"]')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'scope switches follow append in reading order');
+  assert(await scopes().evaluate((element) => Boolean(element.compareDocumentPosition(document.querySelector('nav[aria-label="需求与批次导航"]')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'batch picker follows scope switches in reading order');
+  assert(await presentation().evaluate((element) => Boolean(element.compareDocumentPosition(document.querySelector('.shipping-export-page')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'presentation precedes the export checkbox');
+  for (const width of [1920, 1440, 390, 320]) {
+    await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 }); await noOverflow();
+    const [actions, disclosure, selection, scope, appendButton, display, exportChoice, settings, batchPicker, gridHeader, gridTitle] = await Promise.all([
+      page.locator('.shipping-workbench-actions').boundingBox(), page.locator('.shipping-filter-disclosure').boundingBox(),
+      page.locator('.shipping-table-selection').boundingBox(), scopes().boundingBox(), append.boundingBox(), presentation().boundingBox(), page.locator('.shipping-export-page').boundingBox(), page.getByRole('button', { name: '列展示设置', exact: true }).boundingBox(),
+      nav().getByRole('button', { name: '发货批次', exact: true }).boundingBox(), table().locator('.scm-grid-navigation').boundingBox(), table().locator('.scm-grid-navigation > span').first().boundingBox(),
+    ]);
+    assert(actions && disclosure && selection && scope && appendButton && display && exportChoice && settings && batchPicker && gridHeader && gridTitle);
+    if (width >= 1440) assert(Math.abs(disclosure.x + disclosure.width - (actions.x + actions.width)) <= 2, `filter disclosure aligns to the far right at ${width}px`);
+    if (width === 1920) {
+      assert(scope.x >= appendButton.x + appendButton.width, 'scope switches follow append on the wide row');
+      assert(Math.abs(scope.y + scope.height / 2 - (appendButton.y + appendButton.height / 2)) <= 8, 'scope and append share the wide row');
+      assert(batchPicker.x >= scope.x + scope.width, 'batch picker follows scope switches on the wide row');
+      assert(Math.abs(batchPicker.y + batchPicker.height / 2 - (scope.y + scope.height / 2)) <= 8, 'batch picker and scope switches share the wide row');
+      assert(display.x + display.width <= exportChoice.x, 'presentation precedes export on the wide row');
+      assert(Math.abs(display.y + display.height / 2 - (exportChoice.y + exportChoice.height / 2)) <= 8, 'presentation and export share the wide row');
+    }
+    assert(gridHeader.y >= selection.y + selection.height, 'grid title row follows the selection bar');
+    assert(gridHeader.x + gridHeader.width - (settings.x + settings.width) <= 16, `column settings align right in the title row at ${width}px`);
+    if (width >= 1440) { assert(gridTitle.x + gridTitle.width <= settings.x, 'title precedes column settings'); assert(Math.abs(gridTitle.y + gridTitle.height / 2 - (settings.y + settings.height / 2)) <= 8, 'title and column settings share the wide row'); }
+    await page.screenshot({ path: resolve(evidence, `workbench-default-${width}.png`), fullPage: true, animations: 'disabled' });
+  }
+  await page.setViewportSize({ width: 390, height: 844 }); await openBatchPicker(); await page.waitForTimeout(150);
+  const batchPanel = nav().locator('.shipping-batch-picker-options'), batchBounds = await batchPanel.boundingBox();
+  assert(batchBounds && batchBounds.x >= 0 && batchBounds.y >= 0 && batchBounds.x + batchBounds.width <= 391 && batchBounds.y + batchBounds.height <= 845, `batch picker fits 390px: ${JSON.stringify(batchBounds)}`);
+  await page.screenshot({ path: resolve(evidence, 'batch-picker-390.png'), animations: 'disabled' }); await nav().getByRole('button', { name: '发货批次', exact: true }).click();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const initialQueryCount = state.queries.length;
+  await showShippingFilters(page); await form().getByLabel('搜索', { exact: true }).fill('UI-SKU-99-0');
+  await page.getByRole('button', { name: '隐藏过滤条件', exact: true }).click(); await expect(form()).not.toBeVisible();
+  await expect(page.getByText('有未应用修改', { exact: true })).toBeVisible(); await expect(newBatch()).toBeDisabled(); assert.equal(state.queries.length, initialQueryCount);
+  await page.getByRole('button', { name: '展开过滤条件继续修改', exact: true }).click(); await expect(form().getByLabel('搜索', { exact: true })).toHaveValue('UI-SKU-99-0');
+  await reset(); await page.getByRole('button', { name: '隐藏过滤条件', exact: true }).click(); await page.reload(); await ready(); await expect(form()).not.toBeVisible(); note();
+
+  step = 'triangle-and-page-bulk-expansion-keep-selection-and-column-preferences';
+  assert.deepEqual((await keys()).slice(0, 9), ['expand', 'rowNumber', 'selection', 'fba', 'group', 'destinationFc', 'shop', 'country', 'channel']);
+  await expect(table()).toHaveAttribute('data-row-count', '60');
+  await table().getByRole('grid').click({ position: { x: 16, y: 64 } }); await expect(table()).toHaveAttribute('data-row-count', '58');
+  await table().getByRole('grid').click({ position: { x: 16, y: 64 } }); await expect(table()).toHaveAttribute('data-row-count', '60');
+  const collapseAll = page.getByRole('button', { name: '全部收起', exact: true }), expandAll = page.getByRole('button', { name: '全部展开', exact: true });
+  for (const control of [collapseAll, expandAll]) {
+    assert(await control.evaluate((element) => Boolean(element.closest('.scm-grid-header-actions'))), 'bulk expansion belongs to the grid title controls');
+    assert(await control.evaluate((element) => Boolean(element.compareDocumentPosition(document.querySelector('.scm-grid-header-actions button[aria-haspopup="dialog"]')) & Node.DOCUMENT_POSITION_FOLLOWING)), 'bulk expansion precedes column settings');
+  }
+  await selectGridRow(page, '发货明细表', 0); await table().getByRole('checkbox', { name: '选择货件 FBA-UI-0001', exact: true }).check(); await closeRecord();
+  const beforeBulkPreferences = await preference(), beforeBulkQueries = state.queries.length;
+  await collapseAll.click(); await expect(table()).toHaveAttribute('data-row-count', '20');
+  await expect(page.getByLabel('需求分组操作', { exact: true })).toContainText('已选 1 票');
+  for (const width of [1440, 390, 320]) { await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 }); await noOverflow(); await page.screenshot({ path: resolve(evidence, `bulk-collapsed-${width}.png`), fullPage: true, animations: 'disabled' }); }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await table().getByRole('grid').click({ position: { x: 16, y: 64 } }); await expect(table()).toHaveAttribute('data-row-count', '22');
+  await expandAll.click(); await expect(table()).toHaveAttribute('data-row-count', '60');
+  assert.equal(state.queries.length, beforeBulkQueries, 'expansion only changes the current page display'); assert.deepEqual(await preference(), beforeBulkPreferences, 'bulk expansion does not alter column preferences');
+  await selectGridRow(page, '发货明细表', 0); await expect(table().getByRole('checkbox', { name: '选择货件 FBA-UI-0001', exact: true })).toBeChecked(); await closeRecord();
+  await openColumns(); for (const label of ['货件', '批次', '目的仓', '店铺', '国家', '渠道']) await expect(picker().getByRole('checkbox', { name: label, exact: false }).first()).toBeChecked();
+  await expect(picker().getByRole('checkbox', { name: /货件/ })).toBeDisabled();
+  await closeColumns();
+  for (const width of [1440, 390]) {
+    const height = width < 768 ? 844 : 1000; await page.setViewportSize({ width, height }); await openColumns(); await page.waitForTimeout(150);
+    const bounds = await picker().boundingBox(); assert(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= width + 1 && bounds.y + bounds.height <= height + 1, `column settings fit ${width}px: ${JSON.stringify(bounds)}`);
+    await expect(picker().getByRole('button', { name: '恢复默认列', exact: true })).toBeInViewport();
+    await page.screenshot({ path: resolve(evidence, `column-settings-${width}.png`), animations: 'disabled' }); await closeColumns();
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 }); note();
+  if (process.env.SHIPPING_UNIFIED_COLUMN_VISUAL_ONLY === '1') return;
+
+  step = 'page-capacity-uses-complete-demands-and-keeps-cross-page-selection';
+  await selectGridRow(page, '发货明细表', 0); await table().getByRole('checkbox', { name: '选择货件 FBA-UI-0001', exact: true }).check(); await closeRecord();
+  for (const size of [50, 100]) {
+    await chooseFieldOption(capacity(), String(size)); await expect.poll(() => state.queries.at(-1)?.pageSize).toBe(String(size)); await expect.poll(() => new Set(currentRows.map((row) => row.demandId)).size).toBe(size);
+    assert([...new Set(currentRows.map((row) => row.demandId))].every((key) => currentRows.filter((row) => row.demandId === key).length === 2));
+    await expect(page.getByLabel('需求分组操作', { exact: true })).toContainText('已选 1 票');
+  }
+  await page.getByRole('button', { name: '下一页', exact: true }).click(); await expect.poll(() => state.queries.at(-1)?.page).toBe('2'); await expect.poll(() => currentRows.length).toBe(10);
+  await chooseFieldOption(capacity(), '20'); await expect.poll(() => state.queries.at(-1)?.page).toBe('1'); await expect.poll(() => currentRows.length).toBe(40); await expect(page.getByLabel('需求分组操作', { exact: true })).toContainText('已选 1 票');
+  await selectGridRow(page, '发货明细表', 0); await expect(table().getByRole('checkbox', { name: '选择货件 FBA-UI-0001', exact: true })).toBeChecked(); await closeRecord();
+  await chooseFieldOption(capacity(), '100'); await expect.poll(() => currentRows.length).toBe(200); note();
+
+  step = 'columns-persist-per-view-and-new-box-columns-default-visible';
+  await openColumns(); await picker().getByLabel('搜索列', { exact: true }).fill('国家'); await expect(picker().getByRole('checkbox')).toHaveCount(1); await picker().getByRole('checkbox', { name: '国家', exact: true }).uncheck(); await picker().getByLabel('搜索列', { exact: true }).fill(''); await picker().getByRole('checkbox', { name: '箱 1', exact: true }).uncheck(); await closeColumns();
+  assert(!(await keys()).includes('country')); assert(!(await keys()).includes('box:1'));
+  await chooseFieldOption(presentation(), 'products'); await ready(); await expect(capacity()).toHaveAttribute('data-value', '20'); assert((await keys()).includes('country')); assert(!(await keys()).includes('expand'));
+  await expect(collapseAll).toHaveCount(0); await expect(expandAll).toHaveCount(0);
+  await chooseFieldOption(presentation(), 'boxes'); await ready(); await expect(collapseAll).toHaveCount(0); await expect(expandAll).toHaveCount(0);
+  await chooseFieldOption(presentation(), 'products'); await ready();
+  await chooseFieldOption(capacity(), '50'); await expect.poll(() => currentRows.length).toBe(100);
+  await chooseFieldOption(presentation(), 'shipments'); await ready(); await expect(capacity()).toHaveAttribute('data-value', '100'); assert(!(await keys()).includes('country'));
+  state.maxBoxes = 12; await page.getByRole('button', { name: '刷新工作区', exact: true }).click(); await expect.poll(async () => (await keys()).includes('box:12')).toBe(true); assert(!(await keys()).includes('box:1'));
+  await page.reload(); await ready(); await expect(capacity()).toHaveAttribute('data-value', '100'); assert(!(await keys()).includes('country')); note();
+
+  step = 'column-widths-account-isolation-and-reset-preserve-capacity';
+  await table().getByRole('grid').scrollIntoViewIfNeeded(); const bounds = await table().getByRole('grid').boundingBox();
+  await page.mouse.move(bounds.x + 328, bounds.y + 18); await page.mouse.down(); await page.mouse.move(bounds.x + 368, bounds.y + 18, { steps: 8 }); await page.mouse.up();
+  await expect.poll(async () => (await preference())?.columnWidths?.fba ?? 0).toBeGreaterThan(225);
+  state.actor = 'technical-workbench-other'; await page.reload(); await ready(); await expect(capacity()).toHaveAttribute('data-value', '20'); assert((await keys()).includes('country')); assert.equal(await preference(state.actor), null);
+  state.actor = 'technical-workbench'; await page.reload(); await ready(); await expect(capacity()).toHaveAttribute('data-value', '100'); assert(!(await keys()).includes('country')); assert((await preference()).columnWidths.fba > 225);
+  await openColumns(); await picker().getByRole('button', { name: '恢复默认列', exact: true }).click(); await closeColumns(); assert((await keys()).includes('country')); assert((await keys()).includes('box:1')); assert.deepEqual((await preference()).columnWidths, {}); await expect(capacity()).toHaveAttribute('data-value', '100'); note();
+
+  step = 'canvas-dots-menu-targets-stable-record-and-fits-responsive-viewports';
+  for (const width of [1440, 1920, 1024, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 }); await noOverflow(); await table().getByRole('grid').scrollIntoViewIfNeeded();
+    const bounds = await table().getByRole('grid').boundingBox(); await table().getByRole('grid').hover({ position: { x: bounds.width - 24, y: 100 } }); await page.mouse.wheel(10000, 0); await page.waitForTimeout(300);
+    await table().getByRole('grid').click({ position: { x: bounds.width - 24, y: 64 } }); await expect(menu()).toContainText('FBA-UI-0001');
+    await expect(menu().getByRole('menuitem', { name: '完整详情', exact: true })).toBeVisible(); await expect(menu().getByRole('menuitem', { name: '编辑需求', exact: true })).toBeEnabled();
+    const menuBounds = await menu().boundingBox(); assert(menuBounds.x >= 0 && menuBounds.x + menuBounds.width <= width + 1);
+    await page.screenshot({ path: resolve(evidence, `grid-interactions-menu-${width}.png`), animations: 'disabled' });
+    await menu().getByRole('menuitem', { name: '完整详情', exact: true }).click(); await expect(table().locator('.shipping-grid-details')).toHaveAttribute('data-demand-id', state.uiDemandIds[0]); await closeRecord();
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 }); assert.deepEqual(state.mutations, []); note();
+}
 
 function scrollFixture() {
   const state = fixture(), demandRows = state.demandRows;
@@ -159,61 +351,39 @@ function scrollFixture() {
 }
 
 async function scopeScrollChecks(state) {
-  step = 'batch-and-pool-navigation-preserve-document-scroll-position';
-  await page.goto('/shipping?view=demands'); await expect(table()).toContainText('SKU-0-0-SCROLL-0');
-  const scopeChoices = [
+  step = 'large-scope-navigation-keeps-one-bounded-canvas-and-current-record';
+  await page.goto('/shipping?view=demands'); await expectGridValue('SKU-0-0-SCROLL-0');
+  const choices = [
     { name: new RegExp(state.groups[0].name), groupId: state.groups[0].id, sku: 'SKU-0-0-SCROLL-0' },
     { name: new RegExp(state.groups[1].name), groupId: state.groups[1].id, sku: 'SKU-1-0-SCROLL-0' },
     { name: '全部发货', sku: 'SKU-2-0-SCROLL-0' },
     { name: '待分组需求', pool: 'ungrouped', sku: 'SKU-2-0-SCROLL-0' },
   ];
-  for (const choice of scopeChoices) {
-    const button = nav().getByRole('button', { name: choice.name, exact: typeof choice.name === 'string' });
-    // Keep the full target in view after adding lifecycle controls to the nav;
-    // otherwise Playwright itself scrolls a clipped button before clicking it.
-    const scrollOffset = await button.evaluate((node) => Math.max(300, Math.ceil(node.getBoundingClientRect().bottom + scrollY - innerHeight + 100)));
-    await page.evaluate((offset) => window.scrollTo(0, offset), scrollOffset);
-    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollOffset);
-    await expect(button).toBeInViewport();
-    const before = await page.evaluate(() => ({ y: scrollY, max: document.documentElement.scrollHeight - innerHeight }));
-    assert(before.max > before.y + 100, 'the current scope must leave room below the retained scroll offset');
-    const queryCount = state.queries.length;
-    await page.evaluate(() => {
-      const probe = { active: true, minScrollable: Infinity };
-      window.__shippingScopeScrollProbe = probe;
-      const sample = () => {
-        if (!probe.active) return;
-        probe.minScrollable = Math.min(probe.minScrollable, document.documentElement.scrollHeight - innerHeight);
-        requestAnimationFrame(sample);
-      };
-      sample();
-    });
-    await button.click();
-    await expect(page).toHaveURL((url) => url.pathname === '/shipping' && url.searchParams.get('view') === 'demands'
-      && url.searchParams.get('groupId') === (choice.groupId ?? null) && url.searchParams.get('pool') === (choice.pool ?? null));
-    await expect.poll(() => state.queries.length).toBeGreaterThan(queryCount);
+  for (const choice of choices) {
+    if (typeof choice.name !== 'string') await openBatchPicker();
+    const button = (typeof choice.name === 'string' ? scopes() : nav()).getByRole('button', { name: choice.name, exact: typeof choice.name === 'string' });
+    const reads = state.queries.length; await button.click();
+    await expect.poll(() => state.queries.length).toBeGreaterThan(reads);
     await expect.poll(() => state.queries.at(-1)?.groupId).toBe(choice.groupId);
     await expect.poll(() => state.queries.at(-1)?.grouping).toBe(choice.pool);
-    await expect(button).toHaveAttribute('aria-current', 'page'); await expect(table()).toContainText(choice.sku);
-    await expect(form().getByRole('button', { name: '筛选', exact: true })).toBeEnabled();
-    const after = await page.evaluate(() => {
-      const probe = window.__shippingScopeScrollProbe; probe.active = false;
-      return { y: scrollY, max: document.documentElement.scrollHeight - innerHeight, minScrollable: probe.minScrollable };
-    });
-    assert(after.max > before.y + 100, 'the destination scope must remain tall enough to retain the same offset');
-    assert(after.minScrollable > before.y + 100, 'the content must stay tall throughout fetching and rendering the new scope');
-    assert(Math.abs(after.y - before.y) <= 2, `${typeof choice.name === 'string' ? choice.name : choice.groupId}: scope navigation must retain document scroll (before ${before.y}, after ${after.y})`);
+    if (typeof choice.name === 'string') await expect(button).toHaveAttribute('aria-current', 'page');
+    else await expect(page.getByRole('heading', { name: choice.name })).toBeVisible();
+    await expectGridValue(choice.sku);
+    await expect(table().locator('canvas')).toHaveCount(1); await expect(table().locator('table')).toHaveCount(0);
+    await expect(table().locator('.shipping-grid-details')).toHaveCount(0);
+    const viewport = await table().getByRole('grid').boundingBox(); assert(viewport && viewport.height <= 641);
+    await noOverflow();
   }
-  await page.screenshot({ path: resolve(evidence, 'workbench-scope-scroll-preserved.png') }); note();
+  await page.screenshot({ path: resolve(evidence, 'workbench-bounded-canvas-scopes.png') }); note();
 }
-
 async function unifiedNavigation(state) {
   step = 'one-workbench-table-with-three-presentations-and-unified-actions';
-  await page.goto('/shipping?view=demands'); await expect(table()).toContainText('SKU-0-0');
+  await page.goto('/shipping?view=demands'); await expectGridValue('SKU-0-0');
+  await showShippingFilters(page);
   await expect(page.getByRole('navigation', { name: '发货工作台视图', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '需求处理', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '发货成品', exact: true })).toHaveCount(0);
-  await expect(table().locator('table')).toHaveCount(1);
+  await expect(table().locator('canvas')).toHaveCount(1); await expect(table().locator('table')).toHaveCount(0);
   const submenu = page.getByRole('navigation', { name: '发货管理子导航', exact: true });
   const shippingNavigation = [
     { label: '发货工作台', view: 'demands' },
@@ -229,20 +399,21 @@ async function unifiedNavigation(state) {
   for (const label of ['领星单据与分配', '物流与交接', '报关与 9810', '批次归档']) await expect(submenu.getByRole('button', { name: label + '（待维护）', exact: true })).toBeDisabled();
   await expect(submenu.getByRole('link', { name: '发货工作台', exact: true })).toHaveAttribute('aria-current', 'page');
   for (const label of ['草稿箱', '导入记录', '生成所选批次 XLSX', '批次导出记录', '刷新工作区']) {
-    const button = form().getByRole('button', { name: label, exact: true });
+    const button = page.getByRole('button', { name: label, exact: true });
     await expect(button).toBeVisible(); await expect(button).toHaveAttribute('type', 'button');
   }
   await expect(page.getByRole('button', { name: '导入需求', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '新增需求', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '导入本次发货', exact: true })).toHaveCount(1);
   await expect(page.getByRole('button', { name: '导入本次发货', exact: true })).toBeVisible();
-  await expect(nav().getByRole('button', { name: '手动创建批次', exact: true })).toHaveCount(1);
+  await openBatchPicker(); await expect(nav().getByRole('button', { name: '手动创建批次', exact: true })).toHaveCount(1);
   await expect(nav().getByRole('button', { name: '新建批次', exact: true })).toHaveCount(0);
+  await nav().getByRole('button', { name: '发货批次', exact: true }).click();
   await page.getByRole('heading', { level: 1, name: '发货工作台', exact: true }).click();
   await page.screenshot({ path: resolve(evidence, 'workbench-entry-actions-1440.png') });
   await expect(form().getByRole('button', { name: '筛选', exact: true })).toHaveAttribute('type', 'submit');
   await expect(form().getByLabel('数据处理状态', { exact: true })).toBeVisible(); await expect(form().getByLabel('国家 / 区域', { exact: true })).toBeVisible();
-  const before = copy(state.mutations); await page.getByRole('button', { name: '导入记录', exact: true }).click();
+  const before = copy(state.mutations); await closeRecord(); await page.getByRole('button', { name: '导入记录', exact: true }).click();
   await expect(page.getByRole('dialog', { name: '导入记录', exact: true })).toContainText('尚无导入记录'); await page.keyboard.press('Escape');
   assert.deepEqual(state.mutations, before); note();
 }
@@ -251,109 +422,109 @@ async function presentationsAndSelections(state) {
   step = 'grouped-products-and-box-rows-retain-identical-product-code-and-frozen-quantity';
   const before = copy(state.mutations), products = ['SKU-0-0', 'SKU-0-1', 'SKU-1-0', 'SKU-2-0', 'SKU-2-1', 'SKU-3-0', 'SKU-4-0'];
   for (const view of ['shipments', 'products', 'boxes']) {
-    await chooseOption(presentation(), view); for (const sku of products) await expect(table()).toContainText(sku);
-    const frozen = table().getByRole('row').filter({ hasText: 'SKU-1-0' }).first();
-    await expect(frozen).toContainText('冻结原确认商品'); await expect(frozen).toContainText('77'); await expect(frozen).toContainText('AB-2');
-    await expect(table()).toContainText('完整商品 0-1');
-    if (view === 'boxes') { await expect(table()).toContainText('KG'); await expect(table()).toContainText('CM'); await expect(table()).toContainText('EXT-0'); }
+    await chooseOption(presentation(), view); for (const sku of products) await expectGridValue(sku);
+    await expectGridValue('SKU-1-0', true); const frozen = table().locator('.shipping-grid-details');
+    await expect(frozen).toContainText('冻结原确认商品'); await expect(frozen).toContainText('77'); await expect(frozen).toContainText('AB-2'); await closeRecord();
+    await expectGridValue('完整商品 0-1');
+    if (view === 'boxes') { await expectGridValue('KG'); await expectGridValue('CM'); await expectGridValue('EXT-0'); }
   }
   assert.deepEqual(state.mutations, before); note();
   step = 'shipment-and-whole-export-group-selection-remain-independent-in-every-presentation';
   await chooseOption(presentation(), 'shipments');
-  const shipment = demandCheck('FBA-SHARED-2'); await shipment.first().focus(); await page.keyboard.press('Space');
+  const shipment = (await demandCheck('FBA-SHARED-2')); await shipment.first().focus(); await page.keyboard.press('Space');
   await expect(shipment.first()).toBeChecked(); await expect(newBatch()).toBeEnabled(); await expect(generate()).toBeDisabled();
-  await exportCheck(state.groups[0].name).first().focus(); await page.keyboard.press('Space'); await expect(generate()).toBeEnabled(); await expect(newBatch()).toBeEnabled();
-  await expect(exportCheck(state.groups[2].name).first()).toBeDisabled(); await expect(exportCheck(state.groups[3].name).first()).toBeDisabled();
+  await (await exportCheck(state.groups[0].name)).first().focus(); await page.keyboard.press('Space'); await expect(generate()).toBeEnabled(); await expect(newBatch()).toBeEnabled();
+  await expect((await exportCheck(state.groups[2].name)).first()).toBeDisabled(); await expect((await exportCheck(state.groups[3].name)).first()).toBeDisabled();
   for (const view of ['products', 'boxes', 'shipments']) {
     await chooseOption(presentation(), view);
-    for (const checkbox of await demandCheck('FBA-SHARED-2').all()) await expect(checkbox).toBeChecked();
-    for (const checkbox of await exportCheck(state.groups[0].name).all()) await expect(checkbox).toBeChecked();
+    for (const checkbox of await (await demandCheck('FBA-SHARED-2')).all()) await expect(checkbox).toBeChecked();
+    for (const checkbox of await (await exportCheck(state.groups[0].name)).all()) await expect(checkbox).toBeChecked();
     await expect(generate()).toBeEnabled(); await expect(newBatch()).toBeEnabled();
   }
-  await exportCheck(state.groups[0].name).first().uncheck(); await expect(generate()).toBeDisabled(); await expect(newBatch()).toBeEnabled();
-  await demandCheck('FBA-SHARED-2').first().uncheck(); await expect(newBatch()).toBeDisabled();
-  await exportCheck(state.groups[1].name).first().check(); await expect(generate()).toBeEnabled();
-  await generate().click(); await expect.poll(() => state.exports.length).toBe(1);
+  await (await exportCheck(state.groups[0].name)).first().uncheck(); await expect(generate()).toBeDisabled(); await expect(newBatch()).toBeEnabled();
+  await (await demandCheck('FBA-SHARED-2')).first().uncheck(); await expect(newBatch()).toBeDisabled();
+  await (await exportCheck(state.groups[1].name)).first().check(); await expect(generate()).toBeEnabled();
+  await closeRecord(); await generate().click(); await expect.poll(() => state.exports.length).toBe(1);
   assert.deepEqual(state.exportBodies.at(-1).expectedConfirmations, [state.references[1]], 'frozen export guards the current group version and keeps its original confirmation identity');
-  assert.deepEqual(state.exportBodies.at(-1).groupIds, [state.groups[1].id]); await exportCheck(state.groups[1].name).first().uncheck(); note();
+  assert.deepEqual(state.exportBodies.at(-1).groupIds, [state.groups[1].id]); await (await exportCheck(state.groups[1].name)).first().uncheck(); note();
 }
 
 async function searchEligibility(state) {
   step = 'notes-and-address-search-preserve-whole-shipment-and-valid-export-reference';
   for (const term of ['ONLY-READY-NOTE', 'ONLY-READY-ADDRESS']) {
     const previousReads = state.reportQueries.length;
-    await form().getByLabel('搜索', { exact: true }).fill(term);
-    await form().getByRole('button', { name: '筛选', exact: true }).click();
+    await closeRecord(); await form().getByLabel('搜索', { exact: true }).fill(term);
+    await closeRecord(); await form().getByRole('button', { name: '筛选', exact: true }).click();
     await expect.poll(() => state.queries.at(-1)?.q).toBe(term);
     await expect.poll(() => state.reportQueries.length).toBeGreaterThan(previousReads);
     assert(!('q' in state.reportQueries.at(-1)), 'export eligibility must not narrow the broader workbench search');
-    await expect(table()).toContainText('SKU-0-0'); await expect(table()).toContainText('SKU-0-1');
-    await expect(table()).not.toContainText('SKU-1-0'); await expect(table()).not.toContainText('SKU-2-0');
-    await exportCheck(state.groups[0].name).first().check(); await expect(generate()).toBeEnabled();
-    const before = state.exports.length; await generate().click(); await expect.poll(() => state.exports.length).toBe(before + 1);
+    await expectGridValue('SKU-0-0'); await expectGridValue('SKU-0-1');
+    await expectGridAbsent('SKU-1-0'); await expectGridAbsent('SKU-2-0');
+    await (await exportCheck(state.groups[0].name)).first().check(); await expect(generate()).toBeEnabled();
+    const before = state.exports.length; await closeRecord(); await generate().click(); await expect.poll(() => state.exports.length).toBe(before + 1);
     assert.deepEqual(state.exportBodies.at(-1).groupIds, [state.groups[0].id]);
     assert.deepEqual(state.exportBodies.at(-1).expectedConfirmations, [state.references[0]], 'a note/address search still exports the complete confirmed group');
-    await reset(); await expect(table()).toContainText('SKU-2-1');
+    await reset(); await expectGridValue('SKU-2-1');
   }
   note();
 }
 
 async function filtersAndScope(state) {
   step = 'presentation-and-toolbar-actions-do-not-submit-pending-filters';
-  await form().getByLabel('搜索', { exact: true }).fill('  FBA-SHARED  ');
+  await closeRecord(); await form().getByLabel('搜索', { exact: true }).fill('  FBA-SHARED  ');
   const previousQuery = copy(state.queries.at(-1));
-  await chooseOption(presentation(), 'products'); await expect(table()).toContainText('SKU-0-0');
-  await page.getByRole('button', { name: '导入记录', exact: true }).click();
+  await chooseOption(presentation(), 'products'); await expectGridValue('SKU-0-0');
+  await closeRecord(); await page.getByRole('button', { name: '导入记录', exact: true }).click();
   await expect(page.getByRole('dialog', { name: '导入记录', exact: true })).toBeVisible(); await page.keyboard.press('Escape');
-  const queryCount = state.queries.length; await page.getByRole('button', { name: '刷新工作区', exact: true }).click();
+  const queryCount = state.queries.length; await closeRecord(); await page.getByRole('button', { name: '刷新工作区', exact: true }).click();
   await expect.poll(() => state.queries.length).toBeGreaterThan(queryCount);
   assert.deepEqual(state.queries.at(-1), previousQuery, 'toolbar actions must keep the applied filter snapshot');
-  await expect(page.getByText('筛选条件已修改，请点击“筛选”更新当前范围。', { exact: true })).toBeVisible();
-  await reset(); await expect(table()).toContainText('SKU-0-0'); note();
+  await expect(page.getByText('筛选条件已修改，当前仍展示已应用范围。', { exact: false })).toBeVisible();
+  await reset(); await expectGridValue('SKU-0-0'); note();
   step = 'draft-and-fetching-filters-block-grouping-and-export-before-applying';
-  await demandCheck('FBA-SHARED-2').first().check(); await exportCheck(state.groups[0].name).first().check(); const before = copy(state.mutations);
-  await form().getByLabel('搜索', { exact: true }).fill('  FBA-SHARED  ');
-  await expect(newBatch()).toBeDisabled(); await expect(generate()).toBeDisabled(); await expect(demandCheck('FBA-SHARED-2').first()).toBeDisabled(); await expect(exportCheck(state.groups[0].name).first()).toBeDisabled();
-  state.delayDemand = 600; await form().getByRole('button', { name: '筛选', exact: true }).click();
+  await (await demandCheck('FBA-SHARED-2')).first().check(); await (await exportCheck(state.groups[0].name)).first().check(); const before = copy(state.mutations);
+  await closeRecord(); await form().getByLabel('搜索', { exact: true }).fill('  FBA-SHARED  ');
+  await expect(newBatch()).toBeDisabled(); await expect(generate()).toBeDisabled(); await expect((await demandCheck('FBA-SHARED-2')).first()).toBeDisabled(); await expect((await exportCheck(state.groups[0].name)).first()).toBeDisabled();
+  state.delayDemand = 600; await closeRecord(); await form().getByRole('button', { name: '筛选', exact: true }).click();
   await expect(newBatch()).toBeDisabled(); await expect(generate()).toBeDisabled(); await expect.poll(() => state.queries.at(-1)?.q).toBe('FBA-SHARED'); state.delayDemand = 0;
-  await expect(demandCheck('FBA-SHARED-2').first()).not.toBeChecked(); await expect(exportCheck(state.groups[0].name).first()).not.toBeChecked(); assert.deepEqual(state.mutations, before); note();
+  await expect((await demandCheck('FBA-SHARED-2')).first()).not.toBeChecked(); await expect((await exportCheck(state.groups[0].name)).first()).not.toBeChecked(); assert.deepEqual(state.mutations, before); note();
   step = 'all-shared-filters-apply-to-the-one-table-with-status-and-region-together';
-  await form().getByLabel('发货月份', { exact: true }).fill('2026-10');
+  await closeRecord(); await form().getByLabel('发货月份', { exact: true }).fill('2026-10');
   await expect(form().getByLabel('发货月份', { exact: true })).toHaveValue('2026-10');
   await expect(form().getByLabel('需求周范围', { exact: true })).toHaveCount(0);
   await chooseOption(form().getByLabel('店铺', { exact: true }), '101'); await chooseOption(form().getByLabel('国家', { exact: true }), '美国'); await chooseOption(form().getByLabel('业务渠道', { exact: true }), 'HY');
-  await chooseOption(form().getByLabel('数据处理状态', { exact: true }), 'candidate'); await chooseOption(form().getByLabel('国家 / 区域', { exact: true }), 'US'); await form().getByRole('button', { name: '筛选', exact: true }).click();
+  await chooseOption(form().getByLabel('数据处理状态', { exact: true }), 'candidate'); await chooseOption(form().getByLabel('国家 / 区域', { exact: true }), 'US'); await closeRecord(); await form().getByRole('button', { name: '筛选', exact: true }).click();
   const expected = { month: '2026-10', sid: '101', country: '美国', channel: 'HY', q: 'FBA-SHARED', status: 'candidate', region: 'US' };
   await expect.poll(() => Object.fromEntries(Object.keys(expected).map((key) => [key, state.queries.at(-1)?.[key]]))).toEqual(expected);
-  await expect(table()).toContainText('SKU-2-1'); await expect(table()).not.toContainText('SKU-0-0'); await expect(generate()).toBeDisabled();
-  for (const view of ['products', 'boxes', 'shipments']) { await chooseOption(presentation(), view); await expect(table()).toContainText('SKU-2-1'); await expect(form().getByLabel('发货月份', { exact: true })).toHaveValue('2026-10'); }
-  await reset(); await expect(table()).toContainText('SKU-0-0'); note();
+  await expectGridValue('SKU-2-1'); await expectGridAbsent('SKU-0-0'); await expect(generate()).toBeDisabled();
+  for (const view of ['products', 'boxes', 'shipments']) { await chooseOption(presentation(), view); await expectGridValue('SKU-2-1'); await expect(form().getByLabel('发货月份', { exact: true })).toHaveValue('2026-10'); }
+  await reset(); await expectGridValue('SKU-0-0'); note();
   step = 'specific-batch-summary-frozen-snapshot-and-legacy-entry-links-use-the-same-table';
-  await nav().getByRole('button', { name: new RegExp(state.groups[1].name) }).click(); await expect.poll(() => state.queries.at(-1)?.groupId).toBe(state.groups[1].id);
-  await expect(page.getByRole('heading', { name: state.groups[1].name, exact: true })).toBeVisible(); await expect(table()).toContainText('冻结原确认商品'); await expect(table()).not.toContainText('SKU-0-0'); await expect(page.getByText(/已冻结，保留原确认数据/)).toBeVisible();
-  for (const view of ['products', 'boxes']) { await chooseOption(presentation(), view); await expect(table()).toContainText('冻结原确认商品'); await expect(nav().getByRole('button', { name: new RegExp(state.groups[1].name) })).toHaveAttribute('aria-current', 'page'); }
-  await page.goto(`/shipping?view=reports&groupId=${state.groups[1].id}`); await expect(table()).toContainText('冻结原确认商品'); await expect(page.getByRole('navigation', { name: '发货工作台视图', exact: true })).toHaveCount(0);
-  await page.goto('/batch-reports'); await expect(page).toHaveURL(/\/shipping\?/); await expect(table()).toContainText('SKU-2-1'); await page.goto('/shipping?view=demands'); await expect(table()).toContainText('SKU-2-1'); note();
+  await openBatchPicker(); await nav().getByRole('button', { name: new RegExp(state.groups[1].name) }).click(); await expect.poll(() => state.queries.at(-1)?.groupId).toBe(state.groups[1].id);
+  await expect(page.getByRole('heading', { name: state.groups[1].name, exact: true })).toBeVisible(); await expectGridValue('冻结原确认商品'); await expectGridAbsent('SKU-0-0'); await expect(page.getByText(/已冻结，保留原确认数据/)).toBeVisible();
+  for (const view of ['products', 'boxes']) { await chooseOption(presentation(), view); await expectGridValue('冻结原确认商品'); await expect(page.getByRole('heading', { name: state.groups[1].name, exact: true })).toBeVisible(); }
+  await page.goto(`/shipping?view=reports&groupId=${state.groups[1].id}`); await expectGridValue('冻结原确认商品'); await expect(page.getByRole('navigation', { name: '发货工作台视图', exact: true })).toHaveCount(0);
+  await page.goto('/batch-reports'); await expect(page).toHaveURL(/\/shipping\?/); await expectGridValue('SKU-2-1'); await page.goto('/shipping?view=demands'); await expectGridValue('SKU-2-1'); note();
 }
 
 async function exportChecks(state) {
   step = 'export-unknown-result-and-queue-retry-preserve-operation-and-confirmations';
-  await exportCheck(state.groups[0].name).first().check(); state.exportFailure = 'UNKNOWN_RESULT'; await generate().click();
-  await expect(page.getByRole('alert')).toBeVisible(); await expect(exportCheck(state.groups[0].name).first()).toBeChecked();
-  const snapshot = copy(state.exportBodies.at(-1)); state.exportFailure = 'QUEUE_UNAVAILABLE'; await generate().click(); await expect(page.getByRole('alert')).toContainText('任务队列暂不可用'); assert.deepEqual(state.exportBodies.at(-1), snapshot);
-  const count = state.exports.length; await generate().click(); await expect.poll(() => state.exports.length).toBe(count + 1);
+  await (await exportCheck(state.groups[0].name)).first().check(); state.exportFailure = 'UNKNOWN_RESULT'; await closeRecord(); await generate().click();
+  await expect(page.getByRole('alert')).toBeVisible(); await expect((await exportCheck(state.groups[0].name)).first()).toBeChecked();
+  const snapshot = copy(state.exportBodies.at(-1)); state.exportFailure = 'QUEUE_UNAVAILABLE'; await closeRecord(); await generate().click(); await expect(page.getByRole('alert')).toContainText('任务队列暂不可用'); assert.deepEqual(state.exportBodies.at(-1), snapshot);
+  const count = state.exports.length; await closeRecord(); await generate().click(); await expect.poll(() => state.exports.length).toBe(count + 1);
   assert.deepEqual(state.exportBodies.at(-1), snapshot); assert.deepEqual(snapshot.expectedConfirmations, [state.references[0]]); assert.deepEqual(snapshot.groupIds, [state.groups[0].id]);
-  await page.getByRole('button', { name: '批次导出记录', exact: true }).click(); const history = page.getByRole('dialog', { name: '批次导出记录', exact: true }); await expect(history).toContainText(state.references[0].confirmationId);
+  await closeRecord(); await page.getByRole('button', { name: '批次导出记录', exact: true }).click(); const history = page.getByRole('dialog', { name: '批次导出记录', exact: true }); await expect(await findGridRow(history, '导出历史', state.references[0].confirmationId)).toContainText(state.references[0].confirmationId);
   const download = page.waitForEvent('download'); await history.getByRole('button', { name: '下载 XLSX', exact: true }).last().click(); assert((await download).suggestedFilename().endsWith('.xlsx'));
-  await page.keyboard.press('Escape'); state.exportFailure = 'VERSION_CONFLICT'; await generate().click(); await expect(exportCheck(state.groups[0].name).first()).not.toBeChecked(); await expect(generate()).toBeDisabled(); note();
+  await page.keyboard.press('Escape'); state.exportFailure = 'VERSION_CONFLICT'; await closeRecord(); await generate().click(); await expect((await exportCheck(state.groups[0].name)).first()).not.toBeChecked(); await expect(generate()).toBeDisabled(); note();
   step = 'changed-confirmation-refresh-revokes-export-selection';
-  await exportCheck(state.groups[0].name).first().check(); state.references[0].confirmationId = id(); state.references[0].groupVersion += 1; state.groups[0].version += 1;
+  await (await exportCheck(state.groups[0].name)).first().check(); state.references[0].confirmationId = id(); state.references[0].groupVersion += 1; state.groups[0].version += 1;
   state.reportRows.filter((row) => row.groupId === state.groups[0].id).forEach((row) => { row.confirmationId = state.references[0].confirmationId; }); state.boxes[0].confirmationId = state.references[0].confirmationId;
-  await page.getByRole('button', { name: '刷新工作区', exact: true }).click(); await expect(exportCheck(state.groups[0].name).first()).not.toBeChecked(); await expect(generate()).toBeDisabled(); note();
+  await closeRecord(); await page.getByRole('button', { name: '刷新工作区', exact: true }).click(); await expect((await exportCheck(state.groups[0].name)).first()).not.toBeChecked(); await expect(generate()).toBeDisabled(); note();
 }
 
 async function entryChecks() {
-  await page.goto('/shipping'); await expect(table()).toContainText('SKU-0-0');
+  await page.goto('/shipping'); await expectGridValue('SKU-0-0');
   await expect(page.getByRole('button', { name: '新增需求', exact: true })).toHaveCount(0);
   const importer = page.getByRole('button', { name: '导入本次发货', exact: true });
   await expect(importer).toHaveCount(1);
@@ -375,42 +546,40 @@ async function entryChecks() {
 }
 
 async function layoutChecks() {
-  step = 'workbench-actions-and-presentation-follow-filter-layout-at-all-breakpoints';
-  await page.reload(); await expect(table()).toContainText('SKU-0-0');
+  step = 'workbench-disclosure-and-bottom-controls-fit-all-breakpoints';
+  await page.reload(); await expectGridValue('SKU-0-0');
+  await showShippingFilters(page);
   for (const width of [1920, 1440, 1024, 767, 390, 320]) {
     await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 });
     await noOverflow();
-    const [search, display, apply, resetButton, toolbar, navigation] = await Promise.all([
+    const [search, display, apply, resetButton, toolbar, navigation, columnSettings, footer] = await Promise.all([
       form().getByLabel('搜索', { exact: true }).boundingBox(), presentation().boundingBox(),
       form().getByRole('button', { name: '筛选', exact: true }).boundingBox(),
       form().getByRole('button', { name: '重置', exact: true }).boundingBox(),
       page.locator('.shipping-unified-toolbar').boundingBox(), nav().boundingBox(),
+      page.getByRole('button', { name: '列展示设置', exact: true }).boundingBox(), table().locator('.scm-grid-footer').boundingBox(),
     ]);
-    assert(search && display && apply && resetButton && toolbar && navigation);
-    if (width >= 768) {
-      assert(Math.abs(search.y - display.y) <= 1, `search and presentation share a row at ${width}px`);
-      assert(display.x >= search.x + search.width, `presentation is right of search at ${width}px`);
-    } else {
-      assert(display.y >= search.y + search.height, `presentation follows search at ${width}px`);
-      assert(toolbar.y >= apply.y + apply.height, `toolbar wraps below filter controls at ${width}px`);
-    }
-    if (width >= 1440) {
-      assert(toolbar.x >= resetButton.x + resetButton.width, `toolbar is right of filter/reset at ${width}px`);
-      assert(Math.abs(toolbar.y - apply.y) <= 1, `toolbar begins on the filter row at ${width}px`);
-    }
+    assert(search && display && apply && resetButton && toolbar && navigation && columnSettings && footer);
+    const filterBounds = await form().boundingBox(); assert(filterBounds);
+    assert(toolbar.y + toolbar.height <= filterBounds.y + 1, `business toolbar precedes disclosed conditions at ${width}px`);
     assert(navigation.y >= toolbar.y + toolbar.height, `all actions appear above the demand and batch area at ${width}px`);
+    assert(await nav().evaluate((element) => Boolean(element.closest('.shipping-table-selection'))), `batch navigation stays in the selection bar at ${width}px`);
+    assert(footer.y > display.y, `row navigation and page capacity appear below the grid at ${width}px`);
     await page.getByRole('heading', { level: 1, name: '发货工作台', exact: true }).click();
     await page.screenshot({ path: resolve(evidence, `workbench-controls-${width}.png`), fullPage: false });
   }
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await form().getByLabel('搜索', { exact: true }).focus(); await page.keyboard.press('Tab'); await expect(presentation()).toBeFocused();
-  await page.keyboard.press('Tab'); await expect(form().getByRole('button', { name: '筛选', exact: true })).toBeFocused();
+  await page.getByRole('button', { name: '刷新工作区', exact: true }).focus(); await page.keyboard.press('Tab'); await expect(page.getByRole('button', { name: '隐藏过滤条件', exact: true })).toBeFocused();
+  await closeRecord(); await form().getByLabel('搜索', { exact: true }).focus(); await page.keyboard.press('Tab'); await expect(form().getByRole('button', { name: '筛选', exact: true })).toBeFocused();
   await page.keyboard.press('Tab'); await expect(form().getByRole('button', { name: '重置', exact: true })).toBeFocused();
-  await page.keyboard.press('Tab'); await expect(form().getByRole('button', { name: '草稿箱', exact: true })).toBeFocused(); note();
+  await page.keyboard.press('Tab'); await expect(page.getByRole('checkbox', { name: '选择本页未分组货件', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab'); await expect(scopes().getByRole('button', { name: '全部发货', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab'); await expect(scopes().getByRole('button', { name: '待分组需求', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab'); await expect(nav().getByRole('button', { name: '发货批次', exact: true })).toBeFocused(); note();
   step = 'single-table-keyboard-scroll-desktop-and-390px-without-page-overflow';
-  await page.reload(); await expect(table()).toContainText('SKU-0-0');
+  await page.reload(); await expectGridValue('SKU-0-0');
   for (const view of ['shipments', 'products', 'boxes']) {
-    await chooseOption(presentation(), view); await table().focus(); await expect(table()).toBeFocused(); await page.keyboard.press('ArrowRight'); await expect.poll(() => table().evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+    await chooseOption(presentation(), view); await resetScroll(); const grid = table().getByRole('grid'); await grid.focus(); await expect(grid).toBeFocused(); await page.keyboard.press('ArrowDown'); await expect(table().getByLabel('发货明细表 定位行', { exact: true })).toHaveValue('2'); await page.keyboard.press('ArrowUp'); await expect(table().getByLabel('发货明细表 定位行', { exact: true })).toHaveValue('1');
     await resetScroll(); await noOverflow(); await page.screenshot({ path: resolve(evidence, `unified-${view}-1440.png`), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 }); await resetScroll(); await noOverflow(); await page.screenshot({ path: resolve(evidence, `unified-${view}-390.png`), fullPage: true }); await page.setViewportSize({ width: 1440, height: 1000 });
   }
@@ -430,12 +599,12 @@ function limitFixture() {
 
 async function limitChecks() {
   step = 'cross-page-export-selection-stops-at-500-without-silent-truncation';
-  await page.goto('/shipping?view=demands'); await expect(table()).toContainText('LIMIT-SKU-0'); await chooseOption(presentation(), 'products');
+  await page.goto('/shipping?view=demands'); await expectGridValue('LIMIT-SKU-0'); await chooseOption(presentation(), 'products');
   for (let pageNumber = 1; pageNumber <= 25; pageNumber += 1) {
-    await allExports().check(); if (pageNumber < 25) { await page.getByRole('button', { name: '下一页', exact: true }).click(); await expect(table()).toContainText(`LIMIT-SKU-${pageNumber * 20}`); }
+    await closeRecord(); await allExports().check(); if (pageNumber < 25) { await closeRecord(); await page.getByRole('button', { name: '下一页', exact: true }).click(); await expectGridValue(`LIMIT-SKU-${pageNumber * 20}`); }
   }
-  await expect(generate()).toBeEnabled(); await page.getByRole('button', { name: '下一页', exact: true }).click(); await expect(table()).toContainText('LIMIT-SKU-500');
-  await exportCheck('上限验证批次 501').first().click(); await expect(page.getByRole('alert')).toContainText('500'); await expect(exportCheck('上限验证批次 501').first()).not.toBeChecked(); await expect(generate()).toBeEnabled(); note();
+  await expect(generate()).toBeEnabled(); await closeRecord(); await page.getByRole('button', { name: '下一页', exact: true }).click(); await expectGridValue('LIMIT-SKU-500');
+  await (await exportCheck('上限验证批次 501')).first().click(); await expect(page.getByRole('alert')).toContainText('500'); await expect((await exportCheck('上限验证批次 501')).first()).not.toBeChecked(); await expect(generate()).toBeEnabled(); note();
 }
 
 function crudFixture() {
@@ -531,20 +700,26 @@ function crudFixture() {
 }
 
 const demandDialog = () => page.getByRole('dialog', { name: '货件需求', exact: true });
-const rowAction = (fba, name) => table().getByRole('row').filter({ hasText: fba }).getByRole('button', { name, exact: true });
+const rowAction = async (fba, name) => {
+  await locateShipment(fba); await closeRecord(); await table().getByRole('button', { name: '发货明细表 查看当前记录', exact: true }).click();
+  const menu = page.getByRole('menu', { name: '发货明细表 行操作', exact: true });
+  await expect(menu.locator('.shipping-grid-menu-summary')).toContainText(fba);
+  return menu.getByRole('menuitem', { name, exact: true });
+};
 const submitDemand = () => demandDialog().locator('form button[type="submit"]');
 const filterDemands = async (q) => {
-  await form().getByLabel('搜索', { exact: true }).fill(q);
-  await form().getByRole('button', { name: '筛选', exact: true }).click();
+  await showShippingFilters(page);
+  await closeRecord(); await form().getByLabel('搜索', { exact: true }).fill(q);
+  await closeRecord(); await form().getByRole('button', { name: '筛选', exact: true }).click();
 };
 
 async function crudChecks(state) {
   const target = state.pageDemands.at(-1), fba = target.snapshot.fba;
   step = 'single-import-entry-opens-automatic-and-legacy-modes-without-mutating-a-record';
-  await page.goto('/shipping?view=demands'); await expect(table()).toContainText('SKU-0-0');
+  await page.goto('/shipping?view=demands'); await expectGridValue('SKU-0-0');
   await expect(page.getByRole('button', { name: '新增需求', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '导入本次发货', exact: true })).toHaveCount(1);
-  await page.getByRole('button', { name: '导入本次发货', exact: true }).click();
+  await closeRecord(); await page.getByRole('button', { name: '导入本次发货', exact: true }).click();
   const importer = page.getByRole('dialog', { name: '导入向导', exact: true });
   await expect(importer).toBeVisible();
   await expect(importer.getByRole('button', { name: '本次发货自动整理', exact: true })).toHaveAttribute('aria-pressed', 'true');
@@ -558,11 +733,12 @@ async function crudChecks(state) {
   for (const view of ['shipments', 'products', 'boxes']) {
     await chooseOption(presentation(), view);
     for (const name of ['查看需求', '编辑需求', '删除需求']) {
-      await expect(table().getByRole('button', { name, exact: true })).toHaveCount(20);
-      await expect(rowAction('FBA-SHARED-0', name)).toHaveCount(1);
+      await locateShipment('FBA-SHARED-0');
+      await expect(table().getByRole('button', { name, exact: true })).toHaveCount(1);
+      await expect((await rowAction('FBA-SHARED-0', name))).toHaveCount(1);
     }
-    await expect(rowAction('FBA-SHARED-1', '编辑需求')).toBeDisabled();
-    await expect(rowAction('FBA-SHARED-1', '删除需求')).toBeEnabled();
+    await expect((await rowAction('FBA-SHARED-1', '编辑需求'))).toBeDisabled();
+    await expect((await rowAction('FBA-SHARED-1', '删除需求'))).toBeEnabled();
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 });
       await resetScroll(); await noOverflow();
@@ -576,23 +752,23 @@ async function crudChecks(state) {
   step = 'server-search-before-pagination-preserves-all-products-of-a-matched-shipment';
   await chooseOption(presentation(), 'products'); await filterDemands('FBA-CRUD-PAGE');
   await expect.poll(() => state.queries.at(-1)?.q).toBe('FBA-CRUD-PAGE');
-  await expect(table()).not.toContainText(fba); await page.getByRole('button', { name: '下一页', exact: true }).click();
-  await expect(table()).toContainText('CRUD-SKU-21-0'); await expect(table()).toContainText('CRUD-SKU-21-1');
+  await expectGridAbsent(fba); await closeRecord(); await page.getByRole('button', { name: '下一页', exact: true }).click();
+  await expectGridValue('CRUD-SKU-21-0'); await expectGridValue('CRUD-SKU-21-1');
   await expect.poll(() => state.queries.at(-1)?.page).toBe('2');
   await filterDemands(`  ${fba.toLowerCase()}  `);
   await expect.poll(() => state.queries.at(-1)?.q).toBe(fba.toLowerCase()); await expect.poll(() => state.queries.at(-1)?.page).toBe('1');
-  await expect(table()).toContainText('CRUD-SKU-21-0'); await expect(table()).toContainText('CRUD-SKU-21-1');
-  await expect(table()).not.toContainText('CRUD-SKU-20-0');
+  await expectGridValue('CRUD-SKU-21-0'); await expectGridValue('CRUD-SKU-21-1');
+  await expectGridAbsent('CRUD-SKU-20-0');
   for (const view of ['shipments', 'boxes', 'products']) {
     await chooseOption(presentation(), view);
-    for (const name of ['查看需求', '编辑需求', '删除需求']) await expect(rowAction(fba, name)).toHaveCount(1);
-    await expect(table()).toContainText('CRUD-SKU-21-0'); await expect(table()).toContainText('CRUD-SKU-21-1');
+    for (const name of ['查看需求', '编辑需求', '删除需求']) await expect((await rowAction(fba, name))).toHaveCount(1);
+    await expectGridValue('CRUD-SKU-21-0'); await expectGridValue('CRUD-SKU-21-1');
   }
   await filterDemands('no-matching-crud-demand'); await expect(page.getByText('此范围暂无发货明细，请调整筛选或导入并提交需求。', { exact: true })).toBeVisible(); await expect(table()).toHaveCount(0);
-  await filterDemands(fba); await expect(rowAction(fba, '编辑需求')).toBeVisible(); note();
+  await filterDemands(fba); await expect((await rowAction(fba, '编辑需求'))).toBeVisible(); note();
 
   step = 'edit-dirty-guard-cancel-and-503-retry-preserve-current-fields-and-operation';
-  await rowAction(fba, '编辑需求').click(); await expect(demandDialog().getByLabel('备注', { exact: true })).toHaveValue('CRUD PAGE NOTE 21');
+  await (await rowAction(fba, '编辑需求')).click(); await expect(demandDialog().getByLabel('备注', { exact: true })).toHaveValue('CRUD PAGE NOTE 21');
   await demandDialog().getByLabel('备注', { exact: true }).fill('UNSAVED CRUD NOTE');
   await demandDialog().getByRole('button', { name: '关闭货件需求', exact: true }).click();
   await expect(demandDialog().getByRole('button', { name: '放弃修改并关闭', exact: true })).toBeVisible();
@@ -614,13 +790,13 @@ async function crudChecks(state) {
   await expect(demandDialog().getByLabel('修改原因', { exact: true })).toHaveValue('CRUD initial revision'); assert.equal(target.version, 1);
   const firstRevision = copy(state.revisionBodies.at(-1)); await submitDemand().click(); await expect(demandDialog()).not.toBeVisible();
   assert.deepEqual(state.revisionBodies.at(-1), firstRevision); assert.deepEqual(firstRevision.input.fields, edited); assert.equal(firstRevision.input.expectedVersion, 1); assert.equal(target.version, 2);
-  await expect(table()).toContainText('CRUD SAVED NOTE');
-  await rowAction(fba, '查看需求').click(); await demandDialog().getByText('修订与操作历史', { exact: true }).click();
-  await expect(demandDialog().getByRole('region', { name: '需求操作历史，可横向滚动', exact: true })).toContainText('CRUD initial revision');
+  await expectGridValue('CRUD SAVED NOTE');
+  await (await rowAction(fba, '查看需求')).click(); await demandDialog().getByText('修订与操作历史', { exact: true }).click();
+  await expect(await findGridRow(demandDialog(), '需求操作历史', 'CRUD initial revision')).toContainText('CRUD initial revision');
   await demandDialog().getByRole('button', { name: '关闭货件需求', exact: true }).click(); note();
 
   step = 'revision-conflict-requires-explicit-discard-and-new-current-version';
-  await rowAction(fba, '编辑需求').click(); await demandDialog().getByLabel('备注', { exact: true }).fill('CLIENT CONFLICT DRAFT'); await demandDialog().getByLabel('修改原因', { exact: true }).fill('stale client reason');
+  await (await rowAction(fba, '编辑需求')).click(); await demandDialog().getByLabel('备注', { exact: true }).fill('CLIENT CONFLICT DRAFT'); await demandDialog().getByLabel('修改原因', { exact: true }).fill('stale client reason');
   state.nextFailure = { action: 'revisions', code: 'VERSION_CONFLICT' }; await submitDemand().click();
   await expect(demandDialog().getByRole('alert')).toContainText('输入已保留'); const staleInput = copy(state.revisionBodies.at(-1).input);
   await expect(demandDialog().getByLabel('备注', { exact: true })).toHaveValue('CLIENT CONFLICT DRAFT');
@@ -632,25 +808,25 @@ async function crudChecks(state) {
   assert.equal(state.revisionBodies.at(-1).input.expectedVersion, 3); assert.notEqual(state.revisionBodies.at(-1).input.operationId, staleInput.operationId); assert.equal(target.version, 4); note();
 
   step = 'frozen-and-downstream-readonly-detail-use-latest-demand-not-frozen-row';
-  await reset(); await expect(table()).toContainText('冻结原确认商品');
-  await rowAction('FBA-SHARED-1', '查看需求').click();
+  await reset(); await expectGridValue('冻结原确认商品');
+  await (await rowAction('FBA-SHARED-1', '查看需求')).click();
   await expect(demandDialog()).toContainText('CURRENT SERVER NOTE FOR FROZEN SHIPMENT'); await expect(demandDialog()).toContainText('LATEST-FC');
   await expect(demandDialog().getByRole('button', { name: '编辑需求', exact: true })).toBeDisabled(); await expect(demandDialog().getByRole('button', { name: '删除需求', exact: true })).toBeEnabled();
   await expect(demandDialog().getByRole('status')).toContainText('批次已冻结');
   await demandDialog().getByRole('button', { name: '关闭货件需求', exact: true }).click();
-  await expect(table().getByRole('row').filter({ hasText: 'FBA-SHARED-1' }).filter({ hasText: 'SKU-1-0' })).toContainText('77');
-  const writes = state.mutations.length; await rowAction('FBA-SHARED-4', '查看需求').click();
+  await expectGridValue('SKU-1-0', true); await expect(table().locator('.shipping-grid-details')).toContainText('77');
+  const writes = state.mutations.length; await (await rowAction('FBA-SHARED-4', '查看需求')).click();
   await expect(demandDialog().getByRole('status')).toContainText('已有下游单据或任务引用'); await expect(demandDialog().getByRole('button', { name: '编辑需求', exact: true })).toBeDisabled(); await expect(demandDialog().getByRole('button', { name: '删除需求', exact: true })).toBeEnabled();
   await demandDialog().getByRole('button', { name: '关闭货件需求', exact: true }).click(); assert.equal(state.mutations.length, writes); note();
 
   step = 'delete-confirmation-required-reason-and-retry-keep-payload-and-id';
   const deletion = () => page.getByRole('dialog', { name: '删除需求', exact: true });
   const deleteSubmit = () => deletion().getByRole('button', { name: '确认删除需求', exact: true });
-  await filterDemands(fba); await rowAction(fba, '删除需求').click(); await expect(deleteSubmit()).toBeDisabled();
+  await filterDemands(fba); await (await rowAction(fba, '删除需求')).click(); await expect(deleteSubmit()).toBeDisabled();
   await expect(deletion().getByLabel('删除原因', { exact: true })).toHaveAttribute('maxlength', '2000');
   await deletion().getByLabel('删除原因', { exact: true }).fill('do not delete yet'); await deletion().getByRole('button', { name: '返回', exact: true }).click();
-  assert.equal(state.cancelBodies.length, 0); await expect(rowAction(fba, '编辑需求')).toBeEnabled();
-  await rowAction(fba, '删除需求').click(); await deletion().getByLabel('删除原因', { exact: true }).fill('CRUD deletion requested'); await deletion().getByRole('checkbox').check();
+  assert.equal(state.cancelBodies.length, 0); await expect((await rowAction(fba, '编辑需求'))).toBeEnabled();
+  await (await rowAction(fba, '删除需求')).click(); await deletion().getByLabel('删除原因', { exact: true }).fill('CRUD deletion requested'); await deletion().getByRole('checkbox').check();
   for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 }); await noOverflow();
     await page.screenshot({ path: resolve(evidence, `workbench-demand-delete-${width}.png`), fullPage: true });
@@ -664,12 +840,14 @@ async function crudChecks(state) {
   await expect(page.getByText('此范围暂无发货明细，请调整筛选或导入并提交需求。', { exact: true })).toBeVisible(); await expect(table()).toHaveCount(0); note();
 
   step = 'deleted-demand-is-in-recycle-bin-and-excluded-from-all-current-demand-filters';
+  await page.getByRole('button', { name: '本次发货与票号', exact: true }).click();
   await page.getByRole('button', { name: '回收站', exact: true }).click();
   const recycle = page.getByRole('dialog', { name: '发货回收站', exact: true }); await recycle.getByRole('button', { name: '需求', exact: true }).click();
   await expect(recycle).toContainText(fba); await expect(recycle).toContainText('CRUD deletion requested'); await expect(recycle.getByRole('button', { name: '恢复需求', exact: true })).toBeVisible();
   await recycle.getByRole('button', { name: '关闭发货回收站', exact: true }).click();
-  await chooseOption(form().getByLabel('需求记录状态', { exact: true }), 'all'); await form().getByRole('button', { name: '筛选', exact: true }).click(); await expect(table()).toHaveCount(0);
-  await reset(); await expect.poll(() => state.queries.at(-1)?.lifecycle).toBe('active'); await expect.poll(() => state.queries.at(-1)?.page).toBe('1'); await expect(table()).not.toContainText(fba); note();
+  await page.getByRole('dialog', { name: '本次发货与票号', exact: true }).getByRole('button', { name: '关闭本次发货与票号', exact: true }).click();
+  await chooseOption(form().getByLabel('需求记录状态', { exact: true }), 'all'); await closeRecord(); await form().getByRole('button', { name: '筛选', exact: true }).click(); await expect(table()).toHaveCount(0);
+  await reset(); await expect.poll(() => state.queries.at(-1)?.lifecycle).toBe('active'); await expect.poll(() => state.queries.at(-1)?.page).toBe('1'); await expectGridAbsent(fba); note();
 }
 
 try {
@@ -677,13 +855,15 @@ try {
   const socket = createServer(); await new Promise((done) => socket.listen(0, '127.0.0.1', done)); const port = socket.address().port; await new Promise((done) => socket.close(done)); baseURL = `http://127.0.0.1:${port}`;
   const vite = resolve(dirname(requireWeb.resolve('vite/package.json')), 'bin/vite.js'); viteProcess = spawn(process.execPath, [vite, '--host', '127.0.0.1', '--port', String(port), '--strictPort'], { cwd: resolve(root, 'apps/web'), stdio: 'ignore', windowsHide: true });
   await expect.poll(async () => { try { return (await fetch(baseURL)).status; } catch { return 0; } }, { timeout: 20000 }).toBe(200); browser = await chromium.launch({ headless: true, channel: process.env.IMPORT_BROWSER_CHANNEL || 'chrome' });
+  if (interactionsOnly) { const state = interactionFixture(), context = await contextFor(state); await interactionChecks(state); await context.close(); }
   if (entryOnly) { const context = await contextFor(fixture()); await entryChecks(); await context.close(); }
-  if (!entryOnly && process.env.SHIPPING_UNIFIED_CRUD_ONLY !== '1') {
+  if (!entryOnly && !interactionsOnly && process.env.SHIPPING_UNIFIED_CRUD_ONLY !== '1') {
     const scrollState = scrollFixture(), scrollContext = await contextFor(scrollState); await scopeScrollChecks(scrollState); await scrollContext.close();
     const state = fixture(), context = await contextFor(state); await unifiedNavigation(state); await presentationsAndSelections(state); await searchEligibility(state); await filtersAndScope(state); await exportChecks(state); await layoutChecks(); await context.close();
     const limits = await contextFor(limitFixture()); await limitChecks(); await limits.close();
+    const interactionState = interactionFixture(), interactionContext = await contextFor(interactionState); await interactionChecks(interactionState); await interactionContext.close();
   }
-  if (!entryOnly) { activeCrudState = crudFixture(); const crudContext = await contextFor(activeCrudState); await crudChecks(activeCrudState); await crudContext.close(); }
+  if (!entryOnly && !interactionsOnly) { activeCrudState = crudFixture(); const crudContext = await contextFor(activeCrudState); await crudChecks(activeCrudState); await crudContext.close(); }
   assert.deepEqual(unexpectedRequests, []); assert.deepEqual(browserErrors, []);
 } catch (error) {
   failed = true; checks.push({ name: step, result: 'failed', message: error.message }); console.error(error.stack || error); if (page && !page.isClosed()) await page.screenshot({ path: resolve(evidence, 'failure.png'), fullPage: true }).catch(() => {});

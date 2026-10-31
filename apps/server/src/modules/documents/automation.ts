@@ -25,17 +25,24 @@ import { assertLifecycleActiveInTx } from '../shipping-lifecycle/guards.js';
 
 export const DOCUMENT_AUTOMATION_QUEUE = 'document-invoice-automation';
 type Job = typeof documentAutomationJobs.$inferSelect;
+const automationListColumns = {
+  id: documentAutomationJobs.id, shippingRunId: documentAutomationJobs.shippingRunId, version: documentAutomationJobs.version,
+  status: documentAutomationJobs.status, mode: documentAutomationJobs.mode, phase: documentAutomationJobs.phase, bundle: documentAutomationJobs.bundle,
+  items: documentAutomationJobs.items, error: documentAutomationJobs.error, retryRequests: documentAutomationJobs.retryRequests,
+  createdAt: documentAutomationJobs.createdAt, updatedAt: documentAutomationJobs.updatedAt, completedAt: documentAutomationJobs.completedAt, deletedAt: documentAutomationJobs.deletedAt,
+};
+type AutomationReadRow = Pick<Job, keyof typeof automationListColumns>;
 const leaseTime = () => new Date(Date.now() + 120_000);
 const activeStatuses = ['queued', 'running'];
 export const documentAutomationError = (error: unknown) => error instanceof DocumentWorkbookError || error instanceof BatchError || error instanceof ImportError || error instanceof LingxingReadError
   ? { code: error.code, message: error.message } : { code: 'DOCUMENT_AUTOMATION_FAILED', message: '自动出单暂未完成，已保存成功步骤，请续跑。' };
 
 /** Retry intentions are a separate column, so an in-flight checkpoint cannot overwrite them. */
-function visibleItems(row: Job): StoredDocumentAutomationItem[] {
+function visibleItems(row: AutomationReadRow): StoredDocumentAutomationItem[] {
   const requested = new Set(row.retryRequests.flatMap((request) => request.itemIds));
   return row.items.map((item) => requested.has(item.id) && item.status === 'blocked' ? { ...item, status: 'queued', error: null } : item);
 }
-export function serializeDocumentAutomation(row: Job): DocumentAutomationJob {
+export function serializeDocumentAutomation(row: AutomationReadRow): DocumentAutomationJob {
   const items = visibleItems(row), summary = automationSummary(items);
   const phase = row.mode === 'single_workbook' ? row.bundle?.status === 'completed' ? 'completed' : row.status === 'failed' ? 'failed' : row.bundle?.status === 'running' ? 'generating'
     : summary.counts.queued || summary.counts.running || summary.counts.exporting ? 'preparing' : summary.counts.blocked ? 'needs_input' : 'ready'
@@ -94,7 +101,7 @@ export async function getDocumentAutomation(id: string, actorId: string) {
 }
 export async function listDocumentAutomations(actorId: string, shippingRunId?: string) {
   return db.transaction(async (tx) => { await requireBatchActor(tx, actorId);
-    const rows = await tx.select().from(documentAutomationJobs).where(and(isNull(documentAutomationJobs.deletedAt), eq(documentAutomationJobs.createdBy, actorId), shippingRunId ? eq(documentAutomationJobs.shippingRunId, shippingRunId) : undefined)).orderBy(desc(documentAutomationJobs.createdAt)).limit(30);
+    const rows = await tx.select(automationListColumns).from(documentAutomationJobs).where(and(isNull(documentAutomationJobs.deletedAt), eq(documentAutomationJobs.createdBy, actorId), shippingRunId ? eq(documentAutomationJobs.shippingRunId, shippingRunId) : undefined)).orderBy(desc(documentAutomationJobs.createdAt)).limit(30);
     return { items: rows.filter((row) => !row.deletedAt).map(serializeDocumentAutomation) }; });
 }
 /** The prepared create input is not ownership: only its committed, exact idempotency result is. */

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowRight, CircleCheck, Download, LoaderCircle, Pencil, RefreshCw, Trash2 } from 'lucide-react';
 import type { DocumentAutomationDeleteResponse, DocumentAutomationJob } from '@scm/contracts';
@@ -94,11 +93,11 @@ export function DocumentAutomationRecent({ active, open, disabled, requestDelete
     deleted(result); setDeleteTarget(null);
     setNotice(`自动出单任务已删除。${result.cancelledDocumentIds.length ? `已取消 ${result.cancelledDocumentIds.length} 张草稿并释放货件占用。` : ''}${result.preservedDocumentIds.length ? `已保留 ${result.preservedDocumentIds.length} 张单据及已有文件，可在“单据记录”中查询。` : ''}`);
   };
-  if (!active || jobs.isPending || !jobs.isError && !jobs.data.items.length && !notice) return null;
-  return <section className="content-panel document-automation-recent" aria-label="最近自动出单任务"><div className="section-heading"><h3>自动出单任务</h3><span>关闭页面后任务仍在后台处理</span></div>
+  if (!active) return null;
+  return <section className="document-automation-recent" aria-label="最近自动出单任务"><div className="section-heading"><div><h3>最近任务</h3><p className="mapping-help">关闭窗口后，任务仍在后台处理。</p></div><IconButton type="button" icon={RefreshCw} label="刷新自动出单任务" disabled={jobs.isFetching || disabled || Boolean(deleteTarget)} onClick={() => void jobs.refetch()} /></div>
     {notice && <p className="form-note success-note" role="status"><CircleCheck size={16} aria-hidden="true" />{notice}</p>}
-    {jobs.isError ? <QueryError error={jobs.error} retry={() => void jobs.refetch()} /> : jobs.data.items.length > 0 ? <BatchTable label="最近自动出单任务" headers={['开始时间', '状态', '整批情况', '操作']}>{jobs.data.items.map((job) => <tr key={job.id}><td>{timestamp(job.createdAt)}</td><td>{job.mode === 'single_workbook' ? phaseLabels[job.phase] : statusLabels[job.status]}</td><td>{job.mode === 'single_workbook' ? job.bundle?.status === 'completed' ? bundleSummary(job) : `${job.counts.ready + job.counts.completed} / ${job.counts.total} 组检查通过` : `${job.counts.completed} / ${job.counts.total} 票已生成`}{job.counts.blocked > 0 && <small className="mapping-subtext">{job.counts.blocked} 组待处理</small>}</td><td><div className="document-record-actions"><Button type="button" icon={ArrowRight} disabled={disabled || Boolean(deleteTarget)} onClick={() => open(job.id)}>查看进度</Button><Button type="button" icon={Trash2} variant="text" disabled={disabled || Boolean(deleteTarget)} onClick={() => requestDelete(() => { setNotice(''); setDeleteTarget(job); })}>删除任务</Button></div></td></tr>)}</BatchTable> : <p className="mapping-help">暂无自动出单任务。</p>}
-    {deleteTarget && createPortal(<DocumentAutomationDeleteDialog key={deleteTarget.id} active={active} job={deleteTarget} close={() => setDeleteTarget(null)} deleted={removed} />, document.body)}
+    {jobs.isPending ? <p className="list-state" role="status">正在读取自动出单任务…</p> : jobs.isError ? <QueryError error={jobs.error} retry={() => void jobs.refetch()} /> : jobs.data.items.length > 0 ? <BatchTable label="最近自动出单任务" headers={['开始时间', '状态', '整批情况', '操作']}>{jobs.data.items.map((job) => <tr key={job.id}><td>{timestamp(job.createdAt)}</td><td>{job.mode === 'single_workbook' ? phaseLabels[job.phase] : statusLabels[job.status]}</td><td>{job.mode === 'single_workbook' ? job.bundle?.status === 'completed' ? bundleSummary(job) : `${job.counts.ready + job.counts.completed} / ${job.counts.total} 组检查通过` : `${job.counts.completed} / ${job.counts.total} 票已生成`}{job.counts.blocked > 0 && <small className="mapping-subtext">{job.counts.blocked} 组待处理</small>}</td><td><div className="document-record-actions"><Button type="button" icon={ArrowRight} disabled={disabled || Boolean(deleteTarget)} onClick={() => open(job.id)}>查看进度</Button><Button type="button" icon={Trash2} variant="text" disabled={disabled || Boolean(deleteTarget)} onClick={() => requestDelete(() => { setNotice(''); setDeleteTarget(job); })}>删除任务</Button></div></td></tr>)}</BatchTable> : <p className="mapping-help">暂无自动出单任务。</p>}
+    {deleteTarget && <DocumentAutomationDeleteDialog key={deleteTarget.id} active={active} job={deleteTarget} close={() => setDeleteTarget(null)} deleted={removed} />}
   </section>;
 }
 

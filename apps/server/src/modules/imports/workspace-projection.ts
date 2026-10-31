@@ -47,12 +47,47 @@ function daysBetween(end: string | null, start: string | null): number | null {
   return Number.isInteger(result) ? result : null;
 }
 
+/** Source provenance does not participate in filtering or totals; hydrate it after paging. */
+export function hydrateDemandWorkspaceSources(workspace: DemandWorkspace, sources: WorkspaceSource[]): DemandWorkspace {
+  const byDemand = new Map<string, WorkspaceSource[]>();
+  for (const source of sources) {
+    const entries = byDemand.get(source.demandId);
+    if (entries) entries.push(source); else byDemand.set(source.demandId, [source]);
+  }
+  const provenance = new Map<string, Pick<DemandWorkspaceRow, 'sources' | 'sourceFilledAt' | 'packingDays'>>();
+  return { ...workspace, rows: workspace.rows.map((row) => {
+    const key = JSON.stringify([row.demandId, row.demandVersion, row.actualShipDate, row.sourceFilledAt]);
+    let details = provenance.get(key);
+    if (!details) {
+      const eligible = (byDemand.get(row.demandId) ?? []).filter((source) => source.acceptedVersion <= row.demandVersion);
+      const sourceFilledAt = row.sourceFilledAt ?? nullableString(eligible.find((source) => nullableString(source.sourceFilledAt))?.sourceFilledAt);
+      details = { sourceFilledAt, packingDays: daysBetween(row.actualShipDate, sourceFilledAt), sources: [...eligible]
+        .sort((left, right) => compare(left.importId, right.importId) || compare(left.sheetName, right.sheetName) || left.rowNumber - right.rowNumber)
+        .map(({ importId, fileName, sheetName, rowNumber }) => ({ importId, fileName, sheetName, rowNumber })) };
+      provenance.set(key, details);
+    }
+    return { ...row, ...details };
+  }) };
+}
+
 /** Browsing uses candidates and placeholders too; report/code allocation gates do not apply. */
 export function projectDemandWorkspace(input: DemandWorkspaceInput, query: DemandWorkspaceQuery, generatedAt = new Date().toISOString()): DemandWorkspace {
   const cancelledIds = new Set(input.cancelledDemandIds);
   const visibleDemands = input.demands.filter((demand) => query.lifecycle === 'all' || (demand.lifecycle ?? (cancelledIds.has(demand.id) ? 'cancelled' : 'active')) === (query.lifecycle ?? 'active'));
   const demands = new Map(visibleDemands.map((demand) => [demand.id, demand]));
   const groups = new Map(input.groups.filter((group) => group.status !== 'superseded').map((group) => [group.id, group]));
+  const confirmationsByVersion = new Map<string, GroupConfirmation>();
+  const confirmedMembers = new Map<string, Map<string, DemandRecord>>();
+  const confirmedShipments = new Map<string, Map<string, ShipmentRevision>>();
+  for (const confirmation of input.confirmations) {
+    const key = JSON.stringify([confirmation.groupId, confirmation.groupVersion]);
+    // Match the former find() semantics even for malformed duplicate fixtures.
+    if (!confirmationsByVersion.has(key)) confirmationsByVersion.set(key, confirmation);
+    const members = new Map<string, DemandRecord>(), shipments = new Map<string, ShipmentRevision>();
+    for (const member of confirmation.snapshot.members) if (!members.has(member.id)) members.set(member.id, member);
+    for (const shipment of confirmation.snapshot.shipments) if (!shipments.has(shipment.demandId)) shipments.set(shipment.demandId, shipment.revision);
+    confirmedMembers.set(confirmation.id, members); confirmedShipments.set(confirmation.id, shipments);
+  }
   const shippingMemberships = new Map((input.shippingMemberships ?? []).map((member) => [member.demandId, member]));
   const latest = new Map<string, ShipmentRevision>();
   for (const revision of input.shipments) {
@@ -62,11 +97,15 @@ export function projectDemandWorkspace(input: DemandWorkspaceInput, query: Deman
   const memberships = input.members.filter((member) => groups.has(member.groupId));
   const membersByDemand = new Map<string, WorkspaceMember[]>(); const membersByGroup = new Map<string, WorkspaceMember[]>();
   for (const member of memberships) {
-    membersByDemand.set(member.demandId, [...membersByDemand.get(member.demandId) ?? [], member]);
-    membersByGroup.set(member.groupId, [...membersByGroup.get(member.groupId) ?? [], member]);
+    const demandMembers = membersByDemand.get(member.demandId), groupMembers = membersByGroup.get(member.groupId);
+    if (demandMembers) demandMembers.push(member); else membersByDemand.set(member.demandId, [member]);
+    if (groupMembers) groupMembers.push(member); else membersByGroup.set(member.groupId, [member]);
   }
   const sourcesByDemand = new Map<string, WorkspaceSource[]>();
-  for (const source of input.sources) sourcesByDemand.set(source.demandId, [...sourcesByDemand.get(source.demandId) ?? [], source]);
+  for (const source of input.sources) {
+    const entries = sourcesByDemand.get(source.demandId);
+    if (entries) entries.push(source); else sourcesByDemand.set(source.demandId, [source]);
+  }
   const decisions = new Set(input.decisions.map((decision) => JSON.stringify([decision.groupId, decision.demandId, decision.shipmentVersion, decision.issueCode])));
   const codes = new Map(input.codes.filter((code) => code.valid).map((code) => [JSON.stringify([code.groupId, code.demandId, code.boxId]), code]));
   const activeGroup = (demand: DemandRecord) => [...membersByDemand.get(demand.id) ?? []]
@@ -74,8 +113,12 @@ export function projectDemandWorkspace(input: DemandWorkspaceInput, query: Deman
       const correctGroup = (member: WorkspaceMember) => Number(shippingMemberships.get(demand.id)?.groupId === member.groupId);
       return correctGroup(right) - correctGroup(left) || compare(groups.get(right.groupId)!.updatedAt, groups.get(left.groupId)!.updatedAt) || compare(left.groupId, right.groupId);
     })[0];
+  const issueCache = new Map<string, BatchIssue[]>();
   function candidateIssues(demand: DemandRecord, revision: ShipmentRevision | undefined, groupId: string | undefined): BatchIssue[] {
     if (!revision) return [{ code: 'SHIPMENT_NOT_SYNCED', severity: 'warning', message: '货件尚未同步或补录。', demandId: demand.id }];
+    const cacheKey = JSON.stringify([demand.id, demand.version, revision.id, groupId]);
+    const cached = issueCache.get(cacheKey);
+    if (cached) return [...cached];
     const issues: BatchIssue[] = validateShipmentData(revision.data).map((issue) => {
       const resolved = issue.code === 'LIST_QUANTITY_MISMATCH' && decisions.has(JSON.stringify([groupId, demand.id, revision.version, issue.code]));
       return { ...issue, demandId: demand.id, ...(resolved ? { severity: 'warning' as const, message: `已人工决定：${issue.message}` } : {}) };
@@ -83,19 +126,20 @@ export function projectDemandWorkspace(input: DemandWorkspaceInput, query: Deman
     if (revision.demandVersion !== demand.version) issues.push({ code: 'DEMAND_VERSION_STALE', severity: 'error', message: '候选数据属于旧需求版本，请重新同步或补录。', demandId: demand.id });
     if (revision.data.sid !== demand.snapshot.sid || revision.data.fba !== demand.snapshot.fba) issues.push({ code: 'SHIPMENT_IDENTITY_MISMATCH', severity: 'error', message: '候选数据的店铺或 FBA 与需求不一致。', demandId: demand.id });
     for (const item of revision.data.items) if (quantity(item.quantity) === null) issues.push({ code: 'WORKSPACE_QUANTITY_UNAVAILABLE', severity: 'warning', message: '商品数量缺失或无效，列表保留为空。', demandId: demand.id, details: { key: productKey(item), value: item.quantity } });
-    return issues;
+    issueCache.set(cacheKey, issues);
+    return [...issues];
   }
   const confirmationValidity = new Map<string, { confirmation: GroupConfirmation | undefined; valid: boolean; frozen: boolean }>();
   for (const group of groups.values()) {
-    const confirmation = input.confirmations.find((entry) => entry.groupId === group.id && entry.groupVersion === group.confirmedVersion);
+    const confirmation = confirmationsByVersion.get(JSON.stringify([group.id, group.confirmedVersion]));
     const frozen = group.frozenAt !== null;
     let valid = Boolean(confirmation && ['confirmed', 'frozen'].includes(group.status));
     if (valid && !frozen && confirmation) {
       const current = (membersByGroup.get(group.id) ?? []).map((member) => demands.get(member.demandId)).filter((demand) => demand !== undefined);
       valid = current.length > 0 && current.length === confirmation.snapshot.members.length && current.length === confirmation.snapshot.shipments.length;
       for (const demand of current) {
-        const old = confirmation.snapshot.members.find((member) => member.id === demand.id);
-        const accepted = confirmation.snapshot.shipments.find((shipment) => shipment.demandId === demand.id)?.revision;
+        const old = confirmedMembers.get(confirmation.id)?.get(demand.id);
+        const accepted = confirmedShipments.get(confirmation.id)?.get(demand.id);
         const revision = latest.get(demand.id);
         if (!old || old.version !== demand.version || !revision || accepted?.id !== revision.id || candidateIssues(demand, revision, group.id).some((issue) => issue.severity === 'error')) valid = false;
       }
@@ -110,7 +154,7 @@ export function projectDemandWorkspace(input: DemandWorkspaceInput, query: Deman
     const totals = new Map<string, { groupQuantity: number | null; monthQuantity: number | null }>();
     let complete = true;
     for (const shipment of state.confirmation.snapshot.shipments) {
-      const member = state.confirmation.snapshot.members.find((entry) => entry.id === shipment.demandId);
+      const member = confirmedMembers.get(state.confirmation.id)?.get(shipment.demandId);
       if (!member) { complete = false; break; }
       for (const item of shipment.revision.data.items) {
         const key = `${member.snapshot.sid}:${productKey(item)}`;
@@ -127,13 +171,15 @@ export function projectDemandWorkspace(input: DemandWorkspaceInput, query: Deman
   const monthlyTotals = new Map<string, number | null>();
   for (const totals of confirmedTotals.values()) for (const [key, total] of totals) monthlyTotals.set(key, sumQuantity(monthlyTotals.has(key) ? monthlyTotals.get(key)! : 0, total.monthQuantity));
   const rows: DemandWorkspaceRow[] = [];
+  const boxFactories = new Map<string, () => DemandWorkspaceRow['boxes']>();
+  const maxBoxesByRow = new Map<string, number>();
   for (const current of visibleDemands) {
     const cancelled = cancelledIds.has(current.id);
     const membership = cancelled ? undefined : activeGroup(current);
     const group = membership ? groups.get(membership.groupId) : undefined;
     const state = group ? confirmationValidity.get(group.id) : undefined;
-    const acceptedDemand = state?.valid ? state.confirmation?.snapshot.members.find((member) => member.id === current.id) : undefined;
-    const acceptedRevision = state?.valid ? state.confirmation?.snapshot.shipments.find((shipment) => shipment.demandId === current.id)?.revision : undefined;
+    const acceptedDemand = state?.valid && state.confirmation ? confirmedMembers.get(state.confirmation.id)?.get(current.id) : undefined;
+    const acceptedRevision = state?.valid && state.confirmation ? confirmedShipments.get(state.confirmation.id)?.get(current.id) : undefined;
     const accepted = Boolean(acceptedDemand && acceptedRevision);
     const demand = acceptedDemand && accepted ? acceptedDemand : current;
     const revision = cancelled ? undefined : acceptedRevision && accepted ? acceptedRevision : latest.get(current.id);
@@ -168,22 +214,42 @@ export function projectDemandWorkspace(input: DemandWorkspaceInput, query: Deman
       rows.push({ ...base, id: `${current.id}:placeholder`, rowKind: 'placeholder', msku: null, fnsku: null, sku: null, productName: null, quantity: null, groupQuantity: null, monthQuantity: null, boxes: [], codes: [] });
       continue;
     }
+    // Build the product/box relationship once per shipment. Measurements and
+    // display objects are materialized only for rows in the selected page.
+    type Distribution = { box: typeof sortedBoxes[number]; boxIndex: number; items: typeof sortedBoxes[number]['items'] };
+    const distributionByProduct = new Map<string, Distribution[]>();
+    for (const [boxIndex, box] of sortedBoxes.entries()) {
+      const itemsByProduct = new Map<string, typeof box.items>();
+      for (const entry of box.items) {
+        const key = productKey(entry), matches = itemsByProduct.get(key);
+        if (matches) matches.push(entry); else itemsByProduct.set(key, [entry]);
+      }
+      for (const [key, items] of itemsByProduct) {
+        const distributions = distributionByProduct.get(key), entry = { box, boxIndex, items };
+        if (distributions) distributions.push(entry); else distributionByProduct.set(key, [entry]);
+      }
+    }
     for (const [index, item] of revision.data.items.entries()) {
-      const boxes = sortedBoxes.flatMap((box, boxIndex) => {
-        const items = box.items.filter((entry) => productKey(entry) === productKey(item));
-        if (!items.length) return [];
+      const id = `${current.id}:${revision.id}:${index}`;
+      const distributions = distributionByProduct.get(productKey(item)) ?? [];
+      const rowCodes = distributions.flatMap(({ box }) => {
+        const code = codes.get(JSON.stringify([group?.id, current.id, box.id]))?.code;
+        return code ? [code] : [];
+      });
+      maxBoxesByRow.set(id, distributions.reduce((maximum, { box, boxIndex }) => Math.max(maximum, codes.get(JSON.stringify([group?.id, current.id, box.id]))?.sequence ?? boxIndex + 1), sortedBoxes.length));
+      boxFactories.set(id, () => distributions.map(({ box, boxIndex, items }) => {
         const values = items.map((entry) => quantity(entry.quantity));
         const total = values.some((value) => value === null) ? null : values.reduce<number>((sum, value) => sum + value!, 0);
         const allocation = codes.get(JSON.stringify([group?.id, current.id, box.id]));
         const code = allocation?.code ?? null;
-        return [{ boxId: box.id, boxOrder: boxIndex + 1, ...(allocation ? { displayBoxOrder: allocation.sequence } : {}), quantity: total !== null && Number.isSafeInteger(total) ? total : null, code,
+        return { boxId: box.id, boxOrder: boxIndex + 1, ...(allocation ? { displayBoxOrder: allocation.sequence } : {}), quantity: total !== null && Number.isSafeInteger(total) ? total : null, code,
           sourceLabel: box.name ?? box.externalBoxId ?? box.localBoxId ?? box.id, orderConfirmed: box.order !== null,
           boxName: box.name, externalBoxId: box.externalBoxId, localBoxId: box.localBoxId,
-          weight: measure(box.weight), weightUnit: box.weightUnit ?? null, length: measure(box.length), width: measure(box.width), height: measure(box.height), lengthUnit: box.dimensionUnit ?? null }];
-      });
+          weight: measure(box.weight), weightUnit: box.weightUnit ?? null, length: measure(box.length), width: measure(box.width), height: measure(box.height), lengthUnit: box.dimensionUnit ?? null };
+      }));
       const total = accepted && group ? confirmedTotals.get(group.id)?.get(`${snapshot.sid}:${productKey(item)}`) : undefined;
-      rows.push({ ...base, id: `${current.id}:${revision.id}:${index}`, rowKind: 'product', msku: item.msku || null, fnsku: item.fnsku || null, sku: item.sku || null, productName: item.name, quantity: quantity(item.quantity),
-        groupQuantity: total?.groupQuantity ?? null, monthQuantity: accepted ? monthlyTotals.get(`${snapshot.sid}:${productKey(item)}`) ?? null : null, boxes, codes: boxes.flatMap((box) => box.code ? [box.code] : []) });
+      rows.push({ ...base, id, rowKind: 'product', msku: item.msku || null, fnsku: item.fnsku || null, sku: item.sku || null, productName: item.name, quantity: quantity(item.quantity),
+        groupQuantity: total?.groupQuantity ?? null, monthQuantity: accepted ? monthlyTotals.get(`${snapshot.sid}:${productKey(item)}`) ?? null : null, boxes: [], codes: rowCodes });
     }
   }
   rows.sort((left, right) => compare(right.businessDate, left.businessDate) || compare(left.fba, right.fba) || left.sid - right.sid || compare(left.demandId, right.demandId) || compare(left.id, right.id));
@@ -200,10 +266,11 @@ export function projectDemandWorkspace(input: DemandWorkspaceInput, query: Deman
   const matchingDemands = new Set(matchingDemandIds);
   const completeRows = query.pageBy === 'demand' ? rows.filter((row) => matchingDemands.has(row.demandId)) : filtered;
   const pageDemandIds = new Set(matchingDemandIds.slice((query.page - 1) * query.pageSize, query.page * query.pageSize));
+  const pageRows = query.pageBy === 'demand' ? completeRows.filter((row) => pageDemandIds.has(row.demandId)) : filtered.slice((query.page - 1) * query.pageSize, query.page * query.pageSize);
   return {
-    rows: query.pageBy === 'demand' ? completeRows.filter((row) => pageDemandIds.has(row.demandId)) : filtered.slice((query.page - 1) * query.pageSize, query.page * query.pageSize), total: completeRows.length,
+    rows: pageRows.map((row) => ({ ...row, boxes: boxFactories.get(row.id)?.() ?? [] })), total: completeRows.length,
     demandTotal: matchingDemandIds.length, page: query.page, pageSize: query.pageSize,
-    maxBoxes: completeRows.reduce((maximum, row) => row.boxes.reduce((max, box) => Math.max(max, box.displayBoxOrder ?? box.boxOrder), Math.max(maximum, row.totalBoxes ?? 0)), 10),
+    maxBoxes: completeRows.reduce((maximum, row) => Math.max(maximum, maxBoxesByRow.get(row.id) ?? row.totalBoxes ?? 0), 10),
     filters: {
       shippingRuns: [...new Map((input.shippingMemberships ?? []).map((member) => [member.runId, { id: member.runId, month: member.month, sequence: member.sequence, numberingDate: member.numberingDate }])).values()].sort((left, right) => compare(right.numberingDate, left.numberingDate) || (right.sequence ?? 0) - (left.sequence ?? 0)),
       weeks: [],

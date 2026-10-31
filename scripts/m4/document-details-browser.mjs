@@ -9,6 +9,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
 import { documentBoxFieldKey, documentRevisionInputSchema, documentSchema, withDocumentDefaults as documentFlagDefaults } from '../../packages/contracts/dist/index.js';
 import { chooseOption, readOptions } from '../shared/ui-controls.mjs';
+import { closeGridDetails, grid, gridRowCount, findGridRow } from '../shared/grid.mjs';
+import { editGridCell, setColumnVisible, visibleColumnKeys } from './grid-helpers.mjs';
 
 const withDocumentDefaults = (fields = {}) => documentFlagDefaults({ orderNumber: null, reference: null, tradeTerms: null, currency: 'USD', ...fields });
 
@@ -68,7 +70,7 @@ function fixture({ unicodeIdentity = false } = {}) {
     validateCalls: 0, exportCalls: 0, sourceSnapshot: JSON.stringify(complete.currentRevision.data.members), originalMembers: structuredClone(members) };
 }
 async function setup(state, { withoutSubtle = false } = {}) {
-  const context = await browser.newContext({ baseURL, locale: 'zh-CN', timezoneId: 'Asia/Shanghai', viewport: { width: 1440, height: 1000 } });
+  const context = await browser.newContext({ baseURL, locale: 'zh-CN', timezoneId: 'Asia/Shanghai', viewport: { width: 390, height: 1000 } });
   if (withoutSubtle) await context.addInitScript(() => { Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: undefined }); });
   await context.route('**/*', async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
@@ -123,7 +125,7 @@ const currentStage = (label) => expect(nav().locator('[aria-current="step"]')).t
 const save = () => footer().getByRole('button', { name: '保存草稿', exact: true });
 const next = () => footer().getByRole('button', { name: /^(保存并下一步|下一步)$/ });
 const boxFields = () => wizard().locator('.document-box-adjustments');
-const boxField = (code, label) => boxFields().getByRole('textbox', { name: code + ' ' + label, exact: true });
+const boxField = async (code, label) => { await boxRow(code); return boxFields().getByRole('textbox', { name: code + ' ' + label, exact: true }); };
 async function open(record) { await page.goto('/shipping?view=documents&documentId=' + record.id); await currentStage('单票资料'); await expect(wizard().getByLabel('草稿名称', { exact: true })).toHaveValue(record.currentRevision.data.title); }
 async function screenshot(name) {
   await page.evaluate(() => Promise.race([Promise.all(document.getAnimations().filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity).map((animation) => animation.finished.catch(() => {}))), new Promise((done) => setTimeout(done, 500))]));
@@ -134,8 +136,8 @@ const completion = () => wizard().getByRole('navigation', { name: '单票资料�
 const addressSection = () => wizard().locator('.document-address-section');
 const addressEditor = () => addressSection().locator('details[data-section-editor="address"]');
 const addressStatus = () => addressSection().getByRole('status', { name: '地址确认状态', exact: true });
-const boxRow = (code) => boxFields().getByRole('rowgroup', { name: '箱 ' + code + ' 制单资料', exact: true });
-const boxChoice = (code) => boxFields().getByRole('checkbox', { name: '选择箱 ' + code, exact: true });
+const boxRow = async (code) => { const row = await findGridRow(boxFields(), '逐箱制单资料', code); return row.locator('.document-box-active').filter({ has: boxFields().page().getByRole('checkbox', { name: '选择箱 ' + code, exact: true }) }); };
+const boxChoice = async (code) => (await boxRow(code)).getByRole('checkbox', { name: '选择箱 ' + code, exact: true });
 const filterBoxes = (name) => boxFields().getByRole('group', { name: '箱资料筛选', exact: true }).getByRole('button', { name: new RegExp('^' + name) }).click();
 const applyBatch = () => boxFields().getByRole('button', { name: /^应用到 \d+ 个选中箱$/ });
 async function sectionFocus(section) { await expect.poll(() => section.evaluate((node) => node.contains(document.activeElement))).toBe(true); }
@@ -205,12 +207,12 @@ try {
     await expect(price).toContainText('固定申报单价（每件）'); await expect(price).toContainText('2.00 USD');
     await expect(price).toContainText('无需补充商品售价'); await expect(price.getByRole('textbox')).toHaveCount(0);
     await expect(wizard().getByLabel(/人工补充售价|售价补充依据/)).toHaveCount(0);
-    const firstBox = data.members[0].boxSource[0]; await boxField('A1', '长（CM）').fill('42.25');
+    const firstBox = data.members[0].boxSource[0]; await (await boxField('A1', '长（CM）')).fill('42.25');
     await save().click(); await expect(save()).toBeDisabled(); assert.equal(plainHttp.accepted.length, 1);
     assert.equal(plainHttp.accepted[0].fields[prefix + 'material'], 'HTTP fixture material');
     assert.equal(plainHttp.accepted[0].fields[documentBoxFieldKey(firstBox.boxId, 'length')], '42.25');
     assert.equal(plainHttp.accepted[0].manualSalesPrices, undefined);
-    await expect(material).toHaveValue('HTTP fixture material'); await expect(boxField('A1', '长（CM）')).toHaveValue('42.25');
+    await expect(material).toHaveValue('HTTP fixture material'); await expect(await boxField('A1', '长（CM）')).toHaveValue('42.25');
     await expect(price).toContainText('2.00 USD');
     assert.equal(JSON.stringify(data.members), plainHttp.sourceSnapshot); noGeneration(plainHttp); await plainContext.close(); note();
   }
@@ -218,7 +220,7 @@ try {
   step = 'unchanged-next-enters-generation-without-saving-validating-or-exporting';
   const state = fixture(); let context = await setup(state); await open(state.complete);
   await expect(completion().getByRole('button')).toHaveCount(4); await expect(completion()).not.toContainText('正在读取商品');
-  await wizard().locator(':scope > .import-dialog-body').evaluate((node) => { node.scrollTop = 0; }); await modalFrame(); await screenshot('document-details-overview-1440.png');
+  await wizard().locator(':scope > .import-dialog-body').evaluate((node) => { node.scrollTop = 0; }); await modalFrame(); await screenshot('document-details-overview-390.png');
   await expect(save()).toBeDisabled(); await expect(next()).toHaveText('下一步'); await next().click(); await currentStage('校验与生成');
   assert.equal(state.attempts.length, 0); noGeneration(state); await footer().getByRole('button', { name: '上一步', exact: true }).click(); await currentStage('单票资料'); note();
 
@@ -248,22 +250,22 @@ try {
 
   step = 'version-conflict-retains-edits-and-recovery-keeps-unmodified-server-fields';
   const conflict = fixture(); conflict.modes = ['409', 'ready']; context = await setup(conflict); await open(conflict.complete);
-  const box = conflict.complete.currentRevision.data.members[0].boxSource[0]; await boxField('A1', '长（CM）').fill('60.123'); await next().click();
-  await expect(wizard().getByRole('alert')).toContainText('版本冲突'); await currentStage('单票资料'); await expect(boxField('A1', '长（CM）')).toHaveValue('60.123');
+  const box = conflict.complete.currentRevision.data.members[0].boxSource[0]; await (await boxField('A1', '长（CM）')).fill('60.123'); await next().click();
+  await expect(wizard().getByRole('alert')).toContainText('版本冲突'); await currentStage('单票资料'); await expect(await boxField('A1', '长（CM）')).toHaveValue('60.123');
   await wizard().getByRole('button', { name: '重新读取最新版本', exact: true }).click(); await expect(wizard().getByRole('button', { name: '恢复未保存输入', exact: true })).toBeVisible();
-  await expect(boxField('A1', '长（CM）')).toBeDisabled(); await wizard().getByRole('button', { name: '恢复未保存输入', exact: true }).click();
-  await expect(boxField('A1', '长（CM）')).toHaveValue('60.123'); await expect(boxField('A1', '宽（CM）')).toHaveValue('29'); await expect(wizard().getByLabel('草稿名称', { exact: true })).toHaveValue('OTHER-USER-TITLE');
+  await expect(save()).toBeDisabled(); await expect(boxFields().locator('input:enabled')).toHaveCount(0); await wizard().getByRole('button', { name: '恢复未保存输入', exact: true }).click();
+  await expect(await boxField('A1', '长（CM）')).toHaveValue('60.123'); await expect(await boxField('A1', '宽（CM）')).toHaveValue('29'); await expect(wizard().getByLabel('草稿名称', { exact: true })).toHaveValue('OTHER-USER-TITLE');
   await next().click(); await currentStage('校验与生成'); assert.equal(conflict.accepted[0].expectedVersion, 2);
   assert.equal(conflict.accepted[0].fields[documentBoxFieldKey(box.boxId, 'length')], '60.123'); assert.equal(conflict.accepted[0].fields[documentBoxFieldKey(box.boxId, 'width')], '29');
   noGeneration(conflict); await context.close(); note();
 
   step = 'failed-reread-and-same-version-retry-retain-recoverable-unsaved-input';
   const reread = fixture(); context = await setup(reread); await open(reread.complete);
-  await boxField('A1', '长（CM）').fill('67.89'); await wizard().getByLabel('草稿名称', { exact: true }).fill('SAME-VERSION-UNSAVED');
+  await (await boxField('A1', '长（CM）')).fill('67.89'); await wizard().getByLabel('草稿名称', { exact: true }).fill('SAME-VERSION-UNSAVED');
   reread.detailFailures = 1; await wizard().getByRole('button', { name: '重新读取单据', exact: true }).click(); await expect(wizard().getByRole('alert')).toContainText('读取单据失败');
   await wizard().getByRole('button', { name: '重试', exact: true }).click(); await expect(wizard().getByRole('button', { name: '恢复未保存输入', exact: true })).toBeVisible();
-  await expect(boxField('A1', '长（CM）')).toBeDisabled(); await wizard().getByRole('button', { name: '恢复未保存输入', exact: true }).click();
-  await expect(boxField('A1', '长（CM）')).toHaveValue('67.89'); await expect(wizard().getByLabel('草稿名称', { exact: true })).toHaveValue('SAME-VERSION-UNSAVED');
+  await expect(save()).toBeDisabled(); await expect(boxFields().locator('input:enabled')).toHaveCount(0); await wizard().getByRole('button', { name: '恢复未保存输入', exact: true }).click();
+  await expect(await boxField('A1', '长（CM）')).toHaveValue('67.89'); await expect(wizard().getByLabel('草稿名称', { exact: true })).toHaveValue('SAME-VERSION-UNSAVED');
   assert.equal(reread.complete.version, 1); assert.equal(reread.attempts.length, 0); await save().click(); await expect(save()).toBeDisabled();
   assert.equal(reread.accepted[0].expectedVersion, 1); noGeneration(reread); await context.close(); note();
 
@@ -282,12 +284,60 @@ try {
   await completion().getByRole('button', { name: /^基础信息/ }).click(); await expect(wizard().getByLabel('草稿名称', { exact: true })).toBeVisible();
   await completion().getByRole('button', { name: /^收件地址/ }).click(); await expect(wizard().getByLabel('城市', { exact: true })).toBeVisible(); await sectionFocus(addressSection());
   await completion().getByRole('button', { name: /^商品申报/ }).click(); await expect(wizard().getByLabel('材质', { exact: true }).first()).toBeVisible(); await sectionFocus(wizard().locator('.document-product-adjustments'));
-  await boxField('A1', '长（CM）').fill('41'); await filterBoxes('已修改'); await expect(boxRow('A2')).toHaveCount(0);
-  await completion().getByRole('button', { name: /^箱规/ }).click(); await expect(boxField('A2', '毛重（KG）')).toHaveAttribute('aria-invalid', 'true'); await expect(boxField('A2', '毛重（KG）')).toBeFocused(); await sectionFocus(boxFields());
-  await modalFrame(); assert.equal(missing.attempts.length, 0); await screenshot('document-details-missing-navigation-1440.png');
-  await filterBoxes('待补齐'); await expect(boxRow('A2')).toBeVisible(); await boxField('A2', '毛重（KG）').pressSequentially('12.34'); await expect(boxField('A2', '毛重（KG）')).toHaveValue('12.34');
-  await expect(boxRow('A2')).toBeVisible(); await completion().getByRole('button', { name: /^基础信息/ }).click(); await expect(boxRow('A2')).toHaveCount(0);
-  await filterBoxes('全部'); await expect(boxField('A2', '毛重（KG）')).toHaveValue('12.34'); assert.equal(missing.attempts.length, 0); await context.close(); note();
+  await (await boxField('A1', '长（CM）')).fill('41'); await filterBoxes('已修改'); await expect(await boxRow('A2')).toHaveCount(0);
+  await completion().getByRole('button', { name: /^箱规/ }).click();
+  // Let completion navigation reveal and focus the target itself. Navigating via
+  // the row helper here would move focus to the grid's row number control.
+  const missingWeight = boxFields().getByRole('textbox', { name: 'A2 毛重（KG）', exact: true });
+  await expect(missingWeight).toHaveAttribute('aria-invalid', 'true'); await expect(missingWeight).toBeFocused(); await sectionFocus(boxFields());
+  await modalFrame(); assert.equal(missing.attempts.length, 0); await screenshot('document-details-missing-navigation-390.png');
+  await filterBoxes('待补齐'); await expect(await boxRow('A2')).toBeVisible(); await (await boxField('A2', '毛重（KG）')).pressSequentially('12.34'); await expect(await boxField('A2', '毛重（KG）')).toHaveValue('12.34');
+  await expect(await boxRow('A2')).toBeVisible(); await completion().getByRole('button', { name: /^基础信息/ }).click(); await expect.poll(() => gridRowCount(boxFields(), '逐箱制单资料')).toBe(0);
+  await filterBoxes('全部'); await expect(await boxField('A2', '毛重（KG）')).toHaveValue('12.34'); assert.equal(missing.attempts.length, 0); await context.close(); note();
+
+  step = 'hidden-box-errors-reveal-the-field-expand-the-group-and-preserve-collapse-final-character';
+  const hiddenBoxes = fixture(); context = await setup(hiddenBoxes); await open(hiddenBoxes.incomplete); await page.setViewportSize({ width: 1440, height: 1000 });
+  const hiddenMemberSnapshot = JSON.stringify(hiddenBoxes.incomplete.currentRevision.data.members);
+  const hiddenSources = hiddenBoxes.incomplete.currentRevision.data.members.flatMap((member) => member.boxSource), [hiddenA1, hiddenA2] = hiddenSources;
+  assert.deepEqual((await visibleColumnKeys(boxFields(), '逐箱制单资料')).slice(0, 3), ['expand', 'rowNumber', 'selection']);
+  await setColumnVisible(boxFields(), '逐箱制单资料', '毛重（KG）', 'weight', false);
+  const beforeCollapse = await editGridCell(boxFields(), '逐箱制单资料', 1, 'po', 'A1 PO / Reference ID'); await beforeCollapse.fill('COLLAPSE-末字');
+  await boxFields().getByRole('button', { name: '全部收起', exact: true }).click(); await expect.poll(() => gridRowCount(boxFields(), '逐箱制单资料')).toBe(2);
+  await filterBoxes('已修改'); await expect.poll(() => gridRowCount(boxFields(), '逐箱制单资料')).toBe(1);
+  await completion().getByRole('button', { name: /^箱规/ }).click();
+  const revealedWeight = boxFields().getByRole('textbox', { name: 'A2 毛重（KG）', exact: true });
+  await expect(revealedWeight).toBeFocused(); await expect(revealedWeight).toHaveAttribute('aria-invalid', 'true');
+  assert((await visibleColumnKeys(boxFields(), '逐箱制单资料')).includes('weight'));
+  await expect(boxFields().getByRole('group', { name: '箱资料筛选', exact: true }).getByRole('button', { name: /^全部/ })).toHaveAttribute('aria-pressed', 'true');
+  await revealedWeight.fill('13.789'); await boxFields().getByRole('button', { name: '全部收起', exact: true }).click(); await expect.poll(() => gridRowCount(boxFields(), '逐箱制单资料')).toBe(2);
+  await save().click(); await expect(save()).toBeDisabled();
+  assert.equal(hiddenBoxes.accepted.at(-1).fields[documentBoxFieldKey(hiddenA1.boxId, 'po')], 'COLLAPSE-末字');
+  assert.equal(hiddenBoxes.accepted.at(-1).fields[documentBoxFieldKey(hiddenA2.boxId, 'weight')], '13.789');
+  await expect(wizard().locator('.document-summary')).toContainText('v2');
+  const expandAllAfterSave = boxFields().getByRole('button', { name: '全部展开', exact: true }); if (await expandAllAfterSave.isEnabled()) await expandAllAfterSave.click();
+  await expect.poll(() => gridRowCount(boxFields(), '逐箱制单资料')).toBe(5);
+  const trianglePo = await editGridCell(boxFields(), '逐箱制单资料', 1, 'po', 'A1 PO / Reference ID'); await trianglePo.fill('TRIANGLE-最后字符9');
+  await grid(boxFields(), '逐箱制单资料').getByRole('grid').click({ position: { x: 20, y: 36 + 16 } });
+  await expect.poll(() => gridRowCount(boxFields(), '逐箱制单资料')).toBe(3); await save().click(); await expect(save()).toBeDisabled();
+  assert.equal(hiddenBoxes.accepted.at(-1).fields[documentBoxFieldKey(hiddenA1.boxId, 'po')], 'TRIANGLE-最后字符9');
+  assert.equal(JSON.stringify(hiddenBoxes.incomplete.currentRevision.data.members), hiddenMemberSnapshot); noGeneration(hiddenBoxes); await context.close(); note();
+
+  step = 'rapid-box-to-address-or-product-navigation-cancels-obsolete-cell-reveal';
+  const rapidNavigation = fixture(); context = await setup(rapidNavigation); await open(rapidNavigation.incomplete); await page.setViewportSize({ width: 1440, height: 1000 });
+  for (const destination of ['收件地址', '商品申报']) {
+    await setColumnVisible(boxFields(), '逐箱制单资料', '毛重（KG）', 'weight', false);
+    const collapse = boxFields().getByRole('button', { name: '全部收起', exact: true }); if (await collapse.isEnabled()) await collapse.click();
+    await completion().evaluate((node, name) => {
+      const buttons = [...node.querySelectorAll('button')];
+      buttons.find((button) => button.textContent.startsWith('箱规')).click();
+      buttons.find((button) => button.textContent.startsWith(name)).click();
+    }, destination);
+    // Drain the reveal pipeline's preparation, layout and cell-focus frames.
+    await page.evaluate(async () => { for (let frame = 0; frame < 6; frame++) await new Promise((done) => requestAnimationFrame(done)); });
+    await sectionFocus(destination === '收件地址' ? addressSection() : wizard().locator('.document-product-adjustments'));
+    await expect(boxFields().locator('.scm-grid-cell-editor')).toHaveCount(0);
+  }
+  assert.equal(rapidNavigation.attempts.length, 0); noGeneration(rapidNavigation); await context.close(); note();
 
   step = 'confirmed-address-collapses-and-editing-invalidates-confirmation-without-collapsing';
   const editingAddress = fixture(); context = await setup(editingAddress); await open(editingAddress.complete);
@@ -299,7 +349,7 @@ try {
   await addressSection().getByLabel('地址核对 / 冲突处理原因', { exact: true }).fill('Checked the edited technical address');
   await addressSection().getByLabel('已核对并确认本票采用的完整收件地址', { exact: true }).check(); await expect(addressEditor()).toHaveAttribute('open', '');
   await save().click(); await expect(save()).toBeDisabled(); await expect(addressStatus()).toHaveText('已确认'); await expect(addressEditor()).not.toHaveAttribute('open', '');
-  await screenshot('document-details-address-summary-1440.png'); await context.close(); note();
+  await screenshot('document-details-address-summary-390.png'); await context.close(); note();
 
   step = 'missing-unconfirmed-and-conflicting-addresses-stay-expanded-until-resolved';
   for (const kind of ['incomplete', 'unconfirmed', 'conflicted']) {
@@ -313,37 +363,37 @@ try {
   step = 'box-batch-changes-only-selected-boxes-and-only-filled-fields';
   const batch = fixture(); context = await setup(batch); await open(batch.complete);
   const sources = batch.complete.currentRevision.data.members.flatMap((member) => member.boxSource), [a1, a2, b1] = sources;
-  await boxChoice('A1').check(); await boxChoice('B1').check(); await boxFields().getByLabel('批量PO / Reference ID', { exact: true }).fill('BATCH-PO'); await boxFields().getByLabel('批量长（CM）', { exact: true }).fill('44.5');
+  await (await boxChoice('A1')).check(); await (await boxChoice('B1')).check(); await boxFields().getByLabel('批量PO / Reference ID', { exact: true }).fill('BATCH-PO'); await boxFields().getByLabel('批量长（CM）', { exact: true }).fill('44.5');
   await expect(applyBatch()).toBeEnabled(); await applyBatch().click(); assert.equal(batch.attempts.length, 0);
-  for (const code of ['A1', 'B1']) { await expect(boxField(code, 'PO / Reference ID')).toHaveValue('BATCH-PO'); await expect(boxField(code, '长（CM）')).toHaveValue('44.50'); }
-  await expect(boxField('A2', 'PO / Reference ID')).toHaveValue(a2.po); await expect(boxField('A2', '长（CM）')).toHaveValue(a2.values.length);
-  await expect(boxField('A1', '宽（CM）')).toHaveValue(a1.values.width); await expect(boxField('B1', '高（CM）')).toHaveValue(b1.values.height);
+  for (const code of ['A1', 'B1']) { await expect(await boxField(code, 'PO / Reference ID')).toHaveValue('BATCH-PO'); await expect(await boxField(code, '长（CM）')).toHaveValue('44.50'); }
+  await expect(await boxField('A2', 'PO / Reference ID')).toHaveValue(a2.po); await expect(await boxField('A2', '长（CM）')).toHaveValue(a2.values.length);
+  await expect(await boxField('A1', '宽（CM）')).toHaveValue(a1.values.width); await expect(await boxField('B1', '高（CM）')).toHaveValue(b1.values.height);
   await boxFields().getByLabel('批量毛重（KG）', { exact: true }).fill('-2'); await expect(applyBatch()).toBeDisabled(); await expect(boxFields().getByLabel('批量毛重（KG）', { exact: true })).toHaveAttribute('aria-invalid', 'true');
-  await boxFields().getByLabel('批量毛重（KG）', { exact: true }).fill('13'); await applyBatch().click(); for (const code of ['A1', 'B1']) await expect(boxField(code, '毛重（KG）')).toHaveValue('13.00');
-  await expect(boxField('A2', '毛重（KG）')).toHaveValue(a2.values.weight); await expect(boxField('A1', 'PO / Reference ID')).toHaveValue('BATCH-PO');
+  await boxFields().getByLabel('批量毛重（KG）', { exact: true }).fill('13'); await applyBatch().click(); for (const code of ['A1', 'B1']) await expect(await boxField(code, '毛重（KG）')).toHaveValue('13.00');
+  await expect(await boxField('A2', '毛重（KG）')).toHaveValue(a2.values.weight); await expect(await boxField('A1', 'PO / Reference ID')).toHaveValue('BATCH-PO');
   assert.equal(JSON.stringify(batch.complete.currentRevision.data.members), batch.sourceSnapshot); note();
 
   step = 'box-filters-preserve-selection-and-overwrite-needs-explicit-confirmation';
-  await filterBoxes('已修改'); await expect(boxFields().getByRole('checkbox', { name: /^选择箱 / })).toHaveCount(2); await expect(boxChoice('A1')).toBeChecked(); await expect(boxChoice('B1')).toBeChecked();
-  await filterBoxes('待补齐'); await expect(boxFields().getByRole('checkbox', { name: /^选择箱 / })).toHaveCount(0); await expect(boxFields().getByRole('status').filter({ hasText: /已选 2 箱/ })).toContainText('2 箱不在当前筛选中');
+  await filterBoxes('已修改'); await expect.poll(() => gridRowCount(boxFields(), '逐箱制单资料')).toBe(4); await expect(await boxChoice('A1')).toBeChecked(); await expect(await boxChoice('B1')).toBeChecked();
+  await filterBoxes('待补齐'); await expect.poll(() => gridRowCount(boxFields(), '逐箱制单资料')).toBe(0); await expect(boxFields().getByRole('status').filter({ hasText: /已选 2 箱/ })).toContainText('2 箱不在当前筛选中');
   await filterBoxes('全部'); await boxFields().getByLabel('批量PO / Reference ID', { exact: true }).fill('SECOND-BATCH-PO'); await expect(applyBatch()).toBeDisabled();
   await boxFields().getByRole('checkbox', { name: /确认覆盖上述字段中的 2 处已有人工值/ }).check(); await applyBatch().click();
-  await expect(boxField('A1', 'PO / Reference ID')).toHaveValue('SECOND-BATCH-PO'); await expect(boxField('B1', 'PO / Reference ID')).toHaveValue('SECOND-BATCH-PO'); await expect(boxField('A2', 'PO / Reference ID')).toHaveValue(a2.po);
+  await expect(await boxField('A1', 'PO / Reference ID')).toHaveValue('SECOND-BATCH-PO'); await expect(await boxField('B1', 'PO / Reference ID')).toHaveValue('SECOND-BATCH-PO'); await expect(await boxField('A2', 'PO / Reference ID')).toHaveValue(a2.po);
   await boxFields().getByRole('button', { name: '清空箱选择', exact: true }).click(); await expect(boxFields().locator('.document-box-batch')).toHaveCount(0);
-  await boxRow('A1').getByRole('button', { name: '恢复自动值', exact: true }).click(); await expect(boxField('A1', 'PO / Reference ID')).toHaveValue(a1.po); await expect(boxField('A1', '长（CM）')).toHaveValue(a1.values.length);
-  await expect(boxField('B1', 'PO / Reference ID')).toHaveValue('SECOND-BATCH-PO'); await save().click(); await expect(save()).toBeDisabled();
+  await (await boxRow('A1')).getByRole('button', { name: '恢复自动值', exact: true }).click(); await expect(await boxField('A1', 'PO / Reference ID')).toHaveValue(a1.po); await expect(await boxField('A1', '长（CM）')).toHaveValue(a1.values.length);
+  await expect(await boxField('B1', 'PO / Reference ID')).toHaveValue('SECOND-BATCH-PO'); await save().click(); await expect(save()).toBeDisabled();
   const savedFields = batch.accepted.at(-1).fields;
   for (const key of ['po', 'weight', 'length', 'width', 'height']) assert.equal(savedFields[documentBoxFieldKey(a1.boxId, key)], null);
   assert.equal(savedFields[documentBoxFieldKey(b1.boxId, 'po')], 'SECOND-BATCH-PO'); assert.equal(savedFields[documentBoxFieldKey(a2.boxId, 'po')], undefined);
   assert.equal(JSON.stringify(batch.complete.currentRevision.data.members), batch.sourceSnapshot); noGeneration(batch); note();
 
   step = 'details-navigation-address-summary-and-box-table-fit-wide-and-narrow-viewports';
-  for (const width of [1920, 1440, 1024, 767, 390, 320]) {
-    await page.setViewportSize({ width, height: 1000 }); await completion().getByRole('button', { name: /^箱规/ }).click(); await expect(boxField('A1', '长（CM）')).toBeVisible();
+  for (const width of [1920, 1440, 1024, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 1000 }); await completion().getByRole('button', { name: /^箱规/ }).click(); await boxRow('A1'); await expect(grid(boxFields(), '逐箱制单资料').getByRole('grid')).toBeVisible();
     await modalFrame();
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
-    for (const label of ['PO / Reference ID', '毛重（KG）', '长（CM）', '宽（CM）', '高（CM）']) { const bounds = await boxField('A1', label).boundingBox(); assert(bounds && bounds.x >= -1 && bounds.x + bounds.width <= width + 1, 'Box inputs fit width ' + width); }
-    await screenshot('document-details-boxes-' + width + '.png'); await completion().getByRole('button', { name: /^收件地址/ }).click(); await modalFrame(); await screenshot('document-details-address-' + width + '.png');
+    if (width <= 768) for (const label of ['PO / Reference ID', '毛重（KG）', '长（CM）', '宽（CM）', '高（CM）']) { const bounds = await (await boxField('A1', label)).boundingBox(); assert(bounds && bounds.x >= -1 && bounds.x + bounds.width <= width + 1, 'Box inputs fit width ' + width); }
+    await screenshot('document-details-boxes-' + width + '.png'); await closeGridDetails(boxFields(), '逐箱制单资料'); await completion().getByRole('button', { name: /^收件地址/ }).click(); await modalFrame(); await screenshot('document-details-address-' + width + '.png');
   }
   await context.close(); note(); assert.deepEqual(browserErrors, []); assert.deepEqual(unexpectedRequests, []); assert.deepEqual(externalRequests, []);
 } catch (error) {

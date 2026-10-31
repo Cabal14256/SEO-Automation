@@ -5,6 +5,8 @@ import { ApiError } from '../api';
 import { Button, IconButton } from '../components/ui/button';
 import type { BatchScope, ShippingOccurrence } from '@scm/contracts';
 import './batch-table-selection.css';
+import { useGridTableScope } from '../components/ui/grid-table-scope';
+import { ReactGridTable } from '../components/ui/react-grid-table';
 
 export const occurrenceLabel = (run: Pick<ShippingOccurrence, 'month' | 'sequence'>) => run.sequence === null ? run.month + ' · 待编号' : run.month + ' 第 ' + run.sequence + ' 次';
 export const batchScopeLabel = (batch: BatchScope) => batch.shippingRunId && batch.month ? occurrenceLabel({ month: batch.month, sequence: batch.sequence ?? null }) : '历史批次／未关联发货次';
@@ -47,6 +49,8 @@ export function BatchPanel({ title, help, children, action }: { title: string; h
 }
 
 export function BatchTable({ label, headers, children }: { label: string; headers: ReactNode[]; children: ReactNode }) {
+  const grid = useGridTableScope();
+  if (grid) return <ReactGridTable label={label} headers={headers}>{children}</ReactGridTable>;
   return <div className="table-scroll" role="region" aria-label={`${label}，可横向滚动`} tabIndex={0}><div className="table-inner"><table className="task-table batch-table"><thead><tr>{headers.map((header, index) => <th key={index} scope="col">{header}</th>)}</tr></thead><tbody>{children}</tbody></table></div></div>;
 }
 

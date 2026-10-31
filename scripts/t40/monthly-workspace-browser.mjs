@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
 import { batchWorkspaceSchema, demandWorkspaceSchema, reportResponseSchema } from '../../packages/contracts/dist/index.js';
 import { chooseOption } from '../shared/ui-controls.mjs';
+import { closeGridDetails, findGridRow, gridRowCount, selectGridRow, showShippingFilters } from '../shared/grid.mjs';
 
 // Isolated HTTP fixtures: no database, shared worker, or external API is used.
 const root = resolve(import.meta.dirname, '../..');
@@ -72,22 +73,41 @@ try {
   });
   page = await context.newPage(); page.on('pageerror', (error) => errors.push(error.message)); page.setDefaultTimeout(12000);
   await page.goto('/shipping?view=demands');
-  const form = page.getByRole('form', { name: '筛选发货工作台', exact: true });
-  const table = page.getByRole('region', { name: '发货明细表，可横向滚动', exact: true });
+  const form = page.locator('form[aria-label="筛选发货工作台"]');
   const nav = page.getByRole('navigation', { name: '需求与批次导航', exact: true });
+  const expectShipments = async (fbas) => {
+    // Each placeholder demand has one shipment summary and its expanded detail.
+    await expect.poll(() => gridRowCount(page, '发货明细表')).toBe(fbas.length * 2);
+    for (const [index, fba] of fbas.entries()) {
+      const summary = await selectGridRow(page, '发货明细表', index * 2);
+      await expect(summary.locator('.shipping-grid-details')).toHaveAttribute('data-grid-row-kind', 'shipment');
+      await expect(summary).toContainText(fba);
+      const detail = await selectGridRow(page, '发货明细表', index * 2 + 1);
+      await expect(detail.locator('.shipping-grid-details')).toHaveAttribute('data-grid-row-kind', 'placeholder');
+      await expect(detail).toContainText(fba);
+    }
+    await closeGridDetails(page, '发货明细表');
+  };
+  await expect(form).toHaveAttribute('hidden', '');
+  await expect(page.getByLabel('展示方式', { exact: true })).toBeVisible();
+  await showShippingFilters(page); await expect(form).toBeVisible();
+  pass('filter-conditions-start-collapsed-with-display-mode-always-accessible');
   await expect(form.getByLabel('发货月份', { exact: true })).toBeVisible(); await expect(form.getByLabel('发货次', { exact: true })).toBeVisible();
-  await expect(table.locator('tr.shipping-shipment-heading')).toHaveCount(3);
+  await expectShipments(['FBAMONTH1', 'FBAMONTH2', 'FBAMONTH3']);
+  await nav.getByRole('button', { name: '发货批次', exact: true }).click();
   await expect(nav).toContainText('2026-10 第 3 次');
+  await nav.getByRole('button', { name: '发货批次', exact: true }).click();
   await expect(page.getByText(/周范围|周批次|归属周|开始周|结束周/)).toHaveCount(0);
   pass('monthly-occurrence-labels-replace-week-controls');
   await chooseOption(form.getByLabel('发货次', { exact: true }), occurrence.id); await form.getByRole('button', { name: '筛选', exact: true }).click();
-  await expect(table.locator('tr.shipping-shipment-heading')).toHaveCount(2);
-  await expect(table).toContainText('2026-08-04'); await expect(table).toContainText('2026-09-29');
+  await expectShipments(['FBAMONTH1', 'FBAMONTH2']);
+  await expect(await findGridRow(page, '发货明细表', 'FBAMONTH1')).toContainText('2026-08-04'); await expect(await findGridRow(page, '发货明细表', 'FBAMONTH2')).toContainText('2026-09-29');
+  await closeGridDetails(page, '发货明细表');
   await expect.poll(() => queries.at(-1)?.shippingRunId).toBe(occurrence.id); await expect.poll(() => batchQueries.at(-1)?.shippingRunId).toBe(occurrence.id);
   assert(!queries.some((query) => query.weekStartDate)); assert(!batchQueries.some((query) => query.weekFrom || query.weekTo));
   pass('occurrence-filter-includes-cross-month-imports-without-week-parameters');
-  await nav.getByRole('button', { name: '待分组需求', exact: true }).click();
-  await expect(table.locator('tr.shipping-shipment-heading')).toHaveCount(1); await expect(table).toContainText('FBAMONTH3');
+  await page.getByRole('group', { name: '发货范围切换', exact: true }).getByRole('button', { name: '待分组需求', exact: true }).click();
+  await expectShipments(['FBAMONTH3']); await expect(await findGridRow(page, '发货明细表', 'FBAMONTH3')).toContainText('FBAMONTH3'); await closeGridDetails(page, '发货明细表');
   pass('unarranged-pool-independent-of-selected-occurrence');
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 1000 });

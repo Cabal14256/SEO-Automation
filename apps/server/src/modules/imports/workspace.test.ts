@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { demandWorkspaceQuerySchema, demandWorkspaceSchema, type DemandRecord, type GroupConfirmation, type ShipmentProduct, type ShipmentRevision, type WeeklyBatch } from '@scm/contracts';
-import { projectDemandWorkspace, type DemandWorkspaceInput, type WorkspaceGroup } from './workspace-projection.js';
+import { hydrateDemandWorkspaceSources, projectDemandWorkspace, type DemandWorkspaceInput, type WorkspaceGroup } from './workspace-projection.js';
 
 const at = '2026-10-17T01:00:00.000Z';
 function demand(overrides: Partial<DemandRecord> = {}): DemandRecord {
@@ -29,6 +29,33 @@ const query = (overrides: Record<string, unknown> = {}) => demandWorkspaceQueryS
 const project = (input: DemandWorkspaceInput, overrides: Record<string, unknown> = {}) => demandWorkspaceSchema.parse(projectDemandWorkspace(input, query(overrides), at));
 
 describe('demand workspace projection', () => {
+  it('materializes measurements only for the selected page while retaining global box bounds', () => {
+    const first = fixture(demand({ snapshot: { ...demand().snapshot, fba: 'FBA-A' } }));
+    const second = fixture(demand({ snapshot: { ...demand().snapshot, fba: 'FBA-B' } }));
+    first.group.frozenAt = at; second.group.frozenAt = at;
+    const offPage = second.confirmation.snapshot.shipments[0]!.revision.data.boxes[0]!;
+    Object.defineProperty(offPage, 'weight', { get: () => { throw new Error('off-page measurement was materialized'); } });
+    second.input.codes = [{ id: randomUUID(), groupId: second.group.id, demandId: second.member.id, boxId: offPage.id, prefix: 'A', sequence: 37, code: 'A37', valid: true, createdAt: at }];
+    const input: DemandWorkspaceInput = { demands: [first.member, second.member], groups: [first.group, second.group], batches: [first.batch, second.batch],
+      members: [...first.input.members, ...second.input.members], shipments: [...first.input.shipments, ...second.input.shipments], confirmations: [first.confirmation, second.confirmation],
+      codes: second.input.codes, decisions: [], sources: [], shippingMemberships: [...first.input.shippingMemberships!, ...second.input.shippingMemberships!] };
+    const result = project(input, { pageBy: 'demand', pageSize: 1 });
+    expect(result.rows.map((row) => row.demandId)).toEqual([first.member.id]);
+    expect(result).toMatchObject({ demandTotal: 2, total: 2, maxBoxes: 37 });
+  });
+
+  it('hydrates page provenance with the same adopted-version and date precedence as full projection', () => {
+    const f = fixture();
+    f.input.sources = [
+      { demandId: f.member.id, acceptedVersion: 1, importId: randomUUID(), fileName: 'first.xlsx', sheetName: 'Sheet1', rowNumber: 8, sourceFilledAt: '2026-09-01' },
+      { demandId: f.member.id, acceptedVersion: 2, importId: randomUUID(), fileName: 'future.xlsx', sheetName: 'Sheet1', rowNumber: 9, sourceFilledAt: '2026-09-05' },
+    ];
+    const complete = projectDemandWorkspace(f.input, query({ pageBy: 'demand' }), at);
+    const page = projectDemandWorkspace({ ...f.input, sources: [] }, query({ pageBy: 'demand' }), at);
+    expect(hydrateDemandWorkspaceSources(page, f.input.sources)).toEqual(complete);
+    expect(complete.rows[0]).toMatchObject({ sourceFilledAt: '2026-09-01', packingDays: 5, sources: [{ fileName: 'first.xlsx' }] });
+  });
+
   it('uses the numbered occurrence month for a demand imported in a different month', () => {
     const f = fixture(demand({ businessDate: '2026-08-04', weekStartDate: '2026-08-03', weekEndDate: '2026-08-09' }));
     const occurrence = f.input.shippingMemberships![0]!;

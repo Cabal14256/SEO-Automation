@@ -1,18 +1,21 @@
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { scrollDocumentFieldIntoView } from './document-details-navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useBlocker, useSearch } from '@tanstack/react-router';
-import { ArrowLeft, ArrowRight, CircleAlert, CircleCheck, Download, FileCheck, FileSpreadsheet, History, LoaderCircle, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Download, Eye, FileCheck, FileSpreadsheet, Filter, History, LoaderCircle, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from 'lucide-react';
 import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_FIELD_OPTIONS, documentCurrencyForCountry, documentFieldsSchema, documentProductCurrency, documentTicketCurrency, hasDocumentAddressConflict, withDocumentDefaults, withDocumentInvoiceDefaults, type DocumentAutomationDeleteResponse, type DocumentAutomationJob, type Document as BusinessDocument, type DocumentExport, type DocumentListQuery, type DocumentRevisionData, type DocumentValidation } from '@scm/contracts';
 import { ApiError, type SessionResponse } from '../api';
 import { Button, IconButton } from '../components/ui/button';
 import { MonthPicker } from '../components/ui/month-picker';
 import { Input } from '../components/ui/input';
+import { GridTableScope } from '../components/ui/grid-table-scope';
+import { DocumentDataGrid, DocumentGridScope, useDocumentFiltersExpanded, useDocumentGridPreferences, type DocumentPageSize } from './document-grid';
+import type { GridColumn } from '../components/ui/scm-data-grid';
 import { SelectField } from '../components/ui/select';
-import { BatchPagination, BatchTable, Check, downloadBlob, messageOf, newOperation, QueryError, timestamp } from './batch-shared';
+import { BatchTable, Check, downloadBlob, messageOf, newOperation, QueryError, timestamp } from './batch-shared';
 import { documentApi, type DocumentDetails } from './document-api';
 import { NewDocument } from './document-automation-source';
 import { documentAutomationApi } from './document-automation-api';
@@ -24,7 +27,7 @@ import { DocumentAddressSection } from './document-address';
 import { DocumentLingxing } from './document-lingxing';
 import { DocumentProductImage } from './document-product-image';
 import { DocumentSalesPrice, type ManualSalesPriceDrafts } from './document-sales-price';
-import { DocumentBoxAdjustments } from './document-boxes';
+import { DocumentBoxAdjustments, type DocumentBoxEditorHandle } from './document-boxes';
 import { invoiceBoxPreview, invoiceProductIdentity } from './document-invoice-preview';
 import { ImportDialog } from './import-dialog';
 import './documents.css';
@@ -70,8 +73,8 @@ const documentEditingLocked = (record: BusinessDocument, exports: DocumentExport
 
 const documentOccurrence = (data: Pick<DocumentRevisionData, 'shippingRunMonth' | 'shippingRunSequence'>) => data.shippingRunMonth ? `${data.shippingRunMonth} 第 ${data.shippingRunSequence ?? '待分配'} 次发货` : '未关联发货次';
 
-function Status({ status }: { status: string }) {
-  return <span className={`document-status document-status-${status}`}>{(status === 'running' || status === 'queued') && <LoaderCircle size={13} className="motion-spin" aria-hidden="true" />}{documentLabels[status] || status}</span>;
+function Status({ status, textValue }: { status: string; textValue?: string }) {
+  return <span className={`document-status document-status-${status}`}>{(status === 'running' || status === 'queued') && <LoaderCircle size={13} className="motion-spin" aria-hidden="true" />}{textValue ?? documentLabels[status] ?? status}</span>;
 }
 
 function useDocumentAction(conflictAction = '保存') {
@@ -122,6 +125,7 @@ export function DocumentsWorkspace({ active = true }: { active?: boolean }) {
   const [editorSession, setEditorSession] = useState(0);
   const [automaticJobId, setAutomaticJobId] = useState('');
   const [automaticOpen, setAutomaticOpen] = useState(false);
+  const [recentTasksOpen, setRecentTasksOpen] = useState(false);
   const [automationFormState, setAutomationFormState] = useState<AutomationFormState>({ dirty: false, busy: false });
   const automationFormRef = useRef(automationFormState);
   const automationDiscard = useRef<() => void>(() => {});
@@ -134,6 +138,8 @@ export function DocumentsWorkspace({ active = true }: { active?: boolean }) {
   const [editorState, setEditorState] = useState<DocumentEditorState>({ dirty: false, busy: false });
   const editorDraft = useRef<DocumentEditorDraft | null>(null);
   const editorStateRef = useRef(editorState);
+  const editorFlush = useRef<(() => Promise<void>) | null>(null);
+  const registerEditorFlush = useCallback((flush: (() => Promise<void>) | null) => { editorFlush.current = flush; }, []);
   const onEditorState = useCallback((next: DocumentEditorState) => { editorStateRef.current = next; setEditorState((old) => old.dirty === next.dirty && old.busy === next.busy && old.detailsDirty === next.detailsDirty ? old : next); }, []);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const pendingSwitch = useRef<(() => void) | null>(null);
@@ -144,13 +150,15 @@ export function DocumentsWorkspace({ active = true }: { active?: boolean }) {
   const detail = useQuery({ queryKey: ['document', documentId], queryFn: () => documentApi.get(documentId), enabled: running && mode === 'detail' && Boolean(documentId), retry: false, refetchInterval: (query) => running && mode === 'detail' && query.state.data?.exports.some((item) => item.status === 'queued' || item.status === 'running') ? 1500 : false });
   const stage: DocumentStage = mode === 'new' ? 'sources' : progress?.id === documentId ? progress.stage : 'details';
   const stageIndex = documentStages.findIndex((item) => item.value === stage);
-  const chooseStage = (next: DocumentStage, saved = false) => {
+  const chooseStage = async (next: DocumentStage, saved = false) => {
+    if (!saved) await editorFlush.current?.();
     if ((!saved && editorStateRef.current.busy) || mode !== 'detail') return;
     if (!saved && editorStateRef.current.detailsDirty && (next === 'generate' || next === 'review')) return;
     setProgress({ id: documentId, stage: next });
     try { sessionStorage.setItem(stageKey(userId, documentId), JSON.stringify({ stage: next })); } catch { /* The mounted wizard retains its stage. */ }
   };
-  const switchTo = (next: () => void) => {
+  const switchTo = async (next: () => void) => {
+    await editorFlush.current?.();
     if (editorStateRef.current.busy || automationFormRef.current.busy) return;
     if (editorStateRef.current.dirty || automationFormRef.current.dirty) { pendingSwitch.current = next; setConfirmDiscard(true); setWizardOpen(true); }
     else next();
@@ -200,7 +208,7 @@ export function DocumentsWorkspace({ active = true }: { active?: boolean }) {
     automaticContinuation.reset(); setAutomaticJobId(''); setAutomaticOpen(false); setAutomaticEdit(null);
     onAutomationFormState({ dirty: false, busy: false });
   };
-  const close = () => { if (active && wizardOpen && !editorStateRef.current.busy && !automaticContinuation.busy && !confirmDiscard) { setWizardOpen(false); if (automaticEdit) setAutomaticOpen(true); } };
+  const close = async () => { await editorFlush.current?.(); if (active && wizardOpen && !editorStateRef.current.busy && !automaticContinuation.busy && !confirmDiscard) { setWizardOpen(false); if (automaticEdit) setAutomaticOpen(true); } };
   const editAutomaticItem = (id: string, itemId: string) => switchTo(() => {
     automaticContinuation.reset(); setAutomaticOpen(false); setAutomaticEdit({ jobId: automaticJobId, itemId, documentId: id });
     open(id, 'details'); setProgress({ id, stage: 'details' });
@@ -243,11 +251,11 @@ export function DocumentsWorkspace({ active = true }: { active?: boolean }) {
   }, [running, stage, mode, documentId]);
   const discard = () => { if (editorStateRef.current.busy || automationFormRef.current.busy) return; automationDiscard.current(); editorDraft.current = null; const next = pendingSwitch.current; pendingSwitch.current = null; setConfirmDiscard(false); setEditorSession((current) => current + 1); onEditorState({ dirty: false, busy: false }); next?.(); };
   const continueEditing = () => { if (editorStateRef.current.busy || automationFormRef.current.busy) return; pendingSwitch.current = null; setConfirmDiscard(false); if (automationFormRef.current.dirty && !editorStateRef.current.dirty) { setWizardOpen(false); setAutomaticOpen(true); } if (blocker.status === 'blocked') blocker.reset(); };
-  return <div className="documents-workspace">
-    <header className="document-page-heading"><div><h2>发票与单据</h2><p className="mapping-help">多选货件统一检查、集中补齐后，每张发票生成独立 Excel 文件并打包为 ZIP；混装票下载后修改。</p></div><div className="document-footer-actions">{mode && <Button type="button" icon={ArrowRight} disabled={editorState.busy || automaticStart.busy || automaticResume.busy || automaticContinuation.busy} onClick={() => { setAutomaticOpen(false); setWizardOpen(true); }}>继续本次制作</Button>}<Button type="button" icon={Plus} variant="primary" disabled={editorState.busy || automaticStart.busy || automaticResume.busy || automaticContinuation.busy} onClick={startNew}>制作发票</Button></div></header>
+  return <DocumentGridScope userId={userId}><GridTableScope><div className="documents-workspace">
+    <header className="document-page-heading"><div><h2>发票与单据</h2><p className="mapping-help">多选货件统一检查、集中补齐后，每张发票生成独立 Excel 文件并打包为 ZIP；混装票下载后修改。</p></div><div className="document-page-actions">{mode && <Button type="button" icon={ArrowRight} disabled={editorState.busy || automaticStart.busy || automaticResume.busy || automaticContinuation.busy} onClick={() => { setAutomaticOpen(false); setWizardOpen(true); }}>继续本次制作</Button>}<Button type="button" icon={History} aria-haspopup="dialog" aria-expanded={recentTasksOpen} disabled={editorState.busy || automaticStart.busy || automaticResume.busy || automaticContinuation.busy} onClick={() => setRecentTasksOpen(true)}>自动出单任务</Button><Button type="button" icon={Plus} variant="primary" disabled={editorState.busy || automaticStart.busy || automaticResume.busy || automaticContinuation.busy} onClick={startNew}>制作发票</Button></div></header>
     {automaticStart.feedback}
     {automaticResume.feedback}
-    <DocumentAutomationRecent active={active && !wizardOpen && !automaticOpen} disabled={editorState.busy || automaticStart.busy || automaticResume.busy || automaticContinuation.busy} open={(id) => switchTo(() => { setAutomaticJobId(id); setAutomaticOpen(true); })} requestDelete={(next) => switchTo(() => { setWizardOpen(false); setAutomaticOpen(false); next(); })} deleted={automationDeleted} />
+    {createPortal(<ImportDialog open={active && recentTasksOpen && !wizardOpen && !automaticOpen} title="自动出单任务" close={() => setRecentTasksOpen(false)} wide><DocumentAutomationRecent active={active && recentTasksOpen && !wizardOpen && !automaticOpen} disabled={editorState.busy || automaticStart.busy || automaticResume.busy || automaticContinuation.busy} open={(id) => { setRecentTasksOpen(false); switchTo(() => { setAutomaticJobId(id); setAutomaticOpen(true); }); }} requestDelete={(next) => { setRecentTasksOpen(false); switchTo(() => { setWizardOpen(false); setAutomaticOpen(false); setRecentTasksOpen(true); next(); }); }} deleted={automationDeleted} /></ImportDialog>, document.body)}
     <DocumentRecords active={active && !wizardOpen && !automaticOpen} busy={editorState.busy || automaticStart.busy || automaticResume.busy} startNew={startNew} open={open} edit={edit} deleted={deleted} requestDelete={(record, next) => { if (mode === 'detail' && documentId === record.id) switchTo(() => { setWizardOpen(false); next(); }); else next(); }} />
     {createPortal(<ImportDialog open={running || confirmDiscard} title="发票与单据向导" close={close} closeDisabled={editorState.busy || automaticContinuation.busy || confirmDiscard} wide><div className="document-wizard">
       {mode === 'detail' && !automaticEdit && <nav ref={progressNav} className="import-wizard-progress" aria-label="单据制作步骤"><ol>{documentStages.map((item, index) => <li key={item.value} data-current={stage === item.value}><button type="button" aria-current={stage === item.value ? 'step' : undefined} disabled={editorState.busy || confirmDiscard || mode === 'detail' && (!detail.data || Boolean(editorState.detailsDirty) && (item.value === 'generate' || item.value === 'review'))} onClick={() => chooseStage(item.value)}><span className="wizard-step-number" aria-hidden="true">{index + 1}</span><span>{item.label}</span></button></li>)}</ol></nav>}
@@ -256,12 +264,12 @@ export function DocumentsWorkspace({ active = true }: { active?: boolean }) {
       {automaticContinuation.error && <p className="form-note error-note" role="alert">{messageOf(automaticContinuation.error)} 已保存的资料会保留，可点击“继续自动出单”重试。</p>}
       <fieldset className="document-wizard-fieldset" disabled={confirmDiscard || automaticContinuation.busy} inert={confirmDiscard}>
         {mode === 'new' && <NewDocument key={newSession} active={running} started={showAutomaticJob} resume={resumeAutomaticJob} onEditorState={onEditorState} actionsContainer={newDocumentActions} close={close} blocked={confirmDiscard} />}
-        {mode === 'detail' && (detail.isPending ? <p className="list-state" role="status">正在读取单据及版本…</p> : detail.isError ? <QueryError error={detail.error} retry={() => void detail.refetch()} /> : <DocumentEditor key={`${detail.data.document.id}-${detail.data.document.version}-${editorSession}-${documentEditingLocked(detail.data.document, detail.data.exports)}`} record={detail.data.document} draftRef={editorDraft} validation={detail.data.validation} exports={detail.data.exports} active={running} stage={stage} onEditorState={onEditorState} reload={() => void detail.refetch()} corrected={(id) => open(id, 'details')} actionsContainer={newDocumentActions} close={close} blocked={confirmDiscard || automaticContinuation.busy} automatic={automaticEdit?.documentId === documentId ? { continue: continueAutomatic, busy: automaticContinuation.busy } : undefined} advance={() => chooseStage('generate', true)} back={() => chooseStage('sources')} />)}
+        {mode === 'detail' && (detail.isPending ? <p className="list-state" role="status">正在读取单据及版本…</p> : detail.isError ? <QueryError error={detail.error} retry={() => void detail.refetch()} /> : <DocumentEditor key={`${detail.data.document.id}-${detail.data.document.version}-${editorSession}-${documentEditingLocked(detail.data.document, detail.data.exports)}`} record={detail.data.document} draftRef={editorDraft} validation={detail.data.validation} exports={detail.data.exports} active={running} stage={stage} onEditorState={onEditorState} registerFlush={registerEditorFlush} reload={() => void detail.refetch()} corrected={(id) => open(id, 'details')} actionsContainer={newDocumentActions} close={close} blocked={confirmDiscard || automaticContinuation.busy} automatic={automaticEdit?.documentId === documentId ? { continue: continueAutomatic, busy: automaticContinuation.busy } : undefined} advance={() => chooseStage('generate', true)} back={() => chooseStage('sources')} />)}
       </fieldset>
       <footer className="import-wizard-footer" data-stage={stage}><p className="mapping-help">{mode === 'new' ? '核对货件与出单资料后开始；任务开始后关闭页面也会继续处理。' : editorState.detailsDirty ? '有未保存的资料，请保存后继续；保存失败会保留本次填写。' : '关闭后可继续本次制作，已保存资料可进入下一步核对。'}</p><div ref={setNewDocumentActions}>{mode === 'detail' && stage !== 'details' && <><Button type="button" icon={ArrowLeft} disabled={stageIndex === 0 || editorState.busy || confirmDiscard} onClick={() => chooseStage(documentStages[stageIndex - 1]!.value)}>上一步</Button><Button type="button" icon={X} disabled={editorState.busy || confirmDiscard} onClick={close}>暂时关闭</Button><Button type="button" icon={ArrowRight} variant="primary" disabled={stageIndex === documentStages.length - 1 || editorState.busy || confirmDiscard || !detail.data || Boolean(editorState.detailsDirty) && stageIndex >= 1} onClick={() => chooseStage(documentStages[stageIndex + 1]!.value)}>下一步</Button></>}</div></footer>
     </div></ImportDialog>, document.body)}
     {createPortal(<DocumentAutomationDialog active={active && automaticOpen} jobId={automaticJobId} close={() => setAutomaticOpen(false)} edit={editAutomaticItem} view={viewAutomaticItem} blocked={confirmDiscard} onFormState={onAutomationFormState} registerDiscard={registerAutomationDiscard} />, document.body)}
-  </div>;
+  </div></GridTableScope></DocumentGridScope>;
 }
 
 type DocumentFilters = { q: string; status: DocumentListQuery['status']; month: string };
@@ -273,6 +281,9 @@ function DocumentRecords({ active, busy, startNew, open, edit, requestDelete, de
   const id = useId();
   const client = useQueryClient();
   const [page, setPage] = useState(1);
+  const preferences = useDocumentGridPreferences('document-records');
+  const pageSize = preferences.pageSize;
+  const [filtersExpanded, setFiltersExpanded] = useDocumentFiltersExpanded('document-records');
   const [draftFilters, setDraftFilters] = useState(emptyDocumentFilters);
   const [filters, setFilters] = useState(emptyDocumentFilters);
   const [deleteTarget, setDeleteTarget] = useState<BusinessDocument | null>(null);
@@ -280,10 +291,11 @@ function DocumentRecords({ active, busy, startNew, open, edit, requestDelete, de
   const action = useDocumentAction('删除');
   const refreshTarget = useMutation({ networkMode: 'always', mutationFn: documentApi.get, onSuccess: async (value) => { setDeleteTarget(value.document); action.reset(); await client.invalidateQueries({ queryKey: ['documents'] }); }, onError: (error) => { if (error instanceof ApiError && error.status === 401) void client.invalidateQueries({ queryKey: ['session'] }); } });
   const locked = busy || action.busy || refreshTarget.isPending;
-  const list = useQuery({ queryKey: ['documents', filters, page], queryFn: () => documentApi.list(page, 20, { ...filters, month: filters.month || undefined }), enabled: active, retry: false });
+  const list = useQuery({ queryKey: ['documents', filters, page, pageSize], queryFn: () => documentApi.list(page, pageSize, { ...filters, month: filters.month || undefined }), enabled: active, retry: false });
   const hasFilter = Boolean(filters.q || filters.month || filters.status !== 'active');
+  const filterCount = Number(Boolean(filters.q)) + Number(Boolean(filters.month)) + Number(filters.status !== 'active');
   const filtersDirty = draftFilters.q.trim() !== filters.q || draftFilters.status !== filters.status || draftFilters.month !== filters.month;
-  useEffect(() => { if (list.data && page > Math.max(1, Math.ceil(list.data.total / 20))) setPage(Math.max(1, Math.ceil(list.data.total / 20))); }, [list.data, page]);
+  useEffect(() => { if (list.data && page > Math.max(1, Math.ceil(list.data.total / pageSize))) setPage(Math.max(1, Math.ceil(list.data.total / pageSize))); }, [list.data, page, pageSize]);
   const reset = () => { setDraftFilters(emptyDocumentFilters); setFilters(emptyDocumentFilters); setPage(1); };
   const closeDelete = () => { if (locked) return; setDeleteTarget(null); setReason(''); refreshTarget.reset(); action.reset(); };
   const beginDelete = (record: BusinessDocument) => requestDelete(record, () => { action.reset(); refreshTarget.reset(); setReason(''); setDeleteTarget(record); });
@@ -296,21 +308,49 @@ function DocumentRecords({ active, busy, startNew, open, edit, requestDelete, de
       if (list.data?.items.length === 1 && page > 1) setPage((current) => current - 1);
     });
   };
+  const rows = list.data?.items ?? [];
+  const columns: GridColumn<BusinessDocument>[] = [
+    { key: 'rowNumber', title: '#', width: 48, align: 'center', utility: 'number', getValue: () => '' },
+    { key: 'title', title: '单据名称', width: 260, getValue: (record) => record.currentRevision.data.title },
+    { key: 'id', title: '单据编号', width: 250, getValue: (record) => record.id },
+    { key: 'orderNumber', title: '订单号', width: 170, getValue: (record) => record.currentRevision.data.fields.orderNumber || '—' },
+    { key: 'shippingRun', title: '发货次', width: 190, getValue: (record) => documentOccurrence(record.currentRevision.data) },
+    { key: 'status', title: '状态', width: 110, getValue: (record) => documentLabels[record.status] || record.status },
+    { key: 'fbaCount', title: 'FBA 数量', width: 96, align: 'right', getValue: (record) => record.currentRevision.data.members.length },
+    { key: 'groupCount', title: '来源组数', width: 96, align: 'right', getValue: (record) => new Set(record.currentRevision.data.members.map((member) => member.source.groupId)).size },
+    { key: 'fbas', title: 'FBA', width: 250, getValue: (record) => record.currentRevision.data.members.map((member) => member.demand.snapshot.fba).join('、') || '—' },
+    { key: 'shops', title: '店铺', width: 220, getValue: (record) => [...new Set(record.currentRevision.data.members.map((member) => member.demand.snapshot.shop))].join('、') || '—' },
+    { key: 'version', title: '当前版本', width: 100, align: 'right', getValue: (record) => `v${record.version}` },
+    { key: 'updatedAt', title: '更新时间', width: 190, getValue: (record) => timestamp(record.updatedAt) },
+    { key: 'actions', title: '操作', width: 48, align: 'center', getValue: () => '', icon: () => 'more', openMenu: true, editLabel: (record) => `单据 ${record.currentRevision.data.title} 操作` },
+  ];
+  const recordActions = (record: BusinessDocument, closeSurface: () => void, inMenu = false) => {
+    const readOnly = ['cancelled', 'superseded'].includes(record.status), role = inMenu ? 'menuitem' as const : undefined;
+    const run = (command: () => void) => { closeSurface(); command(); };
+    return <div className={inMenu ? 'scm-record-menu-actions' : 'document-record-actions'}>
+      <Button type="button" role={role} icon={ArrowRight} disabled={locked} onClick={() => run(() => open(record.id))}>查看单据</Button>
+      {!readOnly && <Button type="button" role={role} icon={Pencil} variant="text" disabled={locked} onClick={() => run(() => edit(record))}>{record.status === 'draft' ? record.currentRevision.data.shippingRunId ? '自动生成发票' : '编辑单据' : '更正单据'}</Button>}
+      <Button type="button" role={role} icon={Trash2} variant="text" disabled={locked || readOnly} onClick={() => run(() => beginDelete(record))}>删除单据</Button>
+    </div>;
+  };
+  const footerStart = <div className="document-record-page-size"><span>共 {list.data?.total ?? 0} 张 · 第 {page} / {Math.max(1, Math.ceil((list.data?.total ?? 0) / pageSize))} 页</span><label htmlFor={`${id}-page-size`}>每页单据数</label><SelectField id={`${id}-page-size`} value={String(pageSize)} disabled={!active || locked || list.isFetching} onValueChange={(value) => { const next = Number(value) as DocumentPageSize; if (next !== pageSize) { setPage(1); preferences.setPageSize(next); } }} options={[20, 50, 100].map((size) => ({ value: String(size), label: `${size} 张` }))} /></div>;
+  const footerEnd = <div className="document-record-page-buttons"><IconButton type="button" icon={ChevronLeft} label="上一页" disabled={!active || locked || list.isFetching || page <= 1} onClick={() => setPage((current) => current - 1)} /><IconButton type="button" icon={ChevronRight} label="下一页" disabled={!active || locked || list.isFetching || page * pageSize >= (list.data?.total ?? 0)} onClick={() => setPage((current) => current + 1)} /></div>;
   return <section className="content-panel document-list-panel" aria-labelledby="document-list-title">
     <div className="section-heading"><h3 id="document-list-title">单据记录</h3><IconButton icon={RefreshCw} label="刷新单据列表" loading={list.isFetching} disabled={locked} onClick={() => void list.refetch()} /></div>
-    <form className="document-record-filters" onSubmit={(event) => { event.preventDefault(); setFilters({ ...draftFilters, q: draftFilters.q.trim() }); setPage(1); }}>
+    <div className="document-record-filter-toggle"><Button type="button" icon={Filter} disabled={locked} aria-expanded={filtersExpanded} aria-controls={`${id}-filters`} onClick={() => setFiltersExpanded(!filtersExpanded)}>{filtersExpanded ? '隐藏过滤条件' : '展示过滤条件'}</Button><span role="status">已应用 {filterCount} 项过滤条件</span>{filtersDirty && <span className="document-record-filter-pending">有未应用修改</span>}</div>
+    <form id={`${id}-filters`} hidden={!filtersExpanded} className="document-record-filters" aria-label="筛选单据记录" onSubmit={(event) => { event.preventDefault(); setFilters({ ...draftFilters, q: draftFilters.q.trim() }); setPage(1); }}>
       <div className="field"><label htmlFor={`${id}-search`}>搜索单据</label><Input id={`${id}-search`} maxLength={200} value={draftFilters.q} disabled={locked} onChange={(event) => setDraftFilters((current) => ({ ...current, q: event.target.value }))} placeholder="单据名称、编号、FBA、店铺或订单号" /></div>
       <div className="field"><label htmlFor={`${id}-status`}>单据状态</label><SelectField id={`${id}-status`} disabled={locked} value={draftFilters.status} onValueChange={(value) => setDraftFilters((current) => ({ ...current, status: value as DocumentFilters['status'] }))} options={[{ value: 'active', label: '当前单据' }, { value: 'all', label: '全部状态' }, ...['draft', 'pending_review', 'approved', 'returned', 'stale', 'cancelled', 'superseded'].map((value) => ({ value, label: documentLabels[value]! }))]} /></div>
       <div className="field"><label htmlFor={`${id}-month`}>来源月份</label><MonthPicker id={`${id}-month`} value={draftFilters.month} disabled={locked} onValueChange={(value) => setDraftFilters((current) => ({ ...current, month: value }))} /></div>
       <div className="document-record-filter-actions"><Button type="submit" icon={Search} loading={list.isFetching} disabled={locked}>搜索</Button><Button type="button" disabled={locked} onClick={reset}>重置</Button></div>
     </form>
-    <p className="mapping-help" role="status">{filtersDirty ? '筛选条件已修改，请点击搜索更新列表。' : filters.status === 'active' ? '当前单据不含已取消或被替代的记录，可切换状态查询历史。' : '按已应用条件显示单据，打开单据可查看历史版本与文件。'}</p>
+    <p className="mapping-help document-record-filter-note" role="status">{filtersDirty ? <>筛选条件已修改，当前仍按已应用条件显示。{filtersExpanded ? '请点击搜索更新列表。' : <button type="button" className="text-button" onClick={() => setFiltersExpanded(true)}>展开过滤条件继续修改</button>}</> : filters.status === 'active' ? '当前单据不含已取消或被替代的记录，可切换状态查询历史。' : '按已应用条件显示单据，打开单据可查看历史版本与文件。'}</p>
     {!deleteTarget && action.feedback}
-    {list.isPending ? <p className="list-state" role="status">正在读取单据记录…</p> : list.isError ? <QueryError error={list.error} retry={() => void list.refetch()} /> : list.data.items.length === 0 ? <div className="document-empty"><FileSpreadsheet size={28} aria-hidden="true" /><h3>{hasFilter ? '没有匹配的单据' : '还没有当前单据'}</h3><p>{hasFilter ? '请调整单据关键词、状态或发货月份后重新搜索。' : '选择本次发货的完整 FBA 保存草稿，之后继续补齐资料和生成文件；历史记录可通过状态筛选查询。'}</p>{hasFilter ? <Button icon={RefreshCw} onClick={reset}>重置筛选</Button> : <Button icon={Plus} variant="primary" onClick={startNew}>制作第一张发票</Button>}</div> : <>
-      <BatchTable label="单据记录" headers={['单据 / 发货次', '状态', '货件 / 店铺', '当前版本 / 更新时间', '操作']}>{list.data.items.map((record) => {
-        const readOnly = ['cancelled', 'superseded'].includes(record.status);
-        return <tr key={record.id}><td><strong>{record.currentRevision.data.title}</strong><small className="mapping-subtext">{documentOccurrence(record.currentRevision.data)}</small><small className="mapping-subtext document-record-id">编号 {record.id}</small>{record.currentRevision.data.fields.orderNumber && <small className="mapping-subtext">订单 {record.currentRevision.data.fields.orderNumber}</small>}</td><td><Status status={record.status} /></td><td>{record.currentRevision.data.members.length} 个 FBA · {new Set(record.currentRevision.data.members.map((member) => member.source.groupId)).size} 组<small className="mapping-subtext">{record.currentRevision.data.members.map((member) => member.demand.snapshot.fba).join('、')}</small><small className="mapping-subtext">{[...new Set(record.currentRevision.data.members.map((member) => member.demand.snapshot.shop))].join('、')}</small></td><td>v{record.version}<small className="mapping-subtext">{timestamp(record.updatedAt)}</small></td><td><div className="document-record-actions"><Button type="button" icon={ArrowRight} disabled={locked} onClick={() => open(record.id)}>查看单据</Button>{!readOnly && <Button type="button" icon={Pencil} variant="text" disabled={locked} onClick={() => edit(record)}>{record.status === 'draft' ? record.currentRevision.data.shippingRunId ? '自动生成发票' : '编辑单据' : '更正单据'}</Button>}<Button type="button" icon={Trash2} variant="text" disabled={locked || readOnly} onClick={() => beginDelete(record)}>删除单据</Button></div></td></tr>;
-      })}</BatchTable><BatchPagination page={page} pageSize={20} total={list.data.total} change={setPage} />
+    {list.isPending ? <p className="list-state" role="status">正在读取单据记录…</p> : list.isError ? <QueryError error={list.error} retry={() => void list.refetch()} /> : <>
+      {rows.length === 0 && <div className="document-empty"><FileSpreadsheet size={28} aria-hidden="true" /><h3>{hasFilter ? '没有匹配的单据' : '还没有当前单据'}</h3><p>{hasFilter ? '请调整单据关键词、状态或发货月份后重新搜索。' : '选择本次发货的完整 FBA 保存草稿，之后继续补齐资料和生成文件；历史记录可通过状态筛选查询。'}</p>{hasFilter ? <Button icon={RefreshCw} onClick={reset}>重置筛选</Button> : <Button icon={Plus} variant="primary" onClick={startNew}>制作第一张发票</Button>}</div>}
+      <DocumentDataGrid label="单据记录" tableKey="document-records" preferences={preferences} mandatoryColumnKeys={['title']} active={active} rows={rows} columns={columns} getRowKey={(record) => record.id} frozenColCount={2} maxHeight={640} rowHeight={56} footerStart={footerStart} footerEnd={footerEnd} menuScopeKey={JSON.stringify([filters, page, pageSize])} detailsMode="dialog" detailsTitle={(record) => `单据 ${record.currentRevision.data.title}`}
+        renderRowMenu={(record, context) => <><div className="scm-record-menu-summary"><strong>{record.currentRevision.data.title}</strong><p>{documentOccurrence(record.currentRevision.data)} · v{record.version}</p><p>{record.currentRevision.data.members.length} 个 FBA · {new Set(record.currentRevision.data.members.map((member) => member.source.groupId)).size} 组</p><Status status={record.status} /></div><div className="scm-record-menu-actions"><Button type="button" role="menuitem" variant="text" icon={Eye} onClick={context.openDetails}>完整详情</Button></div>{recordActions(record, context.close, true)}</>}
+        renderDetails={(record, context) => <div className="document-record-grid-details"><div className="document-record-detail-heading"><h3>{record.currentRevision.data.title}</h3><Status status={record.status} /></div><dl className="scm-grid-record-fields">{columns.filter((column) => !column.utility && !column.openMenu).map((column) => <div className="scm-grid-record-field" key={column.key}><dt>{column.title}</dt><dd>{column.getValue(record) ?? '—'}</dd></div>)}</dl>{recordActions(record, context.close)}</div>} />
     </>}
     {createPortal(<ImportDialog open={active && Boolean(deleteTarget)} title="删除单据" close={closeDelete} closeDisabled={locked}>{deleteTarget && <form className="document-delete-form" onSubmit={remove}>
       <h3>{deleteTarget.currentRevision.data.title}</h3><p className="mapping-help">编号 {deleteTarget.id} · v{deleteTarget.version} · {documentLabels[deleteTarget.status]}</p>
@@ -325,13 +365,14 @@ function DocumentRecords({ active, busy, startNew, open, edit, requestDelete, de
   </section>;
 }
 
-function DocumentEditor({ record, draftRef, validation, exports, active, stage, onEditorState, reload, corrected, actionsContainer, close, blocked, advance, back, automatic }: { record: BusinessDocument; draftRef: DocumentEditorDraftRef; validation: DocumentValidation | null; exports: DocumentExport[]; active: boolean; stage: DocumentStage; onEditorState: (state: DocumentEditorState) => void; reload: () => void; corrected: (id: string) => void; actionsContainer: HTMLDivElement | null; close: () => void; blocked: boolean; advance: () => void; back: () => void; automatic?: { continue: (saved?: BusinessDocument) => void; busy: boolean } }) {
+function DocumentEditor({ record, draftRef, validation, exports, active, stage, onEditorState, registerFlush, reload, corrected, actionsContainer, close, blocked, advance, back, automatic }: { record: BusinessDocument; draftRef: DocumentEditorDraftRef; validation: DocumentValidation | null; exports: DocumentExport[]; active: boolean; stage: DocumentStage; onEditorState: (state: DocumentEditorState) => void; registerFlush: (flush: (() => Promise<void>) | null) => void; reload: () => void; corrected: (id: string) => void; actionsContainer: HTMLDivElement | null; close: () => void; blocked: boolean; advance: () => void; back: () => void; automatic?: { continue: (saved?: BusinessDocument) => void; busy: boolean } }) {
   const id = useId();
   const client = useQueryClient();
   const form = useRef<HTMLFormElement>(null);
   const continueAfterSave = useRef(false);
   const editor = useRef<HTMLDivElement>(null);
   const [boxRevealRequest, setBoxRevealRequest] = useState<{ field: string; requestId: number }>();
+  const locateGeneration = useRef(0);
   const data = record.currentRevision.data;
   const invoiceV2 = data.generationRulesVersion === 'v2';
   const preserveSavedFields = documentEditingLocked(record, exports);
@@ -341,6 +382,12 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
   const [recoverableDraft, setRecoverableDraft] = useState(() => draftRef.current?.documentId === record.id ? draftRef.current : null);
   const [title, setTitle] = useState(data.title);
   const [fields, setFields] = useState<Record<string, string | null>>(() => normalizeFields(data.fields));
+  const fieldsRef = useRef(fields); fieldsRef.current = fields;
+  const boxEditor = useRef<DocumentBoxEditorHandle | null>(null);
+  const [pendingBoxEdit, setPendingBoxEdit] = useState(false);
+  const mounted = useRef(true);
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const registerBoxEditor = useCallback((handle: DocumentBoxEditorHandle | null) => { boxEditor.current = handle; }, []);
   const [manualSalesPriceInputs, setManualSalesPriceInputs] = useState<ManualSalesPriceDrafts>({});
   const [templateId, setTemplateId] = useState(data.templateReference?.templateId || '');
   const [profileIds, setProfileIds] = useState(data.profileReferences.filter((item) => item.category !== 'address').map((item) => item.profileId));
@@ -383,7 +430,7 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
   const history = useQuery({ queryKey: ['document-history', record.id, record.version], queryFn: () => documentApi.history(record.id), enabled: active && historyOpen, retry: false });
   const readOnly = ['cancelled', 'superseded'].includes(record.status);
   const actualDirty = Object.keys(manualSalesPriceInputs).length > 0 || title !== data.title || JSON.stringify(fields) !== JSON.stringify(withDocumentDefaults(data.fields)) || templateId !== (data.templateReference?.templateId || '') || JSON.stringify([...profileIds].sort()) !== JSON.stringify(data.profileReferences.filter((item) => item.category !== 'address').map((item) => item.profileId).sort()) || JSON.stringify(addressReference) !== JSON.stringify(data.profileReferences.find((item) => item.category === 'address') ?? null) || addressReconfirmed || adoptCurrentProfileVersions || adoptCurrentTemplateVersion;
-  const dirty = actualDirty || Boolean(recoverableDraft);
+  const dirty = actualDirty || pendingBoxEdit || Boolean(recoverableDraft);
   const currentValidation = latestValidation?.version === record.version ? latestValidation : null;
   const sourceAddresses = data.members.flatMap((member) => member.sourceCandidates?.addresses.map((candidate) => candidate.data) ?? []);
   const sourceAddressConflict = hasDocumentAddressConflict(sourceAddresses);
@@ -458,19 +505,45 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
     return values.filter((value): value is string => typeof value === 'string' && Boolean(value.trim())).map((value) => value.trim());
   }))] : fieldOptions.data?.services ?? [];
   const operation = (operationId: string, text: string) => ({ operationId, expectedVersion: record.version, reason: text });
+  const baseUnsettled = actualDirty || Boolean(reviewReason.trim()) || reason !== '补齐发票资料' || JSON.stringify(correctionIds) !== JSON.stringify(data.members.map((member) => member.source.demandId));
   const canSave = active && !busy && !blocked && !recoverableDraft && !readOnly && !hasFile && !generationRunning && Boolean(title.trim() && reason.trim()) && !profiles.isFetching && !templates.isFetching && !profiles.isError && !templates.isError;
-  const saveForm = (next: boolean) => {
+  const flushBoxEdit = async () => {
+    const changes = await boxEditor.current?.finishEdit();
+    if (!mounted.current) return null;
+    if (changes && Object.keys(changes).length) {
+      // The editor may have already queued React's updateFields callback. Keep a
+      // synchronous snapshot so saving in the same click includes the final key.
+      fieldsRef.current = normalizeFields({ ...fieldsRef.current, ...changes });
+      setFields(fieldsRef.current);
+      onEditorState({ dirty: true, busy, detailsDirty: true });
+    }
+    return changes;
+  };
+  const flushRef = useRef(flushBoxEdit); flushRef.current = flushBoxEdit;
+  useEffect(() => {
+    registerFlush(async () => { await flushRef.current(); });
+    return () => registerFlush(null);
+  }, [registerFlush]);
+  const pendingBoxEditChange = (pending: boolean) => {
+    if (!mounted.current) return;
+    setPendingBoxEdit(pending);
+    // Route blockers and dialog switches read this ref before React effects run.
+    onEditorState({ dirty: baseUnsettled || pending || Boolean(recoverableDraft), busy, detailsDirty: actualDirty || pending || Boolean(recoverableDraft) });
+  };
+  const saveForm = async (next: boolean) => {
     if (busy || blocked || recoverableDraft || !active) return;
-    if (!dirty) { if (next) { if (automatic) automatic.continue(record); else advance(); } return; }
+    const changes = await flushBoxEdit();
+    if (!dirty && !changes) { if (next) { if (automatic) automatic.continue(record); else advance(); } return; }
     if (!canSave || !form.current?.reportValidity()) return;
     continueAfterSave.current = next; form.current.requestSubmit();
   };
-  const save = (event: FormEvent) => {
+  const save = async (event: FormEvent) => {
     event.preventDefault();
     const next = continueAfterSave.current; continueAfterSave.current = false;
-    if (!canSave || !dirty) return;
+    const changes = await flushBoxEdit();
+    if (!canSave || !dirty && !changes) return;
     const template = templates.data?.find((item) => item.id === templateId);
-    const input = { expectedVersion: record.version, reason: reason.trim(), title: title.trim(), fields, confirmAddress: addressReconfirmed, profileReferences: effectiveProfiles.map((reference) => ({ ...reference, data: {} })), templateReference: !adoptCurrentTemplateVersion && templateId === data.templateReference?.templateId ? data.templateReference : template ? { templateId: template.id, version: template.version, sha256: template.sha256, fileId: template.fileId } : null };
+    const input = { expectedVersion: record.version, reason: reason.trim(), title: title.trim(), fields: fieldsRef.current, confirmAddress: addressReconfirmed, profileReferences: effectiveProfiles.map((reference) => ({ ...reference, data: {} })), templateReference: !adoptCurrentTemplateVersion && templateId === data.templateReference?.templateId ? data.templateReference : template ? { templateId: template.id, version: template.version, sha256: template.sha256, fileId: template.fileId } : null };
     action.run(`save:${record.id}:${JSON.stringify(input)}`, (operationId) => documentApi.revise(record.id, { operationId, ...input }), '单据修订已保存，生成前请重新校验。', (value) => {
       draftRef.current = null; setRecoverableDraft(null);
       const saved = (value as { document: BusinessDocument }).document;
@@ -478,7 +551,7 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
       if (next) { if (automatic) automatic.continue(saved); else advance(); }
     });
   };
-  const unsettled = actualDirty || Boolean(reviewReason.trim()) || reason !== '补齐发票资料' || JSON.stringify(correctionIds) !== JSON.stringify(data.members.map((member) => member.source.demandId));
+  const unsettled = baseUnsettled || pendingBoxEdit;
   useEffect(() => {
     if (recoverableDraft) return;
     if (!unsettled) {
@@ -522,9 +595,11 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
   const readiness = documentDetailsReadiness({ data, fields, title, templateId, products, profiles: effectiveProfiles, productKeyError: keyError, productsLoading, manualSalesPriceInputs });
   const sectionId = (section: DetailProgress['section']) => `${id}-details-${section}`;
   const locate = (progress: DetailProgress) => {
+    const generation = ++locateGeneration.current;
     if (progress.section === 'boxes' && progress.issues[0]?.field.startsWith('box.')) {
-      setBoxRevealRequest((previous) => ({ field: progress.issues[0]!.field, requestId: (previous?.requestId ?? 0) + 1 })); return;
+      setBoxRevealRequest({ field: progress.issues[0]!.field, requestId: generation }); return;
     }
+    setBoxRevealRequest(undefined);
     const target = document.getElementById(sectionId(progress.section));
     if (!target) return;
     if (target instanceof HTMLDetailsElement) target.open = true;
@@ -534,12 +609,13 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
     const focusTarget = field ?? target;
     for (let ancestor: HTMLElement | null = focusTarget; ancestor; ancestor = ancestor.parentElement) if (ancestor instanceof HTMLDetailsElement) ancestor.open = true;
     requestAnimationFrame(() => {
+      if (!mounted.current || generation !== locateGeneration.current) return;
       const control = field?.matches('input:not(:disabled),button:not(:disabled),select:not(:disabled),textarea:not(:disabled)') ? field : field?.querySelector<HTMLElement>('input:not(:disabled),button:not(:disabled),select:not(:disabled),textarea:not(:disabled)');
       (control ?? (field?.hasAttribute('tabindex') ? field : target)).focus({ preventScroll: true }); scrollDocumentFieldIntoView(focusTarget);
     });
   };
   return <div ref={editor} className="document-editor">
-    <section className="content-panel document-summary"><div><h3>{data.title}</h3><p>{documentOccurrence(data)} · v{record.version} · {data.members.length} 个 FBA</p></div><Status status={record.status} /><IconButton icon={RefreshCw} label="重新读取单据" disabled={busy} onClick={reload} /></section>
+    <section className="content-panel document-summary"><div><h3>{data.title}</h3><p>{documentOccurrence(data)} · v{record.version} · {data.members.length} 个 FBA</p></div><Status status={record.status} textValue={documentLabels[record.status] || record.status} /><IconButton icon={RefreshCw} label="重新读取单据" disabled={busy} onClick={reload} /></section>
     {recoverableDraft && <div className="permission-note warning-note" role="alert"><p>已读取 v{record.version}，本次在 v{recoverableDraft.baseVersion} 中未保存的输入仍保留。可恢复本次修改，核对新版资料后再保存；未修改的字段继续采用新版。{removedBoxDraftFields > 0 && `其中 ${removedBoxDraftFields} 项已移除箱的修改不再应用。`}{removedManualPriceDrafts.length > 0 && `已移除商品的人工售价不再应用：${removedManualPriceDrafts.map((input) => `${input.sku || input.msku} ${input.salesPrice ?? '清除'} ${input.enteredCurrency}`).join('、')}。`}{(hasFile || record.status !== 'draft') && '当前单据已不可编辑，请通过更正单据处理。'}</p><div className="document-footer-actions"><Button type="button" disabled={busy || record.status !== 'draft' || hasFile || generationRunning} onClick={recoverInputs}>恢复未保存输入</Button><Button type="button" disabled={busy} onClick={() => { draftRef.current = null; setRecoverableDraft(null); }}>放弃未保存输入</Button></div></div>}
     {record.status === 'stale' && <p className="form-note error-note" role="alert">来源或依赖版本已变化。请核对来源，保存新修订并重新生成；已有文件保留原内容。</p>}
     {!invoiceV2 && !hasFile && <p className="form-note warning-note" role="status"><CircleAlert size={16} aria-hidden="true" />此草稿使用历史发票规则。请在“单票资料”中查询并采用领星资料，升级为每件固定单价 2.00、每箱一行及箱规默认申报数量后再生成。</p>}
@@ -570,7 +646,7 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
       {invoiceV2 && <InvoiceBoxQuantities data={data} fields={fields} />}
       <ProductAdjustments documentId={record.id} version={record.version} data={data} products={products} keyError={keyError} missingFields={readiness.find((item) => item.section === 'products')!.issues.map((issue) => issue.field)} profileReferences={effectiveProfiles} fields={fields} disabled={busy || readOnly || hasFile || generationRunning} updateFields={updateFields} onImageBusy={setImageBusy} manualSalesPriceInputs={manualSalesPriceInputs} changeManualSalesPrice={(prefix, input) => setManualSalesPriceInputs((current) => { const next = { ...current }; if (input) next[prefix] = input; else delete next[prefix]; return next; })} />
       </section>
-      <DocumentBoxAdjustments sectionId={sectionId('boxes')} revealRequest={boxRevealRequest} members={data.members} fields={fields} disabled={busy || record.status !== 'draft' || hasFile || generationRunning} updateFields={updateFields} />
+      <DocumentBoxAdjustments active={active && stage === 'details'} sectionId={sectionId('boxes')} revealRequest={boxRevealRequest} members={data.members} fields={fields} disabled={busy || blocked || Boolean(recoverableDraft) || record.status !== 'draft' || hasFile || generationRunning} updateFields={updateFields} onPendingEditChange={pendingBoxEditChange} registerEditor={registerBoxEditor} />
       {!readOnly && !hasFile && <><div className="field document-reason" data-document-field="reason"><label htmlFor={`${id}-reason`}>本次调整原因</label><Input id={`${id}-reason`} required maxLength={1000} value={reason} disabled={busy} onChange={(event) => setReason(event.target.value)} /></div><p className="mapping-help">单票调整只写入当前单据快照，请在底部保存草稿或保存后继续。</p></>}
       </fieldset>
     </form>
@@ -582,7 +658,9 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
     </>, actionsContainer)}
     </div>
     <div className="document-wizard-step" hidden={stage !== 'sources'}>
-    <section className="content-panel"><div className="section-heading"><h3>来源与完整货件</h3><span>原组、箱序和箱码保留</span></div><BatchTable label="单据来源" headers={['FBA / 店铺', '目的仓 / 地址', '来源组 / 确认', '箱 / 商品']}>{data.members.map((member) => <tr key={member.source.demandId}><td><strong>{member.demand.snapshot.fba}</strong><small className="mapping-subtext">{member.demand.snapshot.shop} · {member.demand.snapshot.country}</small></td><td>{member.demand.snapshot.destinationFc || '—'}<small className="mapping-subtext document-address">{member.demand.snapshot.destinationAddress || '待补齐'}</small></td><td>组 v{member.source.groupVersion}<small className="mapping-subtext">制表数据已确认 · 箱规可在单票资料中修改</small></td><td>{member.shipment.data.boxes.length} 箱 / {member.shipment.data.items.length} 个商品<small className="mapping-subtext">{member.codes.map((code) => code.code).join('、') || '箱码缺失'}</small></td></tr>)}</BatchTable></section>
+    <section className="content-panel"><div className="section-heading"><h3>来源与完整货件</h3><span>原组、箱序和箱码保留</span></div><BatchTable label="单据来源" headers={['FBA', '来源批次', '目的仓', '店铺', '国家', '渠道', '收件地址', '来源确认版本', '箱 / 商品']}>{data.members.map((member) => <tr key={member.source.demandId}>
+      <td><strong>{member.demand.snapshot.fba}</strong></td><td>{member.source.groupId}</td><td>{member.demand.snapshot.destinationFc || '—'}</td><td>{member.demand.snapshot.shop}</td><td>{member.demand.snapshot.country}</td><td>{member.demand.snapshot.channel || '渠道未填写'}</td><td className="document-address">{member.demand.snapshot.destinationAddress || '待补齐'}</td><td>组 v{member.source.groupVersion}<small className="mapping-subtext">制表数据已确认 · 箱规可在单票资料中修改</small></td><td>{member.shipment.data.boxes.length} 箱 / {member.shipment.data.items.length} 个商品<small className="mapping-subtext">{member.codes.map((code) => code.code).join('、') || '箱码缺失'}</small></td>
+    </tr>)}</BatchTable></section>
     {!readOnly && <section className="content-panel document-source-actions"><div className="section-heading"><h3>采用来源与更正</h3></div><p className="mapping-help">未生成文件的草稿可显式采用当前制表与领星箱规来源，保留仍在本票中的人工箱规修改。已有文件时，通过更正建立后继单据并移交完整货件占用。</p><div className="document-footer-actions"><Button icon={RefreshCw} disabled={hasFile || dirty || busy} onClick={() => action.run(`adopt:${record.id}:${record.version}`, (operationId) => documentApi.revise(record.id, { ...operation(operationId, '显式采用当前制表与领星箱规来源'), demandIds: data.members.map((member) => member.source.demandId) }), '已采用当前来源，请核对资料并重新校验。')}>采用当前来源</Button><Button icon={Plus} disabled={dirty || busy} onClick={() => setShowCorrection((value) => !value)}>建立更正单据</Button></div>{showCorrection && <div className="document-correction-selection"><p className="mapping-help">选择本次发货的完整 FBA。当前单据的原货件已预选；更正将原子移交占用并保留旧单据和文件。</p>{candidates.isPending ? <p role="status">正在读取本次发货的候选范围…</p> : candidates.isError ? <QueryError error={candidates.error} retry={() => void candidates.refetch()} /> : <div className="document-profile-list">{candidates.data.items.map((item) => <Check key={item.demandId} checked={correctionIds.includes(item.demandId)} disabled={busy} onChange={(checked) => setCorrectionIds((current) => checked ? [...current, item.demandId] : current.filter((value) => value !== item.demandId))}>{item.demand.snapshot.fba} · {item.demand.snapshot.shop} · {item.groupName}</Check>)}</div>}<div className="field document-reason"><label htmlFor={`${id}-correction-reason`}>更正原因</label><Input id={`${id}-correction-reason`} maxLength={1000} value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} disabled={busy} /></div><div className="document-footer-actions"><Button icon={Save} variant="primary" disabled={busy || !reviewReason.trim() || correctionIds.length === 0 || candidates.isFetching || candidates.isError} onClick={() => action.run(`correct:${record.id}:${record.version}:${JSON.stringify(correctionIds)}:${reviewReason}`, (operationId) => documentApi.correct(record.id, { ...operation(operationId, reviewReason.trim()), demandIds: correctionIds, title: `${data.title} 更正`, fields: data.fields }), '更正单据已建立，货件占用已移交。', (value) => corrected((value as BusinessDocument).id))}>保存更正并移交货件</Button></div></div>}</section>}
     </div>
     <div className="document-wizard-step" hidden={stage !== 'generate'}>
@@ -605,7 +683,7 @@ function DocumentEditor({ record, draftRef, validation, exports, active, stage, 
 }
 
 function DocumentFileHistory({ exports, busy, download }: { exports: DocumentExport[]; busy: boolean; download: (item: DocumentExport) => void }) {
-  return <section className="content-panel document-file-history"><div className="section-heading"><h3><History size={17} aria-hidden="true" />文件与生成记录</h3><span>历史文件保留原内容</span></div>{exports.length === 0 ? <p className="list-state">尚未生成文件。校验通过后可生成待复核发票。</p> : <BatchTable label="发票文件记录" headers={['生成时间 / 修订', '状态', '模板版本', '文件 / 错误']}>{exports.map((item) => <tr key={item.id}><td>{timestamp(item.createdAt)}<small className="mapping-subtext">单据修订 v{item.reference.revisionVersion}</small></td><td><Status status={item.status} />{!item.valid && <small className="mapping-subtext error-note">{item.invalidReason || '历史文件的依赖版本已失效'}</small>}</td><td>v{item.reference.templateVersion}<small className="mapping-subtext document-hash">SHA256 {item.reference.templateSha256}</small></td><td>{item.fileId && <Button icon={Download} disabled={busy} onClick={() => download(item)}>下载发票 XLSX</Button>}{item.error && <p className="form-note error-note">{item.error}</p>}</td></tr>)}</BatchTable>}</section>;
+  return <section className="content-panel document-file-history"><div className="section-heading"><h3><History size={17} aria-hidden="true" />文件与生成记录</h3><span>历史文件保留原内容</span></div>{exports.length === 0 ? <p className="list-state">尚未生成文件。校验通过后可生成待复核发票。</p> : <BatchTable label="发票文件记录" headers={['生成时间 / 修订', '状态', '模板版本', '文件 / 错误', '操作']}>{exports.map((item) => <tr key={item.id}><td>{timestamp(item.createdAt)}<small className="mapping-subtext">单据修订 v{item.reference.revisionVersion}</small></td><td><Status status={item.status} textValue={documentLabels[item.status] || item.status} />{!item.valid && <small className="mapping-subtext error-note">{item.invalidReason || '历史文件的依赖版本已失效'}</small>}</td><td>v{item.reference.templateVersion}<small className="mapping-subtext document-hash">SHA256 {item.reference.templateSha256}</small></td><td>{item.fileId || '尚未生成文件'}{item.error && <p className="form-note error-note">{item.error}</p>}</td><td>{item.fileId && <Button icon={Download} disabled={busy} onClick={() => download(item)}>下载发票 XLSX</Button>}</td></tr>)}</BatchTable>}</section>;
 }
 
 export { profileLabels, useDocumentAction };

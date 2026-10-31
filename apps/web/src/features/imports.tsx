@@ -39,7 +39,7 @@ export function ImportsRoute() {
 export type ImportsPageProps = {
   user: User; importId?: string; embedded?: boolean; active?: boolean; workspaceActive?: boolean;
   onArrangeDemands?: (demandIds: string[], mode: 'create' | 'append') => void;
-  renderWorkspace?: (actions: { openRecords: () => void; openDrafts: () => void }) => ReactNode;
+  renderWorkspace?: (actions: { openRecords: () => void; openDrafts: () => void; openShippingRuns: () => void; importShippingRun: () => void }) => ReactNode;
 };
 export function ImportsPage({ user, importId, embedded = false, active = true, workspaceActive = active, onArrangeDemands, renderWorkspace }: ImportsPageProps) {
   const queryClient = useQueryClient();
@@ -60,6 +60,7 @@ export function ImportsPage({ user, importId, embedded = false, active = true, w
   const [assignment, setAssignment] = useState<DemandAssignment | null>(() => onArrangeDemands ? null : readDemandAssignment(user.id));
   const [recordsOpen, setRecordsOpen] = useState(false);
   const [draftsOpen, setDraftsOpen] = useState(false);
+  const [shippingRunsOpen, setShippingRunsOpen] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
   const [draftRecord, setDraftRecord] = useState<ImportDraft | null>(null);
@@ -141,8 +142,8 @@ export function ImportsPage({ user, importId, embedded = false, active = true, w
         {importId && <Link to="/shipping" search={{ view: 'demands' }} className="secondary-button"><ArrowLeft size={18} aria-hidden="true" />返回需求列表</Link>}
       </div>}
       {notice && <p className="permission-note success-note" role="status">{notice}</p>}
-      {!importId && <ShippingRunsWorkspace active={active && workspaceActive} onCreate={openNewDemand} />}
-      {!importId ? renderWorkspace ? renderWorkspace({ openRecords: () => setRecordsOpen(true), openDrafts: () => setDraftsOpen(true) }) : <ImportWorkspace active={active} openRecords={() => setRecordsOpen(true)} openDrafts={() => setDraftsOpen(true)} onArrangeDemands={arrange} /> : <div className="import-workspace-actions"><Button type="button" icon={ArrowRight} variant="primary" onClick={() => resume(importId)}>继续导入</Button><Button type="button" icon={Upload} onClick={openNewDemand}>导入本次发货</Button><Button type="button" icon={FilePenLine} onClick={() => setDraftsOpen(true)}>草稿箱</Button><Button type="button" icon={History} onClick={() => setRecordsOpen(true)}>导入记录</Button></div>}
+      {!importId ? renderWorkspace ? renderWorkspace({ openRecords: () => setRecordsOpen(true), openDrafts: () => setDraftsOpen(true), openShippingRuns: () => setShippingRunsOpen(true), importShippingRun: openNewDemand }) : <ImportWorkspace active={active} openRecords={() => setRecordsOpen(true)} openDrafts={() => setDraftsOpen(true)} openShippingRuns={() => setShippingRunsOpen(true)} importShippingRun={openNewDemand} onArrangeDemands={arrange} /> : <div className="import-workspace-actions"><Button type="button" icon={ArrowRight} variant="primary" onClick={() => resume(importId)}>继续导入</Button><Button type="button" icon={Upload} onClick={openNewDemand}>导入本次发货</Button><Button type="button" icon={FilePenLine} onClick={() => setDraftsOpen(true)}>草稿箱</Button><Button type="button" icon={History} onClick={() => setRecordsOpen(true)}>导入记录</Button></div>}
+      <ImportDialog open={active && workspaceActive && shippingRunsOpen} title="本次发货与票号" close={() => setShippingRunsOpen(false)} wide>{shippingRunsOpen && <ShippingRunsWorkspace active={active && workspaceActive && shippingRunsOpen} onCreate={() => { setShippingRunsOpen(false); openNewDemand(); }} />}</ImportDialog>
       {importId && <ImportDetail key={importId} id={importId} canManage={canManage} active={active} />}
       <ImportDialog open={active && importOpen} title="导入向导" close={() => { if (active) close(); }} closeDisabled={draftStatus.busy || saving} wide>
         {importOpen && <><div className="import-draft-save-bar"><p className="mapping-help">{draftRecord ? `正在编辑草稿：${draftRecord.title}` : '新建导入从空白开始，未完成内容可保存到草稿箱。'}</p><Button type="button" icon={Save} disabled={!draftStatus.hasContent || draftStatus.busy || saving} onClick={() => requestExit(clear)}>保存到草稿箱</Button></div><ImportWizard key={wizard.token} initial={wizard.initial} initialDraft={wizard.content} initialFile={wizard.file} draftHandle={draftHandle} onDraftState={onDraftState} active={active && importOpen} canManage={canManage} storageKey={storageKey} checkpoint={checkpoint} finish={finish} startNew={() => requestExit(() => start(blankProgress()))} viewDetail={viewDetail} onArrangeDemands={arrange} /></>}

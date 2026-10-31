@@ -7,6 +7,7 @@ import { batchSyncItems, batchSyncSnapshots } from '../lingxing/sync-schema.js';
 import { physicalSyncItems, physicalSyncSnapshots } from '../physical/schema.js';
 import { decodePhysicalCheckpoint } from '../physical/sources.js';
 import { hasAddressConflict } from './address.js';
+import type { DocumentReadContext } from './read-context.js';
 
 type Candidates = NonNullable<DocumentMemberSnapshot['sourceCandidates']>;
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -34,7 +35,15 @@ export function extractDocumentSourceCandidates(input: { snapshotId: string; ope
   }
   return result;
 }
-export async function loadDocumentSourceCandidates(tx: BatchTx, member: Pick<DocumentCandidate, 'demand' | 'shipment' | 'physical'>): Promise<Candidates> {
+export async function loadDocumentSourceCandidates(tx: BatchTx, member: Pick<DocumentCandidate, 'demand' | 'shipment' | 'physical'>, context?: DocumentReadContext): Promise<Candidates> {
+  if (context) {
+    if (context.tx !== tx) throw new Error('Document read context belongs to another transaction');
+    return context.memo('source-candidates', [member.demand.id, member.demand.version, member.demand.snapshot.sid, member.demand.snapshot.fba, member.shipment.id, member.shipment.snapshotIds, member.physical?.id],
+      () => readDocumentSourceCandidates(tx, member, context));
+  }
+  return readDocumentSourceCandidates(tx, member);
+}
+async function readDocumentSourceCandidates(tx: BatchTx, member: Pick<DocumentCandidate, 'demand' | 'shipment' | 'physical'>, context?: DocumentReadContext): Promise<Candidates> {
   const result: Candidates = { addresses: [], products: [], issues: [] }, ids = [...new Set([...member.shipment.snapshotIds, ...member.physical?.snapshot.source.snapshotIds ?? []])];
   if (!ids.length) return result;
   const m2 = await tx.select({ snapshot: batchSyncSnapshots, file: fileIndex }).from(batchSyncSnapshots).innerJoin(batchSyncItems, eq(batchSyncItems.id, batchSyncSnapshots.itemId)).innerJoin(fileIndex, eq(fileIndex.id, batchSyncSnapshots.fileId)).where(and(inArray(batchSyncSnapshots.id, ids), eq(batchSyncItems.demandId, member.demand.id), eq(batchSyncSnapshots.successful, 1)));
@@ -44,7 +53,7 @@ export async function loadDocumentSourceCandidates(tx: BatchTx, member: Pick<Doc
     if (!['listShipments', 'getShipmentDetails'].includes(record.snapshot.operation)) continue;
     try {
       const operation = record.snapshot.operation as 'listShipments' | 'getShipmentDetails';
-      const checkpoint = decodePhysicalCheckpoint(await checkedFileBytes(record.file), { sid: member.demand.snapshot.sid, fba: member.demand.snapshot.fba, operation });
+      const checkpoint = decodePhysicalCheckpoint(await (context ? context.fileBytes(record.file) : checkedFileBytes(record.file)), { sid: member.demand.snapshot.sid, fba: member.demand.snapshot.fba, operation });
       const candidates = extractDocumentSourceCandidates({ snapshotId: record.snapshot.id, operation, payload: checkpoint.payload }, member);
       if (candidates.po) references.add(candidates.po);
       result.addresses.push(...candidates.addresses); result.products.push(...candidates.products); result.issues.push(...candidates.issues);

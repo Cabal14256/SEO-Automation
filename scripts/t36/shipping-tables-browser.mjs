@@ -52,7 +52,7 @@ async function contextFor(state) {
     const json = (value, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
     if (url.origin !== baseURL && !['blob:', 'data:'].includes(url.protocol)) { unexpectedRequests.push(method + ' EXTERNAL ' + url.origin); return route.abort(); }
     if (!path.startsWith('/api/')) return route.continue();
-    if (method === 'GET' && path === `/api/v1/weekly-batches/${state.batch.id}`) return json(contracts.weeklyBatchDetailSchema.parse({ batch: state.batch, groups: [state.frameGroup], ungrouped: [] }));
+    if (method === 'GET' && [ `/api/v1/weekly-batches/${state.batch.id}`, `/api/v1/processing-batches/${state.batch.id}` ].includes(path)) return json(contracts.batchScopeDetailSchema.parse({ batch: state.batch, groups: [state.frameGroup], ungrouped: [] }));
     if (method === 'GET' && path === `/api/v1/sub-batches/${state.frameGroup.id}`) return json(contracts.subBatchDetailSchema.parse({ group: state.frameGroup, members: [], shipments: [], issues: [], confirmation: null, codes: [], history: [] }));
     if (method === 'GET' && path === '/api/v1/session') return json({ user: { id: 'technical-ui', name: '表格范围技术验证', email: 'table@acceptance.invalid', role: 'admin' } });
     // The merged workbench also loads its common filter metadata and batch rail.

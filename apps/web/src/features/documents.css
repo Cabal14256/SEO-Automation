@@ -1,13 +1,29 @@
 .documents-workspace, .document-editor { min-width: 0; }
 .document-page-heading, .document-summary { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .document-page-heading { margin-bottom: 22px; }
+.document-page-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .document-page-heading h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; line-height: 1.5; }
 .document-page-heading p { max-width: 72ch; margin: 0; }
 .documents-workspace h3 { margin: 0; font-size: 16px; font-weight: 600; }
 .document-list-panel, .document-new-panel { margin-top: 0; }
-.document-record-filters { display: grid; grid-template-columns: minmax(230px, 1fr) minmax(150px, 180px) minmax(170px, 200px) auto; align-items: end; gap: 14px; margin: 20px 0 12px; }
+.document-record-filters { display: grid; grid-template-columns: minmax(230px, 1fr) minmax(150px, 180px) minmax(170px, 200px) auto; align-items: end; gap: 12px; margin: 16px 0 10px; }
 .document-record-filters > .field { min-width: 0; }
-.document-record-filter-actions, .document-record-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.document-record-filters[hidden] { display: none; }
+.document-record-filter-toggle { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin: 14px 0 10px; font-size: 12px; color: var(--color-muted); }
+.document-record-filter-toggle .document-record-filter-pending { color: #795716; }
+.document-record-filter-note { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
+.document-record-filter-note > button { min-height: 36px; padding-block: 4px; font-size: 13px; text-decoration: underline; text-underline-offset: 3px; }
+.document-record-page-size { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; color: var(--color-muted); font-size: 12px; }
+.document-record-page-size > span { margin-right: 6px; }
+.document-record-page-size > label { white-space: nowrap; }
+.document-record-page-size > .ui-control { width: 100px; min-height: 32px; padding: 5px 9px; font-size: 12px; }
+.document-record-page-buttons { display: flex; align-items: center; gap: 6px; }
+.document-record-detail-heading { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-bottom: 18px; }
+.document-record-detail-heading > h3 { min-width: 0; overflow-wrap: anywhere; }
+.document-record-grid-details > .document-record-actions { margin-top: 18px; }
+.document-record-filter-actions, .document-record-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.document-record-filters :is(.field-input, .ui-control), .document-candidate-filters :is(.field-input, .ui-control) { min-height: 40px; }
+.document-record-filter-actions > button, .document-candidate-filters > button { min-height: 40px; }
 .document-record-actions { min-width: 180px; }
 .document-record-id { max-width: 31ch; overflow-wrap: anywhere; }
 .document-delete-form { padding: 24px; }
@@ -31,13 +47,17 @@
 .document-empty { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 44px 18px; text-align: center; }
 .document-empty svg { color: var(--color-muted); }
 .document-empty p { max-width: 60ch; margin: 0 0 8px; color: var(--color-muted); font-size: 14px; line-height: 1.7; }
-.document-candidate-filters { display: grid; grid-template-columns: minmax(190px, 240px) minmax(220px, 1fr) auto; align-items: end; gap: 14px; margin: 20px 0; }
+.document-candidate-filters { display: grid; grid-template-columns: minmax(190px, 240px) minmax(220px, 1fr) auto; align-items: end; gap: 12px; margin: 16px 0; }
 .document-candidate-filters > .field { min-width: 0; }
 .document-selection-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; margin: 17px 0 12px; font-size: 13px; }
 .documents-workspace .table-scroll { margin-top: 16px; }
 .documents-workspace .batch-table th { background: #f5f7f1; }
 .documents-workspace .batch-table td { vertical-align: top; }
 .documents-workspace .import-check { min-height: 32px; }
+@media (max-width: 768px) {
+  .document-record-page-size > .ui-control { min-height: 44px; }
+  .document-record-filters :is(.field-input, .ui-control), .document-candidate-filters :is(.field-input, .ui-control), .document-record-filter-actions > button, .document-candidate-filters > button { min-height: 44px; }
+}
 .document-address { max-width: 36ch; white-space: normal; overflow-wrap: anywhere; }
 .document-ready { display: inline-flex; align-items: center; gap: 5px; color: #176741; font-size: 12px; }
 .document-waiting { color: #855500; max-width: 36ch; }

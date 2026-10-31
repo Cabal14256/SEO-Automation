@@ -16,7 +16,7 @@ import { emptyOnlineRow } from './online-import-grid';
 import { UploadPanel, ParseControls, isBusy } from './import-source';
 import { shanghaiToday } from '../components/ui/date-utils';
 import { getReportTicketCodeRanges, getShippingBoxColumns } from './shipping-table-parts';
-import { ShippingLifecycleActions, ShippingLifecyclePending, ShippingRecycleBin, lifecycleLabels } from './shipping-lifecycle';
+import { ShippingLifecycleActions, ShippingRecycleBin, lifecycleLabels } from './shipping-lifecycle';
 import { lifecycleOf, lifecyclePending } from './shipping-lifecycle-api';
 import './shipping-runs.css';
 
@@ -74,7 +74,7 @@ export function ShippingRunsWorkspace({ active, onCreate }: { active: boolean; o
     refetchInterval: (query) => active && query.state.data?.items.some(running) ? 2000 : false });
   useEffect(() => { if (runs.data && page > Math.max(1, Math.ceil(runs.data.items.length / 10))) setPage(Math.max(1, Math.ceil(runs.data.items.length / 10))); }, [runs.data, page]);
   return <section className="shipping-run-history" aria-labelledby="shipping-runs-title">
-    <div className="section-heading panel-heading"><div><h2 id="shipping-runs-title">本次发货与票号</h2><p>导入本次所需的 FBA，按空行分票，自动整理到可预览、可导出。</p></div><div className="import-selection-actions"><ShippingLifecyclePending active={active} /><ShippingRecycleBin active={active} /><IconButton type="button" icon={RefreshCw} label="刷新发货记录" loading={runs.isFetching} onClick={() => void runs.refetch()} /><Button type="button" variant="primary" icon={FileSpreadsheet} onClick={onCreate}>导入本次发货</Button></div></div>
+    <div className="section-heading panel-heading"><div><h3 id="shipping-runs-title">发货记录</h3><p>查看发货次数、票号与整理进度，继续处理或导出发货表。</p></div><div className="import-selection-actions"><ShippingRecycleBin active={active} /><IconButton type="button" icon={RefreshCw} label="刷新发货记录" loading={runs.isFetching} onClick={() => void runs.refetch()} /><Button type="button" variant="primary" icon={FileSpreadsheet} onClick={onCreate}>导入本次发货</Button></div></div>
     <div className="field shipping-run-history-filter"><label htmlFor="shipping-run-lifecycle">发货记录状态</label><SelectField id="shipping-run-lifecycle" value={lifecycle} onValueChange={(value) => { setLifecycle(value); setPage(1); }} options={[{ value: 'active', label: '当前发货' }, { value: 'cancelled', label: '已取消发货' }, { value: 'all', label: '全部未删除发货' }]} /></div>
     {notice && <p className="form-note success-note" role="status">{notice}</p>}
     {runs.isPending ? <p className="list-state" role="status">正在读取发货记录…</p> : runs.isError ? <QueryError error={runs.error} retry={() => void runs.refetch()} /> : !runs.data.items.length ? <p className="mapping-help">{lifecycle === 'active' ? '点击“导入本次发货”，只填 FBA 并以空行分票即可。' : '此范围暂无发货记录。'}</p> : <><BatchTable label="本次发货记录" headers={['编号日期 / 发货次数', '整理进度', '接收时间', '操作']}>{runs.data.items.slice((page - 1) * 10, page * 10).map((run) => <tr key={run.id}>

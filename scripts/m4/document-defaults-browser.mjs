@@ -9,6 +9,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
 import { documentSchema, documentRevisionInputSchema, documentExportSchema, withDocumentInvoiceDefaults } from '../../packages/contracts/dist/index.js';
 import { chooseOption } from '../shared/ui-controls.mjs';
+import { grid, gridRowCount } from '../shared/grid.mjs';
+import { assertBottomNavigation, openRowMenu, setColumnVisible, visibleColumnKeys } from './grid-helpers.mjs';
 
 // Local browser fixtures only. HTTP writes below update this process's memory;
 // all external requests are blocked and no real business service is contacted.
@@ -46,7 +48,7 @@ function record({ countries = ['美国'], rawCurrency, emptyAddress = false, cod
       data: { purpose: 'invoice', weekStartDate: '2026-10-19', title: 'Invoice defaults technical fixture', fields, members, profileReferences: [], templateReference: null, generationRulesVersion: 'v2', productSourceFacts: [] } } });
 }
 function profile(data = {}, extra = {}) { return { id: uid(), category: 'address', key: 'TECH-ADDRESS-' + uid().slice(0, 6), version: 1, status: 'active', data: { destinationFc: 'FC-DIFFERENT', ...completeAddress, ...data }, createdBy: 'fixture', createdAt: now, ...extra }; }
-function fixture(options) { return { document: record(options), exports: [], profiles: [], profileMode: 'ready', holdProfiles: false, releaseProfiles: null, profileReads: 0, revisions: [], validations: [], exportCalls: 0 }; }
+function fixture(options) { return { document: record(options), exports: [], profiles: [], profileMode: 'ready', holdProfiles: false, releaseProfiles: null, profileReads: 0, revisions: [], reviews: [], validations: [], exportCalls: 0, downloadCalls: 0 }; }
 function setLingxingAddress(state, data = completeAddress) {
   for (const member of state.document.currentRevision.data.members) member.sourceCandidates.addresses = [{ source: 'getShipmentDetails', snapshotId: uid(), data: { ...data } }];
 }
@@ -69,6 +71,12 @@ async function setup(state) {
     }
     const base = '/api/v1/documents/' + state.document.id;
     if (path === base && method === 'GET') return json({ document: state.document, validation: null, exports: state.exports });
+    if (path === base + '/history' && method === 'GET') return json({ revisions: [state.document.currentRevision], reviews: state.reviews, validations: [] });
+    const fileDownload = path.match(/^\/api\/v1\/document-exports\/([^/]+)\/download$/);
+    if (fileDownload && method === 'GET') {
+      assert(state.exports.some((item) => item.id === fileDownload[1]), 'Only fixture file IDs can be downloaded'); state.downloadCalls++;
+      return route.fulfill({ status: 200, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', body: Buffer.from('Local invoice workbook download fixture only') });
+    }
     if (path === base + '/revisions' && method === 'POST') {
       const input = documentRevisionInputSchema.parse(request.postDataJSON()); state.revisions.push(input);
       assert.equal(input.expectedVersion, state.document.version); state.document.version += 1;
@@ -196,7 +204,23 @@ try {
   frozen.exports = [documentExportSchema.parse({ id: uid(), status: 'completed', reference: { documentId: frozen.document.id, revisionId: frozen.document.currentRevision.id, revisionVersion: frozen.document.version, templateId: uid(), templateVersion: 1, templateSha256: 'a'.repeat(64), generationRulesVersion: 'v2', sources: frozen.document.currentRevision.data.members.map((member) => member.source) }, fileId: uid(), fileSha256: 'b'.repeat(64), error: null, createdAt: now, completedAt: now, valid: true, invalidReason: null })];
   context = await setup(frozen); await open(frozen); await expect(currency()).toHaveAttribute('data-value', 'GBP'); await expect(currency()).toHaveText('英镑（GBP）'); await expect(currency()).toBeDisabled();
   await expect(addressField('城市')).toHaveValue(''); await expect(addressField('城市')).toBeDisabled(); await expect(save()).toHaveCount(0);
-  assert.equal(frozen.revisions.length, 0); await context.close(); note();
+  assert.equal(frozen.revisions.length, 0); note();
+
+  step = 'file-row-menu-download-and-audit-reason-columns-preserve-business-content';
+  frozen.reviews = [{ revisionId: frozen.document.currentRevision.id, exportId: frozen.exports[0].id, fileSha256: frozen.exports[0].fileSha256, decision: 'return', reason: '技术夹具：复核意见仍为业务列', reviewedBy: 'fixture-reviewer', reviewedAt: now }];
+  await wizard().getByRole('navigation', { name: '单据制作步骤', exact: true }).getByRole('button', { name: '文件与复核', exact: true }).click();
+  await assertBottomNavigation(wizard(), '发票文件记录');
+  const fileMenu = await openRowMenu(wizard(), '发票文件记录', 0), downloadEvent = page.waitForEvent('download');
+  await fileMenu.getByRole('menuitem', { name: '下载发票 XLSX', exact: true }).click(); const file = await downloadEvent;
+  assert(file.suggestedFilename().endsWith('.xlsx')); assert.equal(frozen.downloadCalls, 1); await expect(fileMenu).not.toBeVisible();
+  await wizard().locator('.document-audit-history > summary').click(); await expect.poll(() => gridRowCount(wizard(), '单据修订历史')).toBe(1); await expect.poll(() => gridRowCount(wizard(), '人工复核历史')).toBe(1);
+  for (const [historyLabel, title] of [['单据修订历史', '修订原因 / 操作人'], ['人工复核历史', '复核意见 / 操作人']]) {
+    assert((await visibleColumnKeys(wizard(), historyLabel)).includes('column:' + title));
+    await setColumnVisible(wizard(), historyLabel, title, 'column:' + title, false); await setColumnVisible(wizard(), historyLabel, title, 'column:' + title, true);
+    await assertBottomNavigation(wizard(), historyLabel); await expect(grid(wizard(), historyLabel).locator('canvas')).toHaveCount(1);
+  }
+  const historyMenu = await openRowMenu(wizard(), '人工复核历史', 0); await expect(historyMenu).toContainText('技术夹具：复核意见仍为业务列'); await historyMenu.press('Escape');
+  assert.equal(frozen.revisions.length, 0); assert.equal(frozen.exportCalls, 0); await context.close(); note();
   }
 
   step = 'readonly-currency-and-automatic-address-fit-desktop-and-narrow-viewports';

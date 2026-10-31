@@ -4,6 +4,7 @@ import { Navigate, useNavigate, useSearch } from '@tanstack/react-router';
 import { RefreshCw } from 'lucide-react';
 import { api, type User } from '../api';
 import { Button } from '../components/ui/button';
+import { GridTableScope } from '../components/ui/grid-table-scope';
 import { StatePage } from '../pages';
 import { ImportsPage } from './imports';
 import { ImportWorkspace } from './import-workspace';
@@ -52,7 +53,7 @@ function ShippingWorkspace({ user }: { user: User }) {
   const mounted = (target: ShippingView) => target === view || visited.includes(target);
   return <ShippingLayout user={user} view={view} combined={workbenchActive}>
     <section className="shipping-view shipping-flow" aria-label="发货工作台" hidden={!workbenchActive}>{(workbenchActive || visited.includes('demands') || visited.includes('reports')) && <>
-      <ImportsPage user={user} embedded active={workbenchActive} onArrangeDemands={(demandIds, mode) => setAssignment({ demandIds, mode })} renderWorkspace={(actions) => <ImportWorkspace {...actions} active={workbenchActive} initialPresentation={search.view === 'reports' ? 'products' : 'shipments'} initialGroupId={search.groupId} initialPool={search.pool} onScopeChange={(groupId, ungrouped) => { void navigate({ to: '/shipping', search: { view: 'demands', groupId, pool: ungrouped ? 'ungrouped' : undefined }, resetScroll: false }); }} onArrangeDemands={(demandIds, mode) => setAssignment({ demandIds, mode })} onOpenGroup={openGroup} onCreateBatch={() => setCreation(true)} />} />
+      <GridTableScope><ImportsPage user={user} embedded active={workbenchActive} onArrangeDemands={(demandIds, mode) => setAssignment({ demandIds, mode })} renderWorkspace={(actions) => <ImportWorkspace {...actions} active={workbenchActive} initialPresentation={search.view === 'reports' ? 'products' : 'shipments'} initialGroupId={search.groupId} initialPool={search.pool} onScopeChange={(groupId, ungrouped) => { void navigate({ to: '/shipping', search: { view: 'demands', groupId, pool: ungrouped ? 'ungrouped' : undefined }, resetScroll: false }); }} onArrangeDemands={(demandIds, mode) => setAssignment({ demandIds, mode })} onOpenGroup={openGroup} onCreateBatch={() => setCreation(true)} />} /></GridTableScope>
       {assignment && <DemandBatchAssignment open={view === 'demands'} userId={user.id} {...assignment} onClose={() => setAssignment(null)} onComplete={refresh} onOpenGroup={openGroup} />}
       <BatchWizard open={view === 'demands' && creation} userId={user.id} onClose={() => setCreation(false)} onCreated={refresh} onOpenCreated={(result) => { if (result.batchId && result.groupId) { setCreation(false); openGroup(result.batchId, result.groupId); } }} />
       {process && <BatchProcessWizard key={process.groupId} {...process} open={view === 'demands' && process.open} userId={user.id} close={closeProcess} complete={closeProcess} selectGroup={(groupId, batchId) => openGroup(batchId ?? process.batchId, groupId)} viewDetail={() => { closeProcess(); void navigate({ to: '/batches/$batchId', params: { batchId: process.batchId }, search: { groupId: process.groupId } }); }} />}

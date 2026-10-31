@@ -41,6 +41,13 @@ export function ShippingCodesCell({ codes, range }: { codes?: string[]; range?: 
   return <td>{range !== undefined ? range : codes?.join('、') || '待编码'}</td>;
 }
 
+// These four helpers are pure table structure with no hooks. Scoped Canvas
+// tables may explicitly expand their cells without invoking arbitrary components.
+ShippingShopCell.gridCells = ShippingShopCell;
+ShippingProductCells.gridCells = ShippingProductCells;
+ShippingBoxQuantityCells.gridCells = ShippingBoxQuantityCells;
+ShippingCodesCell.gridCells = ShippingCodesCell;
+
 export function getShippingBoxColumns(maxBoxes: number | undefined, boxes?: ReadonlyArray<{ boxOrder: number }>) {
   const maximum = boxes === undefined ? maxBoxes ?? 0 : boxes.reduce((maximum, box) => Math.max(maximum, box.boxOrder), 0);
   return Array.from({ length: Math.max(5, maximum) }, (_, index) => index + 1);

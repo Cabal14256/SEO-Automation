@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
 import * as contracts from '../../packages/contracts/dist/index.js';
 import { chooseOption, readOptions } from '../shared/ui-controls.mjs';
+import { closeGridDetails, grid, findGridRow, selectGridRow, showShippingFilters } from '../shared/grid.mjs';
 
 // Isolated HTTP fixtures: no business database, account file, or external API.
 const root = resolve(import.meta.dirname, '../..');
@@ -29,6 +30,18 @@ function fixture() {
   const group = (member, name, status = 'draft') => ({ id: id(), batchId: batch.id, name, version: 1, status, position: 0, demandIds: [member.id], prefix: null, confirmedVersion: null, frozenAt: status === 'frozen' ? now : null, correctionOfId: null, replacedById: null, actualShipDate: null, createdAt: now, updatedAt: now });
   const frozen = group(demands[4], '已冻结技术批次', 'frozen'), target = group(demands[5], '可追加技术批次');
   const state = { batch, batches: [secondBatch, batch], demands, groups: [frozen, target], frozen, target, queries: [], workspaceQueries: [], createBodies: [], memberBodies: [], operations: new Map(), revisions: new Map(), syncRuns: new Map(), loseAppendOnce: false };
+  const initialRun = contracts.shippingRunSchema.parse({ id: id(), version: 1, status: 'draft', stage: 'sync', numberingDate: '2026-10-19', month: '2026-10', sequence: 1, origin: 'manual', importId: null, parseRunId: null, error: null, createdAt: now, updatedAt: now });
+  state.runs = [initialRun];
+  state.runGroups = new Map([[initialRun.id, [frozen.id, target.id]]]);
+  state.ticketIds = new Map([[frozen.id, id()], [target.id, id()]]);
+  state.runDetail = (runId) => {
+    const run = state.runs.find((entry) => entry.id === runId); assert(run);
+    return contracts.shippingRunDetailSchema.parse({ run, tickets: (state.runGroups.get(runId) ?? []).map((groupId, index) => {
+      const group = state.groups.find((entry) => entry.id === groupId); assert(group);
+      return { id: state.ticketIds.get(groupId), sourceTicketIndex: index + 1, country: 'US', ticketSequence: index + 1, number: `20261019-${run.sequence}-US-${index + 1}`,
+        members: group.demandIds.map((demandId, memberIndex) => { const member = demands.find((entry) => entry.id === demandId); return { demandId, groupId, fba: member.snapshot.fba, sid: member.snapshot.sid, inputOrder: memberIndex + 1 }; }) };
+    }), issues: [] });
+  };
   state.week = (batchId) => {
     const selectedBatch = state.batches.find((item) => item.id === batchId); assert(selectedBatch);
     const groups = state.groups.filter((item) => item.batchId === batchId), assigned = new Set(groups.filter((item) => item.status !== 'superseded').flatMap((item) => item.demandIds));
@@ -77,10 +90,44 @@ async function contextFor(state) {
     if (url.origin !== baseURL && !['blob:', 'data:'].includes(url.protocol)) { unexpectedRequests.push(method + ' EXTERNAL ' + url.origin); return route.abort('blockedbyclient'); }
     if (!path.startsWith('/api/')) return route.continue();
     if (method === 'GET' && path === '/api/v1/session') return json({ user: { id: 'technical-ui', name: '整合流程技术验证', email: 'flow@acceptance.invalid', role: 'admin' } });
+    if (method === 'GET' && path === '/api/v1/shipping-runs') return json({ items: state.runs });
+    const shippingRun = path.match(/^\/api\/v1\/shipping-runs\/([^/]+)$/);
+    if (method === 'GET' && shippingRun) return json(state.runDetail(shippingRun[1]));
+    if (method === 'POST' && path === '/api/v1/shipping-runs/manual') {
+      const body = contracts.createManualShippingRunInputSchema.parse(request.postDataJSON()); state.createBodies.push(copy(body));
+      const selected = state.demands.filter((entry) => body.demandIds.includes(entry.id));
+      assert.equal(selected.length, body.demandIds.length); assert.equal(new Set(body.demandIds).size, body.demandIds.length);
+      assert(selected.every((entry) => entry.snapshot.sid === selected[0].snapshot.sid && entry.snapshot.country === selected[0].snapshot.country && entry.snapshot.channel === selected[0].snapshot.channel));
+      selected.forEach((entry) => assert.equal(body.expectedDemandVersions[entry.id], entry.version));
+      let runId = state.operations.get(body.operationId);
+      if (!runId) {
+        const run = { ...state.runs[0], id: id(), version: 1, sequence: state.runs.length + 1, numberingDate: body.numberingDate, month: body.numberingDate.slice(0, 7) };
+        const group = { ...state.target, id: id(), name: body.name, version: 1, demandIds: body.demandIds, position: state.groups.length };
+        state.groups.push(group); state.runs.push(run); state.runGroups.set(run.id, [group.id]); state.ticketIds.set(group.id, id());
+        state.batch.version++; runId = run.id; state.operations.set(body.operationId, runId);
+      }
+      return json(state.runDetail(runId), 201);
+    }
+    const ticketMembers = path.match(/^\/api\/v1\/shipping-runs\/([^/]+)\/tickets\/([^/]+)\/members$/);
+    if (method === 'POST' && ticketMembers) {
+      const body = contracts.appendShippingTicketMembersInputSchema.parse(request.postDataJSON()); state.memberBodies.push(copy(body));
+      const run = state.runs.find((entry) => entry.id === ticketMembers[1]), group = state.groups.find((entry) => entry.id === body.groupId); assert(run && group);
+      assert.equal(state.ticketIds.get(group.id), ticketMembers[2]);
+      if (state.appendConflictOnce) { state.appendConflictOnce = false; run.version++; group.version++; return json({ error: { code: 'VERSION_CONFLICT', message: '技术夹具：批次版本已变化，请重新核对。' } }, 409); }
+      if (!state.operations.has(body.operationId)) {
+        assert.equal(body.expectedVersion, run.version); assert.equal(body.expectedGroupVersion, group.version);
+        const selected = state.demands.filter((entry) => body.demandIds.includes(entry.id));
+        assert(selected.every((entry) => entry.snapshot.sid === selected[0].snapshot.sid && entry.snapshot.country === selected[0].snapshot.country && entry.snapshot.channel === selected[0].snapshot.channel));
+        selected.forEach((entry) => assert.equal(body.expectedDemandVersions[entry.id], entry.version));
+        group.demandIds = [...new Set([...group.demandIds, ...body.demandIds])]; group.version++; run.version++; state.operations.set(body.operationId, run.id);
+      }
+      if (state.loseAppendOnce) { state.loseAppendOnce = false; return route.abort('connectionfailed'); }
+      return json(state.runDetail(run.id));
+    }
     if (method === 'GET' && path === '/api/v1/demands') return json(state.demandRows(Object.fromEntries(url.searchParams)));
     if (method === 'GET' && path === '/api/v1/batches/workspace') return json(state.workspace(Object.fromEntries(url.searchParams)));
-    if (method === 'GET' && path === '/api/v1/weekly-batches') return json(contracts.weeklyBatchListSchema.parse({ items: state.batches, availableWeeks: [] }));
-    const weekly = path.match(/^\/api\/v1\/weekly-batches\/([^/]+)$/);
+    if (method === 'GET' && ['/api/v1/weekly-batches', '/api/v1/processing-batches'].includes(path)) return json(contracts.weeklyBatchListSchema.parse({ items: state.batches, availableWeeks: [] }));
+    const weekly = path.match(/^\/api\/v1\/(?:weekly-batches|processing-batches)\/([^/]+)$/);
     if (method === 'GET' && weekly) return json(state.week(weekly[1]));
     const create = path.match(/^\/api\/v1\/weekly-batches\/([^/]+)\/sub-batches$/);
     if (method === 'POST' && create) {
@@ -135,37 +182,59 @@ async function contextFor(state) {
     if (method === 'GET' && path === '/api/v1/seller-mappings/catalog-settings') return json({ settings: state.catalog });
     if (method === 'GET' && path === '/api/v1/seller-mappings') return json({ items: [], total: 0, page: 1, pageSize: 20, settings: state.catalog });
     const demand = path.match(/^\/api\/v1\/demands\/([^/]+)$/);
-    if (method === 'GET' && demand) return json(contracts.demandDetailSchema.parse({ demand: state.demands.find((item) => item.id === demand[1]), sources: [], revisions: [] }));
+    if (method === 'GET' && demand) {
+      const owner = state.groups.find((group) => group.status !== 'superseded' && group.demandIds.includes(demand[1]));
+      return json(contracts.demandDetailSchema.parse({ demand: state.demands.find((item) => item.id === demand[1]), sources: [], revisions: [], management: { lifecycle: 'active', canEdit: !owner?.frozenAt, canDelete: true, reason: owner?.frozenAt ? '批次已冻结。' : null, groupId: owner?.id ?? null, batchId: owner?.batchId ?? null } }));
+    }
     unexpectedRequests.push(method + ' ' + path); return json({ error: { code: 'UNEXPECTED_FIXTURE_REQUEST', message: 'Unhandled isolated fixture API' } }, 500);
   });
   page = await context.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', (error) => browserErrors.push(error.message));
   return context;
 }
 
+async function findShipmentSummary(fba) {
+  const target = grid(page, '发货明细表'); await target.waitFor({ state: 'visible' });
+  const count = Number(await target.getAttribute('data-row-count'));
+  for (let index = 0; index < count; index++) {
+    const record = await selectGridRow(page, '发货明细表', index);
+    if (await record.locator('[data-grid-row-kind="shipment"]').filter({ hasText: fba }).count()) return record;
+  }
+  return target.getByRole('region', { name: '发货明细表 当前记录', exact: true }).filter({ hasText: fba });
+}
+
 async function integrationChecks(state) {
   step = 'one-shipment-row-expands-all-products-and-box-details';
   await page.goto('/shipping?view=demands');
+  await expect(page.getByRole('button', { name: '展示过滤条件', exact: true })).toBeVisible();
+  await showShippingFilters(page);
   await expect(page.getByRole('form', { name: '筛选发货工作台', exact: true })).toBeVisible();
-  const table = () => page.getByRole('region', { name: '发货明细表，可横向滚动', exact: true });
+  const table = () => grid(page, '发货明细表');
   const nav = () => page.getByRole('navigation', { name: '需求与批次导航', exact: true });
   await expect(table()).toBeVisible();
-  await expect(table().locator('tr.shipping-shipment-heading')).toHaveCount(6);
-  const products = table().locator('tr.shipping-shipment-heading').filter({ hasText: 'FBAFLOW002' });
+  await expect(table()).toHaveAttribute('data-row-count', '13');
+  const products = await findShipmentSummary('FBAFLOW002');
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 });
+    await expect(page.getByRole('dialog', { name: '货件 FBAFLOW002', exact: true })).toBeVisible();
+    assert((await page.evaluate(() => document.documentElement.scrollWidth)) <= width + 1, 'the record dialog fits the viewport');
+    await page.screenshot({ path: resolve(evidence, 'shipping-record-dialog-' + width + '.png'), animations: 'disabled' });
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
   // The former nested-detail-region assertion is superseded by the same products
   // expanding directly in the single table; keep both collapse and expand checks.
-  await expect(table()).toContainText('FLOW-SKU-0'); await expect(table()).toContainText('FLOW-SKU-1');
-  await products.getByRole('button', { name: /收起明细/ }).click();
-  await expect(table()).not.toContainText('FLOW-SKU-0'); await expect(table()).not.toContainText('FLOW-SKU-1');
-  await products.getByRole('button', { name: /商品与逐箱明细/ }).click();
-  await expect(table().locator('tr.demand-row').filter({ hasText: 'FLOW-SKU-' })).toHaveCount(2);
-  await expect(table()).toContainText('FLOW-SKU-0'); await expect(table()).toContainText('FLOW-SKU-1');
+  await expect(await findGridRow(page, '发货明细表', 'FLOW-SKU-0')).toContainText('FLOW-SKU-0'); await expect(await findGridRow(page, '发货明细表', 'FLOW-SKU-1')).toContainText('FLOW-SKU-1');
+  await findShipmentSummary('FBAFLOW002'); await products.getByRole('button', { name: /收起明细/ }).click();
+  await expect(await findGridRow(page, '发货明细表', 'FLOW-SKU-0')).toHaveCount(0); await expect(await findGridRow(page, '发货明细表', 'FLOW-SKU-1')).toHaveCount(0);
+  await findShipmentSummary('FBAFLOW002'); await products.getByRole('button', { name: /商品与逐箱明细/ }).click();
+  await expect(table()).toHaveAttribute('data-row-count', '13');
+  await expect(await findGridRow(page, '发货明细表', 'FLOW-SKU-0')).toContainText('FLOW-SKU-0'); await expect(await findGridRow(page, '发货明细表', 'FLOW-SKU-1')).toContainText('FLOW-SKU-1');
   note(step);
 
   step = 'batch-navigation-filters-membership-and-preserves-frozen-state';
-  await nav().getByRole('button', { name: /已冻结技术批次/ }).click();
+  await closeGridDetails(page, '发货明细表'); await nav().getByRole('button', { name: '发货批次', exact: true }).click(); await nav().getByRole('button', { name: /已冻结技术批次/ }).click(); await expect(nav().getByRole('button', { name: '发货批次', exact: true })).toBeFocused();
   await expect(page.getByRole('heading', { name: state.frozen.name, exact: true })).toBeVisible();
-  await expect(table().locator('tr.shipping-shipment-heading')).toHaveCount(1);
-  await expect(table()).toContainText('FBAFROZEN');
+  await expect(table()).toHaveAttribute('data-row-count', '2');
+  await expect(await findGridRow(page, '发货明细表', 'FBAFROZEN')).toContainText('FBAFROZEN');
   assert(state.queries.some((query) => query.groupId === state.frozen.id));
   await expect(page.getByText('已冻结，保留原确认数据；调整请发起更正。', { exact: false })).toBeVisible();
   await expect(page.getByRole('checkbox', { name: '选择货件 FBAFROZEN', exact: true })).toHaveCount(0);
@@ -173,29 +242,32 @@ async function integrationChecks(state) {
   note(step);
 
   step = 'ungrouped-scope-is-independent-of-data-processing-state';
-  await nav().getByRole('button', { name: '待分组需求', exact: true }).click();
+  await closeGridDetails(page, '发货明细表'); await page.getByRole('group', { name: '发货范围切换', exact: true }).getByRole('button', { name: '待分组需求', exact: true }).click();
   await expect(page.getByRole('heading', { name: '待分组需求', exact: true })).toBeVisible();
-  await expect(table().locator('tr.shipping-shipment-heading')).toHaveCount(4);
-  await expect(table()).not.toContainText('FBAFROZEN'); await expect(table()).not.toContainText('FBADRAFT');
+  await expect(table()).toHaveAttribute('data-row-count', '9');
+  await expect(await findGridRow(page, '发货明细表', 'FBAFROZEN')).toHaveCount(0); await expect(await findGridRow(page, '发货明细表', 'FBADRAFT')).toHaveCount(0);
   assert(state.queries.some((query) => query.grouping === 'ungrouped'));
   note(step);
 
-  step = 'common-week-and-shop-filters-apply-to-both-navigation-and-demand-pool';
+  step = 'common-month-and-shop-filters-apply-to-both-navigation-and-demand-pool';
   const form = page.getByRole('form', { name: '筛选发货工作台', exact: true });
-  await chooseOption(form.getByLabel('需求周范围', { exact: true }), state.batches[0].weekStartDate);
+  await closeGridDetails(page, '发货明细表');
+  await form.getByLabel('发货月份', { exact: true }).fill('2026-10');
   await chooseOption(form.getByLabel('店铺', { exact: true }), '101');
   await form.getByRole('button', { name: '筛选', exact: true }).click();
-  await expect(table().locator('tr.shipping-shipment-heading')).toHaveCount(1);
-  await expect(table()).toContainText('FBAOTHERWEEK');
-  assert.equal(state.queries.at(-1).weekStartDate, state.batches[0].weekStartDate);
+  await expect(table()).toHaveAttribute('data-row-count', '7');
+  await expect(await findGridRow(page, '发货明细表', 'FBAOTHERWEEK')).toContainText('FBAOTHERWEEK');
+  assert.equal(state.queries.at(-1).month, '2026-10');
   assert.equal(state.queries.at(-1).sid, '101');
-  await expect.poll(() => state.workspaceQueries.at(-1).weekFrom).toBe(state.batches[0].weekStartDate);
+  await expect.poll(() => state.workspaceQueries.at(-1).month).toBe('2026-10');
   assert.equal(state.workspaceQueries.at(-1).sid, 101);
+  await closeGridDetails(page, '发货明细表');
   await form.getByRole('button', { name: '重置', exact: true }).click();
-  await expect(table().locator('tr.shipping-shipment-heading')).toHaveCount(4);
+  await expect(table()).toHaveAttribute('data-row-count', '9');
   await expect(page.getByRole('heading', { name: '待分组需求', exact: true })).toBeVisible();
   note(step);
 
+  await closeGridDetails(page, '发货明细表');
   step = 'integrated-workspace-responsive-layout';
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 1000 });
@@ -218,19 +290,23 @@ async function batchSidebarSearchChecks(state) {
     sessionStorage.setItem('scm-batch-process:technical-ui:current', JSON.stringify({ batchId, groupId, open: false }));
   }, { batchId: state.batch.id, groupId: state.frozen.id });
   await page.goto('/shipping?view=demands');
+  await expect(grid(page, '发货明细表')).toBeVisible();
+  await showShippingFilters(page);
   const nav = () => page.getByRole('navigation', { name: '需求与批次导航', exact: true });
   const items = () => nav().locator('.shipping-batch-item');
   const search = () => nav().getByRole('search', { name: '搜索发货批次', exact: true });
   const keyword = () => search().getByLabel('批次名称 / FBA', { exact: true });
   const demands = page.getByRole('form', { name: '筛选发货工作台', exact: true });
-  const table = page.getByRole('region', { name: '发货明细表，可横向滚动', exact: true });
-  await nav().getByRole('button', { name: /已冻结技术批次/ }).click();
+  const table = grid(page, '发货明细表');
+  await closeGridDetails(page, '发货明细表'); await nav().getByRole('button', { name: '发货批次', exact: true }).click(); await nav().getByRole('button', { name: /已冻结技术批次/ }).click(); await expect(nav().getByRole('button', { name: '发货批次', exact: true })).toBeFocused();
   await expect(page.getByRole('heading', { name: state.frozen.name, exact: true })).toBeVisible();
   await demands.getByLabel('搜索', { exact: true }).fill('FBAFROZEN');
   await demands.getByRole('button', { name: '筛选', exact: true }).click();
   await expect.poll(() => state.queries.at(-1)?.q).toBe('FBAFROZEN');
-  await expect(table).toContainText('FBAFROZEN');
+  await expect(await findGridRow(page, '发货明细表', 'FBAFROZEN')).toContainText('FBAFROZEN');
+  await closeGridDetails(page, '发货明细表');
   await demands.getByLabel('搜索', { exact: true }).fill('需求搜索未提交草稿');
+  await nav().getByRole('button', { name: '发货批次', exact: true }).click();
   const demandReads = state.queries.length;
   await expect(items()).toHaveCount(19);
   await nav().getByRole('button', { name: '下一页批次', exact: true }).click();
@@ -282,14 +358,17 @@ const wizard = () => page.getByRole('dialog', { name: '建立发货批次', exac
 const processDialog = () => page.getByRole('dialog', { name: '发货批次处理向导', exact: true });
 async function selectDemands(fbas) {
   await page.goto('/shipping?view=demands');
-  for (const fba of fbas) await page.getByRole('checkbox', { name: '选择货件 ' + fba, exact: true }).check();
+  for (const fba of fbas) { await findGridRow(page, '发货明细表', fba); await page.getByRole('checkbox', { name: '选择货件 ' + fba, exact: true }).check(); }
+  await closeGridDetails(page, '发货明细表');
   await expect(page.getByLabel('需求分组操作', { exact: true })).toContainText('已选 ' + fbas.length + ' 票');
 }
 
 async function createChecks(state) {
   step = 'multi-product-demands-are-selected-once-and-carried-to-create-wizard';
   await selectDemands(['FBAFLOW001', 'FBAFLOW002']);
+  await findGridRow(page, '发货明细表', 'FBAFLOW002');
   await expect(page.getByRole('checkbox', { name: '选择货件 FBAFLOW002', exact: true })).toHaveCount(1);
+  await closeGridDetails(page, '发货明细表');
   await page.getByRole('button', { name: '新建发货批次', exact: true }).click();
   await expect(assignment()).toBeVisible();
   await expect(assignment()).toContainText('带入 2 票需求');
@@ -304,9 +383,9 @@ async function createChecks(state) {
   step = 'create-posts-exact-current-members-and-opens-processing';
   await wizard().getByRole('button', { name: '下一步：核对与建立', exact: true }).click();
   await wizard().getByLabel('发货批次名称', { exact: true }).fill('整合流程技术新批次');
-  await wizard().getByRole('checkbox', { name: '已核对所选需求的店铺、国家和渠道，确认建立此发货批次。', exact: true }).check();
+  await wizard().getByRole('checkbox', { name: '已核对发货次、店铺、国家和渠道，确认建立批次。', exact: true }).check();
   await wizard().getByRole('button', { name: '确认建立发货批次', exact: true }).click();
-  await expect(wizard()).toContainText('需求分组已建立');
+  await expect(wizard()).toContainText('发货批次已建立');
   assert.equal(state.createBodies.length, 1); assert.deepEqual(new Set(state.createBodies[0].demandIds), new Set(state.demands.slice(0, 2).map((demand) => demand.id)));
   await wizard().getByRole('button', { name: '继续同步与核对', exact: true }).click();
   await expect(processDialog()).toBeVisible();
@@ -318,13 +397,13 @@ async function createChecks(state) {
 }
 
 async function scopeChecks(state) {
-  step = 'mixed-weeks-and-shops-require-an-explicit-compatible-partition';
+  step = 'different-dates-share-a-compatible-partition-and-different-shops-stay-separate';
   await selectDemands(['FBAFLOW001', 'FBAFLOW002', 'FBAOTHERSTORE', 'FBAOTHERWEEK']);
   await page.getByRole('button', { name: '新建发货批次', exact: true }).click();
-  await expect(assignment().getByRole('radio')).toHaveCount(3);
+  await expect(assignment().getByRole('radio')).toHaveCount(2);
   await expect(assignment().getByRole('button', { name: '继续建立批次', exact: true })).toHaveCount(0);
   await assignment().locator('label').filter({ hasText: 'FBAFLOW001、FBAFLOW002' }).getByRole('radio').check();
-  await expect(assignment()).toContainText('带入 2 票需求');
+  await expect(assignment()).toContainText('带入 3 票需求');
   assert.equal(state.createBodies.length, 0); note(step);
 }
 
@@ -336,7 +415,7 @@ async function appendChecks(state) {
   const target = assignment().getByLabel('目标发货批次', { exact: true });
   assert.deepEqual((await readOptions(target)).filter(Boolean), [state.target.id]);
   await chooseOption(target, state.target.id);
-  const confirmation = assignment().getByRole('checkbox', { name: '已核对完整成员与批次范围，确认追加所选需求。', exact: true });
+  const confirmation = assignment().getByRole('checkbox', { name: '已核对发货次和完整成员，确认追加所选需求。', exact: true });
   await expect(confirmation).toBeEnabled(); await confirmation.check(); state.loseAppendOnce = true;
   await assignment().getByRole('button', { name: '确认加入批次', exact: true }).click();
   await expect(assignment().getByRole('button', { name: '重试原加入请求', exact: true })).toBeEnabled();
@@ -355,7 +434,7 @@ async function appendConflictChecks(state) {
   await selectDemands(['FBAFLOW001']);
   await page.getByRole('button', { name: '加入已有批次', exact: true }).click();
   await chooseOption(assignment().getByLabel('目标发货批次', { exact: true }), state.target.id);
-  const confirmation = assignment().getByRole('checkbox', { name: '已核对完整成员与批次范围，确认追加所选需求。', exact: true });
+  const confirmation = assignment().getByRole('checkbox', { name: '已核对发货次和完整成员，确认追加所选需求。', exact: true });
   await confirmation.check(); state.appendConflictOnce = true;
   const submit = assignment().getByRole('button', { name: '确认加入批次', exact: true });
   await submit.click();
@@ -381,7 +460,9 @@ async function importHandoffChecks(state) {
   await expect(imported).not.toBeVisible(); await expect(assignment()).toBeVisible();
   await expect(page.locator('dialog[open]')).toHaveCount(1);
   await expect(assignment()).toContainText('已有批次的需求 · 1 票');
-  await expect(assignment()).toContainText('FBAFROZEN · 已冻结技术批次 · 已冻结');
+  await expect(assignment().locator('.assignment-existing')).toContainText('FBAFROZEN');
+  await expect(assignment().getByRole('button', { name: '打开原批次', exact: true })).toHaveCount(1);
+  assert.equal(state.frozen.status, 'frozen'); assert.deepEqual(state.frozen.demandIds, [state.demands[4].id]);
   await expect(assignment()).toContainText('带入 2 票需求');
   await expect(assignment().getByRole('radio')).toHaveCount(1);
   assert.equal(state.createBodies.length, 0); assert.equal(state.memberBodies.length, 0); note(step);
@@ -395,7 +476,7 @@ try {
   viteProcess = spawn(process.execPath, [vite, '--host', '127.0.0.1', '--port', String(port), '--strictPort'], { cwd: resolve(root, 'apps/web'), stdio: 'ignore', windowsHide: true });
   await expect.poll(async () => { try { return (await fetch(baseURL)).status; } catch { return 0; } }, { timeout: 20000 }).toBe(200);
   browser = await chromium.launch({ headless: true, channel: process.env.IMPORT_BROWSER_CHANNEL || 'chrome' });
-  const selectedChecks = process.env.SHIPPING_INTEGRATION_CHECK_SCOPE === 'append' ? [appendChecks, appendConflictChecks] : process.env.SHIPPING_INTEGRATION_CHECK_SCOPE === 'import' ? [importHandoffChecks] : process.env.SHIPPING_INTEGRATION_CHECK_SCOPE === 'scope' ? [scopeChecks] : process.env.SHIPPING_INTEGRATION_CHECK_SCOPE === 'sidebar' ? [batchSidebarSearchChecks] : [integrationChecks, batchSidebarSearchChecks, createChecks, scopeChecks, appendChecks, appendConflictChecks, importHandoffChecks];
+  const selectedChecks = process.env.SHIPPING_INTEGRATION_CHECK_SCOPE === 'visual' ? [integrationChecks] : process.env.SHIPPING_INTEGRATION_CHECK_SCOPE === 'append' ? [appendChecks, appendConflictChecks] : process.env.SHIPPING_INTEGRATION_CHECK_SCOPE === 'import' ? [importHandoffChecks] : process.env.SHIPPING_INTEGRATION_CHECK_SCOPE === 'scope' ? [scopeChecks] : process.env.SHIPPING_INTEGRATION_CHECK_SCOPE === 'sidebar' ? [batchSidebarSearchChecks] : [integrationChecks, batchSidebarSearchChecks, createChecks, scopeChecks, appendChecks, appendConflictChecks, importHandoffChecks];
   for (const check of selectedChecks) {
     const state = fixture(), context = await contextFor(state); await check(state); await context.close();
   }

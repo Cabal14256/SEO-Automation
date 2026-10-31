@@ -1,14 +1,16 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, ArrowRight, CircleCheck, Filter, X } from 'lucide-react';
-import type { DocumentAutomationJob } from '@scm/contracts';
+import { ArrowLeft, ArrowRight, Filter, X } from 'lucide-react';
+import type { DocumentAutomationJob, DocumentCandidate } from '@scm/contracts';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { SelectField } from '../components/ui/select';
 import { MultiSelect } from '../components/ui/multi-select';
 import { filterMultiSelectOptions } from '../components/ui/multi-select-options';
-import { BatchTable, Check, QueryError } from './batch-shared';
+import { Check, QueryError } from './batch-shared';
+import type { GridColumn } from '../components/ui/scm-data-grid';
+import { DocumentDataGrid } from './document-grid';
 import { documentApi } from './document-api';
 import { documentAutomationApi } from './document-automation-api';
 import { useAutomationResume } from './document-automation';
@@ -73,13 +75,7 @@ export function NewDocument({ active, started, resume, onEditorState, actionsCon
     {search.trim() && <p className="mapping-help">当前搜索：{search} · 匹配 {visible.length} 个货件 <Button type="button" variant="text" disabled={locked} onClick={() => setSearch('')}>清除搜索</Button></p>}
     {!runId ? <p className="list-state">先选择发货次并读取货件。</p> : candidates.isPending ? <p className="list-state" role="status">正在读取本次发货的货件…</p> : candidates.isError ? <QueryError error={candidates.error} retry={() => void candidates.refetch()} /> : candidates.data.items.length === 0 ? <p className="list-state">本次暂无有效制表确认的货件。请先在发货批次中完成 M2 制表确认与编码。</p> : <>
       <div className="document-selection-bar"><Check checked={visible.length > 0 && visible.every((item) => selected.includes(item.demandId))} disabled={locked || draftRunId !== runId} onChange={(checked) => setSelected((current) => checked ? [...new Set([...current, ...visible.map((item) => item.demandId)])] : current.filter((item) => !visible.some((candidate) => candidate.demandId === item)))}>选择当前列表</Check><span>已选 {selected.length} 个 FBA</span></div>
-      <BatchTable label="本次发货的可选货件" headers={['选择 / FBA', '店铺 / 国家 / 渠道', '目的仓 / 收件地址', '来源组 / 箱数', '生成准备情况']}>{visible.map((candidate) => <tr key={candidate.demandId}>
-        <td><Check checked={selected.includes(candidate.demandId)} disabled={locked || draftRunId !== runId} onChange={(checked) => setSelected((current) => checked ? [...current, candidate.demandId] : current.filter((item) => item !== candidate.demandId))}>{candidate.demand.snapshot.fba}</Check></td>
-        <td>{candidate.demand.snapshot.shop}<small className="mapping-subtext">{candidate.demand.snapshot.country} · {candidate.demand.snapshot.channel || '渠道未填写'}</small></td>
-        <td>{candidate.demand.snapshot.destinationFc || '目的仓未填写'}<small className="mapping-subtext document-address">{candidate.demand.snapshot.destinationAddress || '收件地址待补齐'}</small></td>
-        <td>{candidate.groupName}<small className="mapping-subtext">v{candidate.groupVersion} · {candidate.shipment.data.boxes.length} 箱</small></td>
-        <td>{candidate.blockers.length === 0 ? <span className="document-ready"><CircleCheck size={14} aria-hidden="true" />来源已就绪</span> : candidate.blockers.map((issue) => <small className="mapping-subtext document-waiting" key={`${issue.code}-${issue.message}`}>{issue.message}</small>)}</td>
-      </tr>)}</BatchTable>{visible.length === 0 && <p className="list-state">未找到匹配货件，请调整搜索词。</p>}
+      <CandidateGrid rows={visible} selected={selected} setSelected={setSelected} active={active && step === 'sources'} locked={locked || draftRunId !== runId} scopeKey={`${runId}:${search}`} />{visible.length === 0 && <p className="list-state">未找到匹配货件，请调整搜索词。</p>}
     </>}
     </div>
     <div hidden={step !== 'details'} aria-label="本次出单资料">
@@ -94,4 +90,26 @@ export function NewDocument({ active, started, resume, onEditorState, actionsCon
     {actionsContainer && createPortal(<>{step === 'details' && <Button type="button" icon={ArrowLeft} disabled={locked} onClick={() => chooseStep('sources')}>上一步</Button>}<Button type="button" icon={X} disabled={locked} onClick={close}>暂时关闭</Button>{step === 'sources' ? <Button type="button" icon={ArrowRight} variant="primary" disabled={!canStart} onClick={() => chooseStep('details')}>下一步：出单资料</Button> : <Button type="button" icon={ArrowRight} variant="primary" disabled={!canStart} loading={action.busy} onClick={start}>自动生成发票</Button>}</>, actionsContainer)}
     </section>
   </div>;
+}
+
+function CandidateGrid({ rows, selected, setSelected, active, locked, scopeKey }: { rows: DocumentCandidate[]; selected: string[]; setSelected: (update: (current: string[]) => string[]) => void; active: boolean; locked: boolean; scopeKey: string }) {
+  const choose = (row: DocumentCandidate, checked: boolean) => { if (!locked) setSelected((current) => checked ? [...new Set([...current, row.demandId])] : current.filter((id) => id !== row.demandId)); };
+  const readiness = (row: DocumentCandidate) => row.blockers.length ? row.blockers.map((issue) => issue.message).join('；') : '来源已就绪';
+  const columns: GridColumn<DocumentCandidate>[] = [
+    { key: 'rowNumber', title: '#', width: 48, utility: 'number', align: 'center', getValue: () => '' },
+    { key: 'selection', title: '选择', width: 48, getValue: () => '', getChecked: (row) => selected.includes(row.demandId), disabled: () => locked, onToggle: choose },
+    { key: 'fba', title: 'FBA', width: 190, getValue: (row) => row.demand.snapshot.fba },
+    { key: 'group', title: '批次', width: 200, getValue: (row) => row.groupName },
+    { key: 'destinationFc', title: '目的仓', width: 110, getValue: (row) => row.demand.snapshot.destinationFc || '目的仓未填写' },
+    { key: 'shop', title: '店铺', width: 160, getValue: (row) => row.demand.snapshot.shop },
+    { key: 'country', title: '国家', width: 90, getValue: (row) => row.demand.snapshot.country },
+    { key: 'channel', title: '渠道', width: 110, getValue: (row) => row.demand.snapshot.channel || '渠道未填写' },
+    { key: 'address', title: '收件地址', width: 260, getValue: (row) => row.demand.snapshot.destinationAddress || '收件地址待补齐' },
+    { key: 'source', title: '来源版本 / 箱数', width: 160, getValue: (row) => `v${row.groupVersion} · ${row.shipment.data.boxes.length} 箱` },
+    { key: 'readiness', title: '生成准备情况', width: 300, getValue: readiness, getCellState: (row) => row.blockers.length ? 'error' : 'default' },
+    { key: 'actions', title: '操作', width: 48, align: 'center', getValue: () => '', icon: () => 'more', openMenu: true },
+  ];
+  return <DocumentDataGrid tableKey="document-candidates" label="本次发货的可选货件" active={active} rows={rows} columns={columns} mandatoryColumnKeys={['fba']} getRowKey={(row) => row.demandId} frozenColCount={3} rowHeight={56} maxHeight={480} menuScopeKey={scopeKey} detailsMode="dialog" detailsTitle={(row) => row.demand.snapshot.fba}
+    renderDetails={(row) => <><Check checked={selected.includes(row.demandId)} disabled={locked} onChange={(checked) => choose(row, checked)}>{row.demand.snapshot.fba}</Check><dl className="scm-grid-record-fields">{columns.filter((column) => !['rowNumber', 'selection', 'actions'].includes(column.key)).map((column) => <div className="scm-grid-record-field" key={column.key}><dt>{column.title}</dt><dd>{column.getValue(row) || '—'}</dd></div>)}</dl></>}
+    renderRowMenu={(row, context) => <><div className="scm-record-menu-summary"><strong>{row.demand.snapshot.fba}</strong><p>{row.demand.snapshot.shop} · {row.demand.snapshot.destinationFc || '目的仓未填写'}</p><p className={row.blockers.length ? 'error-note' : undefined}>{readiness(row)}</p></div><div className="scm-record-menu-actions"><Button type="button" variant="text" role="menuitem" disabled={locked} onClick={() => { choose(row, !selected.includes(row.demandId)); context.close(); }}>{selected.includes(row.demandId) ? '取消选择货件' : '选择货件'}</Button><Button type="button" variant="text" role="menuitem" onClick={context.openDetails}>完整详情</Button></div></>} />;
 }

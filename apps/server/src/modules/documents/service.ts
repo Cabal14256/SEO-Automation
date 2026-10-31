@@ -19,6 +19,7 @@ import { shippingRuns, shippingTicketMembers } from '../shipping-runs/schema.js'
 import { applyDocumentManualSalesPricesInTx } from './manual-sales-price.js';
 import { applyDocumentAddressCodeDefaults, hydrateDocumentAddressCodeSourcesInTx, validateDocumentAddressCode } from './address-code-service.js';
 import { DocumentAddressCodeCatalogError, loadDocumentAddressCodeCatalog } from './address-code-catalog.js';
+import { DocumentReadContext } from './read-context.js';
 
 export { BatchError as DocumentError } from '../batches/service.js';
 type CreateInput = z.infer<typeof documentCreateInputSchema>;
@@ -45,8 +46,20 @@ export async function documentOperation<T extends Record<string, unknown>>(actor
     return { ...result, replayed: false };
   });
 }
-export async function lockedDocument(tx: BatchTx, id: string, actorId: string, expectedVersion?: number) {
+export async function lockedDocument(tx: BatchTx, id: string, actorId: string, expectedVersion?: number, context?: DocumentReadContext) {
   await requireBatchActor(tx, actorId);
+  if (context) {
+    if (context.tx !== tx) throw new Error('Document read context belongs to another transaction');
+    const result = await context.memo('document', id, async () => {
+      const [record] = await tx.select().from(documents).where(eq(documents.id, id));
+      if (!record) throw new BatchError('NOT_FOUND', 404, '单据不存在。');
+      const [revision] = record.currentRevisionId ? await tx.select().from(documentRevisions).where(eq(documentRevisions.id, record.currentRevisionId)) : [];
+      if (!revision) throw new BatchError('DOCUMENT_REVISION_UNAVAILABLE', 503, '单据修订缺失，请联系管理员。');
+      return { record, revision };
+    });
+    if (expectedVersion !== undefined && result.record.version !== expectedVersion) throw new BatchError('VERSION_CONFLICT', 409, '单据版本已变化，请保留输入并重新读取。');
+    return result;
+  }
   const [record] = await tx.select().from(documents).where(eq(documents.id, id)).for('update');
   if (!record) throw new BatchError('NOT_FOUND', 404, '单据不存在。');
   if (expectedVersion !== undefined && record.version !== expectedVersion) throw new BatchError('VERSION_CONFLICT', 409, '单据版本已变化，请保留输入并重新读取。');
@@ -55,31 +68,48 @@ export async function lockedDocument(tx: BatchTx, id: string, actorId: string, e
   return { record, revision };
 }
 const blocker = (code: string, message: string, groupId: string, demandId?: string): DocumentValidation['issues'][number] => ({ code, severity: 'error', message, groupId, ...(demandId ? { demandId } : {}) });
-export async function documentCandidatesInTx(tx: BatchTx, actorId: string, input: DocumentCandidateQuery | string = {}): Promise<DocumentCandidateList> {
+type CandidateReadOptions = { context?: DocumentReadContext; demandIds?: string[] };
+export async function documentCandidatesInTx(tx: BatchTx, actorId: string, input: DocumentCandidateQuery | string = {}, options: CandidateReadOptions = {}): Promise<DocumentCandidateList> {
   await requireBatchActor(tx, actorId);
   const scope = typeof input === 'string' ? { weekStartDate: input } : input;
-  const batches = await tx.select().from(weeklyBatches);
-  if (!batches.length) return { items: [], total: 0, ...scope };
+  const context = options.context;
+  if (context && context.tx !== tx) throw new Error('Document read context belongs to another transaction');
+  if (context) return context.memo('candidates', [scope, options.demandIds?.slice().sort()], () => readDocumentCandidates(tx, actorId, scope, options));
+  return readDocumentCandidates(tx, actorId, scope, options);
+}
+async function readDocumentCandidates(tx: BatchTx, actorId: string, scope: DocumentCandidateQuery, options: CandidateReadOptions): Promise<DocumentCandidateList> {
+  const context = options.context, scoped = Boolean(scope.shippingRunId || scope.month);
+  const batches = scoped ? [] : await tx.select().from(weeklyBatches);
+  if (!scoped && !batches.length) return { items: [], total: 0, ...scope };
   const loadOccurrences = Boolean(scope.shippingRunId || scope.month || batches.some((batch) => batch.shippingRunId));
   const runs = loadOccurrences ? await tx.select().from(shippingRuns).where(and(eq(shippingRuns.lifecycle, 'active'), eq(shippingRuns.lifecyclePending, false), scope.shippingRunId ? eq(shippingRuns.id, scope.shippingRunId) : undefined, scope.month ? eq(shippingRuns.month, scope.month) : undefined)) : [];
   const links = loadOccurrences && runs.length ? await tx.select().from(shippingTicketMembers).where(and(inArray(shippingTicketMembers.runId, runs.map((run) => run.id)), isNull(shippingTicketMembers.releasedAt))) : [];
-  const scoped = Boolean(scope.shippingRunId || scope.month);
   const selectedGroupIds = [...new Set(links.flatMap((link) => link.groupId ? [link.groupId] : []))];
   if (scoped && !selectedGroupIds.length) return { items: [], total: 0, ...scope };
   const groups = await tx.select().from(subBatches).where(and(eq(subBatches.lifecycle, 'active'), eq(subBatches.lifecyclePending, false), inArray(subBatches.status, ['confirmed', 'frozen']), scoped ? inArray(subBatches.id, selectedGroupIds) : undefined)).orderBy(asc(subBatches.id));
+  const runsById = new Map(runs.map((run) => [run.id, run]));
+  const linksByDemand = new Map(links.map((link) => [JSON.stringify([link.demandId, link.groupId]), link]));
+  const targetDemands = options.demandIds ? new Set(options.demandIds) : undefined;
   const items: DocumentCandidate[] = [];
   for (const group of groups) {
     let bundle: Awaited<ReturnType<typeof getConfirmedGroupInTx>>;
-    try { bundle = await getConfirmedGroupInTx(tx, group.id, actorId, false); }
+    try { bundle = context ? await context.memo('confirmed-group', [group.id, group.version, group.confirmedVersion], () => getConfirmedGroupInTx(tx, group.id, actorId, false)) : await getConfirmedGroupInTx(tx, group.id, actorId, false); }
     catch (error) { if (error instanceof BatchError && [409, 422].includes(error.status)) continue; throw error; }
+    const membersById = new Map(bundle.members.map((member) => [member.id, member]));
+    const codesByDemand = new Map<string, typeof bundle.codes>();
+    for (const code of bundle.codes) {
+      const entries = codesByDemand.get(code.demandId);
+      if (entries) entries.push(code); else codesByDemand.set(code.demandId, [code]);
+    }
     for (const entry of bundle.shipments) {
-      const demand = bundle.members.find((member) => member.id === entry.demandId);
+      if (targetDemands && !targetDemands.has(entry.demandId)) continue;
+      const demand = membersById.get(entry.demandId);
       if (!demand) continue;
-      const link = links.find((member) => member.demandId === demand.id && member.groupId === group.id), run = runs.find((entry) => entry.id === link?.runId);
+      const link = linksByDemand.get(JSON.stringify([demand.id, group.id])), run = link ? runsById.get(link.runId) : undefined;
       if (scoped && !link) continue;
-      const codes = bundle.codes.filter((code) => code.demandId === demand.id), blockers: DocumentValidation['issues'] = [];
+      const codes = codesByDemand.get(demand.id) ?? [], blockers: DocumentValidation['issues'] = [];
       if (entry.revision.data.boxes.some((box) => !codes.some((code) => code.valid && code.boxId === box.id))) blockers.push(blocker('CODES_REQUIRED', '来源组尚未完成箱码。', group.id, demand.id));
-      const sourceCandidates = await loadDocumentSourceCandidates(tx, { demand, shipment: entry.revision, physical: null });
+      const sourceCandidates = await loadDocumentSourceCandidates(tx, { demand, shipment: entry.revision, physical: null }, context);
       const boxSource = documentBoxSources({ demand, shipment: entry.revision, codes, physical: null }).map((box) => ({ ...box, po: sourceCandidates.po ?? null }));
       if (sourceCandidates.issues.some((issue) => issue.code === 'DOCUMENT_SOURCE_FILE_INVALID')) blockers.push(blocker('DOCUMENT_SOURCE_FILE_INVALID', '绑定的原始来源文件无法通过哈希或身份校验，请联系管理员处理后生成。', group.id, demand.id));
       items.push({ ...(run ? { shippingRunId: run.id, shippingRunMonth: run.month, shippingRunSequence: run.sequence } : {}), demandId: demand.id, demandVersion: demand.version, weekStartDate: demand.weekStartDate, weekEndDate: demand.weekEndDate, groupId: group.id, groupName: group.name, groupVersion: bundle.confirmation.groupVersion, groupStatus: group.status as DocumentCandidate['groupStatus'], m2ConfirmationId: bundle.confirmation.id,
@@ -88,7 +118,7 @@ export async function documentCandidatesInTx(tx: BatchTx, actorId: string, input
   }
   return { items, total: items.length, ...scope };
 }
-export async function listDocumentCandidates(actorId: string, scope: DocumentCandidateQuery | string = {}) { return db.transaction((tx) => documentCandidatesInTx(tx, actorId, scope)); }
+export async function listDocumentCandidates(actorId: string, scope: DocumentCandidateQuery | string = {}) { return db.transaction((tx) => documentCandidatesInTx(tx, actorId, scope, { context: new DocumentReadContext(tx) }), { isolationLevel: 'repeatable read' }); }
 async function selectMembers(tx: BatchTx, actorId: string, scope: DocumentCandidateQuery | string, demandIds: string[]): Promise<DocumentMemberSnapshot[]> {
   if (new Set(demandIds).size !== demandIds.length) throw new BatchError('DUPLICATE_DOCUMENT_MEMBER', 422, '货件范围不能重复。');
   const available = await documentCandidatesInTx(tx, actorId, scope), byId = new Map(available.items.map((candidate) => [candidate.demandId, candidate]));
@@ -201,7 +231,7 @@ export async function reviseDocumentInTx(tx: BatchTx, id: string, actorId: strin
     return { documentId: id, document: await appendRevision(tx, id, record.version + 1, data, actorId, input.reason, revision.data) };
 }
 type DocumentListCandidate = Pick<typeof documents.$inferSelect, 'id' | 'status'> & { revisionId: string };
-async function documentListStatuses(tx: BatchTx, actorId: string, candidates: DocumentListCandidate[]) {
+async function documentListStatuses(tx: BatchTx, actorId: string, candidates: DocumentListCandidate[], context: DocumentReadContext) {
   const statuses = new Map(candidates.map((record) => [record.id, record.status as Document['status']]));
   const active = candidates.filter((record) => !['cancelled', 'superseded', 'stale'].includes(record.status));
   const completed = new Set<string>();
@@ -213,7 +243,7 @@ async function documentListStatuses(tx: BatchTx, actorId: string, candidates: Do
     for (const file of files) completed.add(file.documentId);
   }
   for (const record of active) {
-    if (completed.has(record.id) && !(await documentDependencyValidityInTx(tx, record.id, record.revisionId, actorId)).valid) statuses.set(record.id, 'stale');
+    if (completed.has(record.id) && !(await documentDependencyValidityInTx(tx, record.id, record.revisionId, actorId, context)).valid) statuses.set(record.id, 'stale');
   }
   return statuses;
 }
@@ -221,6 +251,7 @@ export async function listDocuments(actorId: string, input: DocumentListQuery) {
   const query = documentListQuerySchema.parse(input);
   return db.transaction(async (tx) => {
     await requireBatchActor(tx, actorId);
+    const context = new DocumentReadContext(tx);
     const where = documentListWhere(query), offset = (query.page - 1) * query.pageSize;
     let total: number, statuses: Map<string, Document['status']>;
     let rows: { record: typeof documents.$inferSelect; revision: typeof documentRevisions.$inferSelect }[];
@@ -229,7 +260,7 @@ export async function listDocuments(actorId: string, input: DocumentListQuery) {
       // selecting a page, then hydrate its immutable revision snapshots below.
       const candidates = await tx.select({ id: documents.id, status: documents.status, revisionId: documentRevisions.id }).from(documents)
         .innerJoin(documentRevisions, eq(documents.currentRevisionId, documentRevisions.id)).where(where).orderBy(desc(documents.createdAt), desc(documents.id));
-      statuses = await documentListStatuses(tx, actorId, candidates);
+      statuses = await documentListStatuses(tx, actorId, candidates, context);
       const matching = candidates.filter((record) => statuses.get(record.id) === query.status);
       total = matching.length;
       const ids = matching.slice(offset, offset + query.pageSize).map((record) => record.id);
@@ -243,64 +274,70 @@ export async function listDocuments(actorId: string, input: DocumentListQuery) {
       total = result!.value;
       rows = await tx.select({ record: documents, revision: documentRevisions }).from(documents)
         .innerJoin(documentRevisions, eq(documents.currentRevisionId, documentRevisions.id)).where(where).orderBy(desc(documents.createdAt), desc(documents.id)).limit(query.pageSize).offset(offset);
-      statuses = await documentListStatuses(tx, actorId, rows.map(({ record, revision }) => ({ id: record.id, status: record.status, revisionId: revision.id })));
+      statuses = await documentListStatuses(tx, actorId, rows.map(({ record, revision }) => ({ id: record.id, status: record.status, revisionId: revision.id })), context);
     }
     const items = rows.map(({ record, revision }) => ({ ...serializeDocument(record, revision), status: statuses.get(record.id)! }));
     return { items, total, ...query };
-  });
+  }, { isolationLevel: 'repeatable read' });
 }
 export async function getDocument(id: string, actorId: string) {
   return db.transaction(async (tx) => { const { record, revision } = await lockedDocument(tx, id, actorId); const validations = await tx.select().from(documentValidations).where(and(eq(documentValidations.documentId, id), eq(documentValidations.revisionId, revision.id))).orderBy(desc(documentValidations.checkedAt)).limit(1);
     const document = serializeDocument(record, revision); if (!['cancelled', 'superseded'].includes(record.status)) { const [file] = await tx.select({ id: documentExports.id }).from(documentExports).where(and(eq(documentExports.status, 'completed'), sql`${documentExports.reference}->>'documentId' = ${id}`)).limit(1); if (file && !(await documentDependencyValidityInTx(tx, id, revision.id, actorId)).valid) document.status = 'stale'; }
     return { document, validation: validations[0] ? { documentId: id, version: record.version, valid: validations[0].valid, issues: validations[0].issues, checkedAt: validations[0].checkedAt.toISOString() } : null }; });
 }
-export async function documentDependencyValidityInTx(tx: BatchTx, documentId: string, revisionId: string, actorId: string): Promise<{ valid: boolean; invalidReason: string | null }> {
-  const { record } = await lockedDocument(tx, documentId, actorId);
+export async function documentDependencyValidityInTx(tx: BatchTx, documentId: string, revisionId: string, actorId: string, context?: DocumentReadContext): Promise<{ valid: boolean; invalidReason: string | null }> {
+  const { record } = await lockedDocument(tx, documentId, actorId, undefined, context);
   if (record.currentRevisionId !== revisionId || ['cancelled', 'superseded', 'stale'].includes(record.status)) return { valid: false, invalidReason: '单据已取消、来源作废、被替代或已有新修订，历史文件仅供追溯。' };
-  const validation = await validateDocumentInTx(tx, documentId, actorId);
+  const validation = await validateDocumentInTx(tx, documentId, actorId, undefined, context);
   const invalidReason = documentDependencyInvalidReason(validation.issues);
   if (invalidReason) return { valid: false, invalidReason };
   return { valid: true, invalidReason: null };
 }
-export async function validateDocumentInTx(tx: BatchTx, id: string, actorId: string, expectedVersion?: number): Promise<DocumentValidation> {
-  const { record, revision } = await lockedDocument(tx, id, actorId, expectedVersion), issues = validateDocumentData(revision.data);
+export async function validateDocumentInTx(tx: BatchTx, id: string, actorId: string, expectedVersion?: number, context?: DocumentReadContext): Promise<DocumentValidation> {
+  const { record, revision } = await lockedDocument(tx, id, actorId, expectedVersion, context), issues = validateDocumentData(revision.data);
   if (revision.data.generationRulesVersion === 'v2' && revision.data.members.length) {
-    const evidence = await hydrateDocumentAddressCodeSourcesInTx(tx, revision.data, true);
+    const evidence = await hydrateDocumentAddressCodeSourcesInTx(tx, revision.data, true, context);
     issues.push(...validateDocumentAddressCode(evidence, await loadDocumentAddressCodeCatalog().catch(addressCodeCatalogFailure)));
     if (evidence.members.some((member) => member.sourceCandidates?.issues.some((issue) => issue.code === 'DOCUMENT_SOURCE_FILE_INVALID'))) issues.push({ code: 'DOCUMENT_SOURCE_FILE_INVALID', severity: 'error', message: 'B3 采用的领星货件原始文件缺失、身份无效或哈希不符，请重新核实来源。' });
   }
   if (['cancelled', 'superseded', 'stale'].includes(record.status)) issues.push({ code: 'DOCUMENT_READ_ONLY', severity: 'error', message: '单据已取消、来源作废或被替代，不能生成，请建立更正。' });
-  const candidates = await documentCandidatesInTx(tx, actorId, { shippingRunId: revision.data.shippingRunId }), current = new Map(candidates.items.map((item) => [item.demandId, item]));
+  const candidates = await documentCandidatesInTx(tx, actorId, { shippingRunId: revision.data.shippingRunId }, context ? { context, demandIds: revision.data.members.map((member) => member.demand.id) } : {}), current = new Map(candidates.items.map((item) => [item.demandId, item]));
   for (const member of revision.data.members) {
     const candidate = current.get(member.demand.id);
     if (!candidate || documentDigest(documentM2SourceReference(memberFromCandidate(candidate).source)) !== documentDigest(documentM2SourceReference(member.source))) issues.push(blocker('DOCUMENT_SOURCE_STALE', '来源制表确认版本已变化，请显式采用当前来源或发起更正。', member.source.groupId, member.demand.id));
     else issues.push(...candidate.blockers);
     if (member.physical?.snapshot.source.snapshotIds.length) {
-      const historical = await loadDocumentSourceCandidates(tx, member);
+      const historical = await loadDocumentSourceCandidates(tx, member, context);
       if (historical.issues.some((issue) => issue.code === 'DOCUMENT_SOURCE_FILE_INVALID')) issues.push(blocker('DOCUMENT_SOURCE_FILE_INVALID', '本票历史来源文件无法通过哈希或身份校验，请联系管理员处理。', member.source.groupId, member.demand.id));
     }
   }
   for (const reference of revision.data.profileReferences) {
     if (!documentUsesProfileReference(revision.data, reference)) continue;
-    const [profile] = await tx.select().from(documentProfiles).where(eq(documentProfiles.id, reference.profileId)).for('share');
-    const [version] = await tx.select().from(documentProfileVersions).where(and(eq(documentProfileVersions.profileId, reference.profileId), eq(documentProfileVersions.version, reference.version)));
+    const readProfile = () => tx.select().from(documentProfiles).where(eq(documentProfiles.id, reference.profileId)).for('share');
+    const readVersion = () => tx.select().from(documentProfileVersions).where(and(eq(documentProfileVersions.profileId, reference.profileId), eq(documentProfileVersions.version, reference.version)));
+    const [profile] = await (context ? context.memo('profile', reference.profileId, async () => readProfile()) : readProfile());
+    const [version] = await (context ? context.memo('profile-version', [reference.profileId, reference.version], async () => readVersion()) : readVersion());
     if (!profile || profile.status !== 'active' || profile.category !== reference.category || !version || documentDigest(version.data) !== documentDigest(reference.data)) issues.push({ code: 'DOCUMENT_PROFILE_STALE', severity: 'error', message: '引用资料版本已停用或无法核验，请重新选择。', profileCategory: reference.category });
   }
   if (revision.data.generationRulesVersion === 'v2') {
     const sources = new Map((revision.data.productSourceFacts ?? []).map((fact) => [fact.sourceFileId, fact.sourceSha256]));
     for (const [sourceFileId, sourceSha256] of sources) {
       try {
-        const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, sourceFileId));
+        const readFile = () => tx.select().from(fileIndex).where(eq(fileIndex.id, sourceFileId));
+        const [file] = await (context ? context.memo('file', sourceFileId, async () => readFile()) : readFile());
         if (!file || file.sha256 !== sourceSha256) throw new Error('Source archive is missing or changed');
-        await checkedFileBytes(file);
+        await (context ? context.fileBytes(file) : checkedFileBytes(file));
       } catch {
         issues.push({ code: 'DOCUMENT_SOURCE_FILE_INVALID', severity: 'error', message: '领星商品及箱规来源归档缺失或哈希不符，请重新查询并采用资料。' });
       }
     }
   }
   if (revision.data.templateReference) {
-    const reference = revision.data.templateReference, [template] = await tx.select().from(documentTemplates).where(eq(documentTemplates.id, reference.templateId)).for('share');
-    const [version] = await tx.select().from(documentTemplateVersions).where(and(eq(documentTemplateVersions.templateId, reference.templateId), eq(documentTemplateVersions.version, reference.version)));
+    const reference = revision.data.templateReference;
+    const readTemplate = () => tx.select().from(documentTemplates).where(eq(documentTemplates.id, reference.templateId)).for('share');
+    const readVersion = () => tx.select().from(documentTemplateVersions).where(and(eq(documentTemplateVersions.templateId, reference.templateId), eq(documentTemplateVersions.version, reference.version)));
+    const [template] = await (context ? context.memo('template', reference.templateId, async () => readTemplate()) : readTemplate());
+    const [version] = await (context ? context.memo('template-version', [reference.templateId, reference.version], async () => readVersion()) : readVersion());
     if (!template || template.status !== 'active' || template.purpose !== revision.data.purpose || version?.sha256 !== reference.sha256 || version?.fileId !== reference.fileId) issues.push({ code: 'DOCUMENT_TEMPLATE_STALE', severity: 'error', message: '引用模板版本已停用或无法核验。' });
   }
   const { validateWorkbookData } = await import('./workbook.js');
