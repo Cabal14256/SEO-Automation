@@ -1,6 +1,6 @@
 import * as SelectPrimitive from '@radix-ui/react-select';
 import { Check, ChevronDown, ChevronUp } from 'lucide-react';
-import { useCallback, useEffect, useState, type AriaAttributes } from 'react';
+import { useCallback, useEffect, useState, type AriaAttributes, type ClipboardEventHandler } from 'react';
 import { cn } from '@/lib/utils';
 import { useControlDisabled } from './use-control-disabled';
 
@@ -15,13 +15,14 @@ export type SelectFieldProps = AriaAttributes & {
   required?: boolean;
   name?: string;
   className?: string;
+  onPaste?: ClipboardEventHandler<HTMLElement>;
 };
 
 // Radix reserves an empty value for its placeholder. Encode every option so
 // existing API values (including "" for an unrestricted filter) stay intact.
 const encode = (value: string) => `option:${value}`;
 
-export function SelectField({ id, value, onValueChange, options, placeholder = '请选择', disabled, required, name, className, ...aria }: SelectFieldProps) {
+export function SelectField({ id, value, onValueChange, options, placeholder = '请选择', disabled, required, name, className, onPaste, ...aria }: SelectFieldProps) {
   const [container, setContainer] = useState<HTMLElement | null>(null);
   const [open, setOpen] = useState(false);
   const inherited = useControlDisabled(disabled);
@@ -34,17 +35,23 @@ export function SelectField({ id, value, onValueChange, options, placeholder = '
   useEffect(() => { if (effectiveDisabled) setOpen(false); }, [effectiveDisabled]);
   const selected = options.find((option) => option.value === value);
   const visibleOptions = selected || !value ? options : [{ value, label: value }, ...options];
+  const handlePaste: ClipboardEventHandler<HTMLElement> = (event) => {
+    if (effectiveDisabled) return;
+    onPaste?.(event);
+    if (event.defaultPrevented) setOpen(false);
+  };
   return <SelectPrimitive.Root value={required && !value ? '' : selected || value ? encode(value) : ''} disabled={effectiveDisabled} required={required}
     onValueChange={(next) => { if (!effectiveDisabled) onValueChange(next.slice('option:'.length)); }} open={open && !effectiveDisabled} onOpenChange={setOpen}>
     {name && <input type="hidden" name={name} value={value} disabled={effectiveDisabled} />}
     <SelectPrimitive.Trigger {...aria} id={id} data-slot="select-trigger" data-value={value}
-      ref={triggerRef}
+      ref={triggerRef} onPaste={handlePaste}
       className={cn('ui-control ui-select-trigger', className)}>
       <SelectPrimitive.Value placeholder={placeholder} />
       <SelectPrimitive.Icon asChild><ChevronDown size={16} aria-hidden="true" /></SelectPrimitive.Icon>
     </SelectPrimitive.Trigger>
     <SelectPrimitive.Portal container={container ?? undefined}>
       <SelectPrimitive.Content position="popper" align="start" sideOffset={6} collisionPadding={12} data-slot="select-content" className="ui-select-content"
+        onPaste={handlePaste}
         onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); setOpen(false); }}>
         <SelectPrimitive.ScrollUpButton className="ui-select-scroll"><ChevronUp size={16} aria-hidden="true" /></SelectPrimitive.ScrollUpButton>
         <SelectPrimitive.Viewport className="ui-select-viewport">

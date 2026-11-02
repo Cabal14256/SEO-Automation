@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
 import {
@@ -15,7 +15,7 @@ import { newOperation } from './batch-shared';
 import { LingxingProgress } from './lingxing-progress';
 import {
   candidateValue, clearAutofilled, conflictsWith, currentLookupRecord, emptyOnlineRow, hasOnlineContent, lookupFields,
-  mergeLookupRecord, needsLookupReview, normalFba, onlineColumns, parsePastedCells, refreshLookupEvidence, splitLookupFbas,
+  createOnlineChannelMatcher, mergeLookupRecord, needsLookupReview, normalFba, onlineColumns, parsePastedCells, refreshLookupEvidence, splitLookupFbas,
   trimOnlineRows, onlineTicketPreview, isOnlineChannelSelectable, onlineChannelOptions, type AutofilledValues, type OnlineCellKey, type OnlineDraftRow as DraftRow,
 } from './online-import-grid';
 
@@ -50,12 +50,30 @@ export function OnlineImport({ accepted, active, initialDraft, onDraftChange, on
   const settings = useQuery({ queryKey: ['seller-catalog-settings'], queryFn: api.sellerCatalogSettings, retry: false, enabled: active });
   const transportMethods = useQuery({ queryKey: ['lingxing-transport-methods'], queryFn: api.transportMethods, retry: false, staleTime: 5 * 60_000,
     enabled: active && (!deferLookup || showSupplement || rows.some((row) => Boolean(row.value.channel))) });
+  const matchChannel = useMemo(() => createOnlineChannelMatcher(transportMethods.data?.items ?? []), [transportMethods.data]);
   const locked = busy || submittedPayload.current !== null;
   const canChangeRejectedSubmission = submitError instanceof ApiError && submitError.status >= 400 && submitError.status < 500 && submitError.status !== 408;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { const included = trimOnlineRows(rows); onDraftChange?.({ rows: included.map((row) => row.value), autofilled: included.map((row) => row.autofilled ?? {}), startDate, endDate, operationId: operation, ...(submittedPayload.current ? { pendingSubmission: submittedPayload.current } : {}) }); }, [rows, startDate, endDate, operation, busy, stage, submitError, onDraftChange]);
   useEffect(() => { onBusyChange?.(busy); return () => onBusyChange?.(false); }, [busy, onBusyChange]);
   useEffect(() => { if (settings.error instanceof ApiError && settings.error.status === 401) void client.invalidateQueries({ queryKey: ['session'] }); }, [settings.error, client]);
+  useEffect(() => {
+    if (!active || !transportMethods.data || locked || running.current) return;
+    // A spreadsheet may be pasted before the dictionary finishes loading.
+    // Resolve editable inputs then, while retaining uncertain submission snapshots.
+    setRows((current) => {
+      let changed = false;
+      const next = current.map((row) => {
+        const channel = matchChannel(row.value.channel).value;
+        if (channel === row.value.channel) return row;
+        changed = true;
+        const value = { ...row.value, channel }, autofilled = { ...row.autofilled };
+        delete value.lookupId; delete value.lookupSid; delete autofilled.channel;
+        return refreshLookupEvidence({ ...row, value, autofilled });
+      });
+      return changed ? next : current;
+    });
+  }, [active, transportMethods.data, matchChannel, locked]);
   const resetSubmission = () => { setOperation(newOperation()); setError(null); setSubmitError(null); setUseCurrent(false); };
   const edit = (id: string, key: OnlineCellKey, text: string) => {
     if (locked || running.current) return;
@@ -75,7 +93,7 @@ export function OnlineImport({ accepted, active, initialDraft, onDraftChange, on
   const paste = (event: ClipboardEvent<HTMLElement>, rowIndex: number, columnIndex: number) => {
     if (locked || running.current) return;
     const text = event.clipboardData.getData('text/plain');
-    if (!/[\t\r\n]/.test(text)) return;
+    if (!text || (onlineColumns[columnIndex]?.key !== 'channel' && !/[\t\r\n]/.test(text))) return;
     event.preventDefault();
     const pasted = parsePastedCells(text);
     if (pasted.length + rowIndex > 1000 || pasted.some((cells) => cells.length + columnIndex > onlineColumns.length || cells.some((cell) => cell.length > 2000))) {
@@ -93,7 +111,7 @@ export function OnlineImport({ accepted, active, initialDraft, onDraftChange, on
         }
         cells.forEach((cell, column) => {
           const key = onlineColumns[columnIndex + column]!.key;
-          row.value[key] = cell;
+          row.value[key] = key === 'channel' ? matchChannel(cell).value : cell;
           if (lookupFields.some((field) => field === key)) { delete row.autofilled?.[key as typeof lookupFields[number]]; delete row.value.lookupId; delete row.value.lookupSid; }
         });
       });
@@ -221,7 +239,7 @@ export function OnlineImport({ accepted, active, initialDraft, onDraftChange, on
     <p className="mapping-help">粘贴本次发货的 FBA 清单，每票之间留一行空白。连续空行只分隔一次，首尾空行忽略。{deferLookup ? '只填 FBA 即可，提交后后台自动补全和整理。' : '补全后自动解析，再核对源行与差异。'}</p>
     {(!deferLookup || showSupplement) && <div className="mapping-help" aria-live="polite">
       {transportMethods.isPending ? '正在读取领星运输方式…' : transportMethods.isError ? <><span className="error-note">运输方式读取失败：{messageOf(transportMethods.error)}。已保留填写内容。</span> <Button type="button" variant="text" icon={RefreshCw} disabled={locked || transportMethods.isFetching} onClick={() => void transportMethods.refetch()}>重试读取运输方式</Button></> : <>
-        业务渠道从领星运输方式中选择；停用项不可新选，留空可按 FBA 自动补全。{transportMethods.data?.items.every((method) => !method.enabled) && '领星当前没有已启用的运输方式。'}
+        业务渠道可下拉选择，也可点击渠道框后直接粘贴表格的一列，从当前行向下填入。拼音首字母缩写会自动匹配当前已启用的运输方式，不区分大小写；完整名称优先。多个匹配、停用或未识别的值会保留并提示选择，留空可按 FBA 自动补全。{transportMethods.data?.items.every((method) => !method.enabled) && '领星当前没有已启用的运输方式。'}
       </>}
     </div>}
     <div className="online-lookup-panel" hidden={deferLookup}>
@@ -238,7 +256,7 @@ export function OnlineImport({ accepted, active, initialDraft, onDraftChange, on
       <table className={`task-table online-grid${deferLookup && !showSupplement ? ' online-grid-fba-only' : ''}`}><thead><tr><th scope="col">行号</th>{onlineColumns.map((column) => <th scope="col" key={column.key} hidden={deferLookup && !showSupplement && column.key !== 'fba'}>{column.label}</th>)}<th scope="col">{deferLookup ? '补全 / 操作' : '查询核对 / 操作'}</th></tr></thead>
         <tbody>{rows.map((row, index) => <tr key={row.id}>
           <th scope="row">{index + 1}</th>
-          {onlineColumns.map((column, columnIndex) => <td key={column.key} hidden={deferLookup && !showSupplement && column.key !== 'fba'} onPaste={column.key === 'channel' ? (event) => paste(event, index, columnIndex) : undefined}>{column.key === 'channel' ? <OnlineChannelField rowId={row.id} rowIndex={index} value={row.value.channel} methods={transportMethods.data?.items} locked={locked} change={(value) => edit(row.id, 'channel', value)} /> : <Input aria-label={`第 ${index + 1} 行${column.label}`} value={row.value[column.key]} placeholder={column.placeholder} maxLength={2000} disabled={locked}
+          {onlineColumns.map((column, columnIndex) => <td key={column.key} hidden={deferLookup && !showSupplement && column.key !== 'fba'}>{column.key === 'channel' ? <OnlineChannelField rowId={row.id} rowIndex={index} value={row.value.channel} candidates={matchChannel(row.value.channel).candidates} methods={transportMethods.data?.items} locked={locked} change={(value) => edit(row.id, 'channel', value)} paste={(event) => paste(event, index, columnIndex)} /> : <Input aria-label={`第 ${index + 1} 行${column.label}`} value={row.value[column.key]} placeholder={column.placeholder} maxLength={2000} disabled={locked}
             aria-invalid={column.key === 'fba' && hasOnlineContent(row.value) && !/^FBA[A-Z0-9]+$/.test(normalFba(row.value.fba))}
             aria-describedby={column.key === 'fba' && hasOnlineContent(row.value) && !/^FBA[A-Z0-9]+$/.test(normalFba(row.value.fba)) ? `online-fba-error-${row.id}` : undefined}
             onChange={(event) => edit(row.id, column.key, event.target.value)} onPaste={(event) => paste(event, index, columnIndex)} />}{column.key === 'fba' && hasOnlineContent(row.value) && !/^FBA[A-Z0-9]+$/.test(normalFba(row.value.fba)) && <small id={`online-fba-error-${row.id}`} className="mapping-subtext error-note">{row.value.fba.trim() ? 'FBA 格式有误，请核对。' : '此行缺少 FBA。'}</small>}</td>)}
@@ -258,13 +276,13 @@ export function OnlineImport({ accepted, active, initialDraft, onDraftChange, on
   </form>;
 }
 
-function OnlineChannelField({ rowId, rowIndex, value, methods, locked, change }: { rowId: string; rowIndex: number; value: string; methods?: TransportMethod[]; locked: boolean; change: (value: string) => void }) {
+function OnlineChannelField({ rowId, rowIndex, value, candidates, methods, locked, change, paste }: { rowId: string; rowIndex: number; value: string; candidates: string[]; methods?: TransportMethod[]; locked: boolean; change: (value: string) => void; paste: (event: ClipboardEvent<HTMLElement>) => void }) {
   const invalid = Boolean(methods && !isOnlineChannelSelectable(value, methods));
   const errorId = `online-channel-error-${rowId}`;
   return <><SelectField id={`online-channel-${rowId}`} aria-label={`第 ${rowIndex + 1} 行业务渠道`} value={value}
     options={onlineChannelOptions(methods ?? [], value)} placeholder={methods ? '留空，按 FBA 自动补全' : '请先读取运输方式'}
-    disabled={locked || !methods} onValueChange={change} aria-invalid={invalid} aria-describedby={invalid ? errorId : undefined} />
-    {invalid && <small id={errorId} className="mapping-subtext error-note">原值已保留，请选择已启用的运输方式，或留空自动补全。</small>}</>;
+    disabled={locked || !methods} onValueChange={change} onPaste={paste} aria-invalid={invalid} aria-describedby={invalid ? errorId : undefined} />
+    {invalid && <small id={errorId} className="mapping-subtext error-note">{candidates.length > 1 ? `拼音缩写“${value.trim()}”匹配到多个运输方式：${candidates.join('、')}，请在下拉框中选择。` : '当前值已保留，请选择已启用的运输方式，或留空自动补全。'}</small>}</>;
 }
 
 function LookupReview({ row, apply, disabled }: { row: DraftRow; apply: (candidate: FbaLookupCandidate, channel?: string) => void; disabled: boolean }) {

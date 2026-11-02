@@ -1,4 +1,5 @@
 import type { FbaLookupCandidate, FbaLookupRecord, FbaLookupRow, OnlineImportRow, TransportMethod } from '@scm/contracts';
+import { pinyin } from 'pinyin-pro';
 
 export const onlineColumns = [
   { key: 'fba', label: 'FBA 货件号', placeholder: 'FBA…' },
@@ -12,6 +13,26 @@ export const onlineColumns = [
   { key: 'notes', label: '备注', placeholder: '备注' },
 ] as const;
 export type OnlineCellKey = typeof onlineColumns[number]['key'];
+export type OnlineChannelMatch = { value: string; candidates: string[] };
+/** Index the current dictionary once; abbreviations never invent transport methods. */
+export function createOnlineChannelMatcher(methods: readonly TransportMethod[]) {
+  const actualNames = new Set(methods.map((method) => method.name));
+  const literals = new Map<string, string[]>(), initials = new Map<string, string[]>();
+  for (const name of new Set(methods.filter((method) => method.enabled).map((method) => method.name))) {
+    const abbreviation = pinyin(name, { pattern: 'first', toneType: 'none', type: 'array', nonZh: 'consecutive' })
+      .join('').replace(/[^a-z0-9]/gi, '').toUpperCase();
+    for (const [index, key] of [[literals, name.toUpperCase()], [initials, abbreviation]] as const) {
+      index.set(key, [...(index.get(key) ?? []), name]);
+    }
+  }
+  return (value: string): OnlineChannelMatch => {
+    const trimmed = value.trim();
+    if (!trimmed || actualNames.has(trimmed) || !/^[a-z0-9]+$/i.test(trimmed)) return { value: trimmed, candidates: [] };
+    const key = trimmed.toUpperCase();
+    const candidates = literals.get(key) ?? initials.get(key) ?? [];
+    return { value: candidates.length === 1 ? candidates[0]! : trimmed, candidates };
+  };
+}
 export const isOnlineChannelSelectable = (value: string, methods: TransportMethod[]) => !value.trim() || methods.some((method) => method.enabled && method.name === value);
 export function onlineChannelOptions(methods: TransportMethod[], current: string) {
   const names = new Map<string, boolean>();

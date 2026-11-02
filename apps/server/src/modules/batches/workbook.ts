@@ -6,7 +6,7 @@ import { validateImportArchive } from '../imports/zip-preflight.js';
 import { sortReportBoxes, sortReportRows, summarizeReportTicketCodes } from './report-order.js';
 import { createFbaRowFill } from '../../xlsx-fba-fill.js';
 
-export const REPORT_TEMPLATE_VERSION = 'shipment-record-v8';
+export const REPORT_TEMPLATE_VERSION = 'shipment-record-v9';
 export const INTAKE_HEADERS = {
   products: ['sid', 'FBA', 'MSKU', 'FNSKU', 'SKU', '品名', '申报量'],
   boxes: ['sid', 'FBA', '箱关联键', 'localBoxId', '箱名', 'MSKU', 'FNSKU', 'SKU', '箱内数量', '重量', '重量单位', '长', '宽', '高', '尺寸单位'],
@@ -74,7 +74,7 @@ export async function createReportWorkbook(projection: ShipmentReport, options: 
   const book = new ExcelJS.Workbook(); book.creator = 'SCM'; book.created = new Date(projection.generatedAt); book.modified = book.created;
   const fillFba = createFbaRowFill([...projection.rows.map((row) => row.fba), ...projection.boxes.map((box) => box.fba)]);
   const maxBoxes = projection.rows.reduce((maximum, row) => row.boxes.reduce((last, box) => Math.max(last, box.boxOrder), maximum),
-    projection.boxes.reduce((maximum, box) => Math.max(maximum, box.boxOrder), 5));
+    projection.boxes.reduce((maximum, box) => Math.max(maximum, box.boxOrder), 10));
   if (maxBoxes > 16_000) throw new Error('单票箱数超过 XLSX 列数上限，请改用逐箱明细导出。');
   addProductSheet(book, projection.shippingRunDate ? `${projection.shippingRunDate.replaceAll('-', '')}第${projection.shippingRunSequence}次发货` : options.month ? `${options.month}月汇总` : '发货汇总', projection.rows, maxBoxes, true, fillFba);
   for (const [region, name] of [['US', '美国批次'], ['EU', '欧洲批次'], ['other', '其他国家批次']] as const) {
@@ -95,7 +95,7 @@ export async function createReportWorkbook(projection: ShipmentReport, options: 
   addRow(versions, ['生成时间（上海）', new Date(projection.generatedAt).toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' })]);
   addRow(versions, ['归月口径', projection.shippingRunId ? '本次发货按编号日期归月；仅含本次票成员，货件首次业务日期独立保留' : '按发货次编号日期归月；首次导入业务日期独立保留，未关联历史批次不推算月份和次数']);
   addRow(versions, ['数量口径', '详情申报量逐商品与装箱合计一致；子批次商品合计仅首条展示']);
-  addRow(versions, ['箱列口径', '每个 FBA 按货件内箱序从箱1开始，至少保留5个箱列，超过5箱动态扩列；实际内部箱码在逐箱明细保留']);
+  addRow(versions, ['箱列口径', '每个 FBA 按货件内箱序从箱1开始，至少保留10个箱列，超过10箱动态扩列；实际内部箱码在逐箱明细保留']);
   addRow(versions, ['商品行顺序', '业务票保持连续并按来源票序排列；同票 FBA 按实际箱数升序，同箱数按输入顺序；按整票商品总数量降序建立统一商品顺序，同数量按 SKU 排序，票内所有 FBA 复用此顺序；同 SKU 的不同平台商品身份独立保留']);
   addRow(versions, ['整票编码范围', '每票首行展示完整编码范围，连续码压缩为 A1-A10，缺号分段保留；范围不替代逐箱真实编码']);
   addRow(versions, ['票间分隔', '商品表相邻两票之间保留一整行空白，同票内多个 FBA 连续展示；空白行不计入商品行数或数量']);

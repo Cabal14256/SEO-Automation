@@ -2,7 +2,49 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { importDraftContentSchema } from '../../packages/contracts/dist/import-drafts.js';
-import { currentLookupRecord, emptyOnlineRow, mergeLookupRecord, needsLookupReview, refreshLookupEvidence, splitLookupFbas, trimOnlineRows, onlineTicketPreview, parsePastedCells, isOnlineChannelSelectable, onlineChannelOptions } from '../../apps/web/src/features/online-import-grid.ts';
+import { currentLookupRecord, emptyOnlineRow, mergeLookupRecord, needsLookupReview, refreshLookupEvidence, splitLookupFbas, trimOnlineRows, onlineTicketPreview, parsePastedCells, createOnlineChannelMatcher, isOnlineChannelSelectable, onlineChannelOptions } from '../../apps/web/src/features/online-import-grid.ts';
+
+const method = (name, enabled = true, id = name) => ({ id, name, enabled, remark: '' });
+
+test('pasted pinyin initials resolve to the actual enabled dictionary values', () => {
+  const names = ['海运', '海派', '空派', '快递', '铁运', '卡航'];
+  const match = createOnlineChannelMatcher(names.map((name) => method(name)));
+  const pasted = parsePastedCells(' HY \r\nhp\r\nKP\r\nkd\r\nTy\r\nkh\r\n');
+  assert.deepEqual(pasted.map(([value]) => match(value).value), names);
+  for (const name of names) assert.equal(match(` ${name} `).value, name);
+  for (const value of ['', 'HYKD', '海运整柜', '__proto__']) assert.equal(match(value).value, value);
+  assert.equal(match('  ').value, '');
+});
+
+test('new channel names, phrase pronunciation and mixed identifiers require no fixed alias table', () => {
+  const match = createOnlineChannelMatcher(['欧洲铁路专线', '重庆专线', 'US 海派-2'].map((name) => method(name)));
+  assert.equal(match(' oztlzx ').value, '欧洲铁路专线');
+  assert.equal(match('CQZX').value, '重庆专线');
+  assert.equal(match('ushp2').value, 'US 海派-2');
+  assert.equal(match('OZ').value, 'OZ', 'partial initials never select a different value');
+  assert.equal(match('HY').value, 'HY', 'missing names never become invented dictionary options');
+});
+
+test('ambiguous pinyin initials stay unchanged with distinct candidates for manual selection', () => {
+  const match = createOnlineChannelMatcher([method('海派'), method('海配'), method('海派', true, 'duplicate')]);
+  assert.deepEqual(match(' hp '), { value: 'hp', candidates: ['海派', '海配'] });
+  assert.deepEqual(match('海派'), { value: '海派', candidates: [] }, 'an exact actual value wins');
+  const actualCode = createOnlineChannelMatcher([method('HP'), method('海派'), method('海配')]);
+  assert.equal(actualCode('HP').value, 'HP');
+  assert.equal(actualCode('hp').value, 'HP', 'a literal dictionary value wins over pinyin initials');
+});
+
+test('disabled and unavailable dictionary entries do not resolve abbreviations', () => {
+  const methods = [method('海派'), method('海配', false), method('卡航', false)];
+  const match = createOnlineChannelMatcher(methods);
+  assert.equal(match('HP').value, '海派', 'disabled names do not create ambiguity');
+  assert.equal(match('KH').value, 'KH');
+  assert.equal(match('海配').value, '海配', 'disabled exact values remain visible for correction');
+  assert(isOnlineChannelSelectable(match('HP').value, methods));
+  assert(!isOnlineChannelSelectable(match('KH').value, methods));
+  assert(!isOnlineChannelSelectable(match('HY').value, methods));
+  assert.equal(createOnlineChannelMatcher([])('HP').value, 'HP', 'keep input until the dictionary is available');
+});
 
 test('transport dropdown preserves unknown values and excludes disabled methods from new selections', () => {
   const methods = [{ id: '1', name: '海派', enabled: true, remark: '' }, { id: '2', name: '海卡', enabled: false, remark: '' }];
@@ -18,7 +60,7 @@ test('transport dropdown preserves unknown values and excludes disabled methods 
   assert.equal(onlineChannelOptions([...methods, { ...methods[0], id: '3' }], '').filter((option) => option.value === '海派').length, 1);
 });
 
-// Loading the web module requires only erased contract types, never an application server or credentials.
+// The web matcher and grid helpers run locally without an application server or credentials.
 const row = (fba, values = {}) => ({ id: randomUUID(), value: { ...emptyOnlineRow(), fba, ...values } });
 const candidate = { sid: 101, shop: '测试店铺', country: '美国', destinationFc: 'ONT8', destinationAddress: 'Test address', shipmentCreatedAt: '2026-10-16', channel: '海派', channelStatus: 'unique', channelOptions: [{ name: '海派' }] };
 const record = (fbas, overrides = {}) => ({ id: randomUUID(), status: 'completed', rows: fbas.map((fba) => ({ fba, status: 'unique', candidates: [{ ...candidate, ...overrides }] })) });

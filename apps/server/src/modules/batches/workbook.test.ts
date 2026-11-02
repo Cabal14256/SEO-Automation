@@ -206,10 +206,10 @@ describe('shipment XLSX', () => {
     for (const sheet of [book.worksheets[0]!, book.getWorksheet('欧洲批次')!]) {
       const headers = sheet.getRow(1).values as string[];
       expect(sheet.rowCount).toBe(examples.length + 1);
-      expect(headers.filter((header) => /^箱\d+$/.test(header))).toEqual(['箱1', '箱2', '箱3', '箱4', '箱5']);
+      expect(headers.filter((header) => /^箱\d+$/.test(header))).toEqual(['箱1', '箱2', '箱3', '箱4', '箱5', '箱6', '箱7', '箱8', '箱9', '箱10']);
       for (const [index, example] of examples.entries()) {
-        const expected = [...example.quantities, null, null, null];
-        expect(Array.from({ length: 5 }, (_, offset) => sheet.getCell(index + 2, headers.indexOf(`箱${offset + 1}`)).value)).toEqual(expected);
+        const expected = [...example.quantities, null, null, null, null, null, null, null, null];
+        expect(Array.from({ length: 10 }, (_, offset) => sheet.getCell(index + 2, headers.indexOf(`箱${offset + 1}`)).value)).toEqual(expected);
         expect(sheet.getCell(index + 2, headers.indexOf('FBA货件号')).value).toBe(example.fba);
         expect(sheet.getCell(index + 2, headers.indexOf('SKU')).value).toBe('S-SHARED');
         expect(sheet.getCell(index + 2, headers.indexOf('内部编码')).value).toBe(index === 0 ? 'G1-G2、G7-G12、H1-H2' : null);
@@ -224,7 +224,7 @@ describe('shipment XLSX', () => {
     const detail = book.getWorksheet('逐箱明细')!, headers = detail.getRow(1).values as string[];
     const actual = Array.from({ length: detail.rowCount - 1 }, (_, index) => ['FBA货件号', '内部编码', '货件内箱序', '箱内数量', '发货表箱列'].map((header) => detail.getCell(index + 2, headers.indexOf(header)).value));
     expect(actual).toEqual(examples.flatMap((example) => example.codes.map((code, index) => [example.fba, code, index + 1, example.quantities[index], index + 1])));
-    expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain('shipment-record-v8');
+    expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain('shipment-record-v9');
   });
   it('sorts FBA blocks by box count and input order while retaining real box codes and product totals', async () => {
     const projection = report(), base = projection.rows[0]!, boxBase = projection.boxes[0]!;
@@ -400,7 +400,7 @@ describe('shipment XLSX', () => {
     expect(summary.getCell(3, headers.indexOf('业务日期')).value).toBeInstanceOf(Date);
     expect(summary.getCell(3, headers.indexOf('箱1')).value).toBe(2);
     expect(book.getWorksheet('逐箱明细')!.rowCount).toBe(9);
-    expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain('shipment-record-v8');
+    expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain('shipment-record-v9');
     expect(book.getWorksheet('版本说明')!.getCell('A2').fill).not.toMatchObject({ type: 'pattern', pattern: 'solid' });
   });
   it('imports two-sheet evidence without losing zero or leading zeros', async () => {
