@@ -371,8 +371,8 @@ async function processChecks(state) {
   await expect.poll(() => state.automaticBodies.length).toBe(1); await expect(processStage('成品与导出')).toBeEnabled();
   await processDialog().getByRole('button', { name: '直接进入成品与导出', exact: true }).click(); await currentProcess('成品与导出');
   await processDialog().getByRole('region', { name: '商品及逐箱数量，可横向滚动', exact: true }).locator('tbody').getByRole('checkbox').first().check();
-  await expect(processDialog().getByRole('button', { name: '生成发货表 XLSX', exact: true })).toBeEnabled();
-  await processDialog().getByRole('button', { name: '生成发货表 XLSX', exact: true }).click();
+  await expect(processDialog().getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/ })).toBeEnabled();
+  await processDialog().getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/ }).click();
   await expect(processDialog().getByRole('status').filter({ hasText: '导出任务已受理' })).toBeVisible();
   assert.equal(state.automaticBodies.length, 1); assert.equal(state.confirmBodies.length, 0); assert.equal(state.codeBodies.length, 0); assert.equal(state.exportBodies.length, 1);
   assert.equal(state.exportBodies[0].expectedConfirmations[0].confirmationId, state.confirmations.get(state.primary.id).id);
@@ -483,11 +483,11 @@ async function processFaultChecks() {
   await page.goto('/batches/' + state.batch.id + '?groupId=' + state.primary.id + '&wizard=process');
   await expect(processDialog()).toBeVisible(); await currentProcess('成品与导出');
   await processDialog().getByRole('region', { name: '商品及逐箱数量，可横向滚动', exact: true }).locator('tbody').getByRole('checkbox').first().check();
-  await expect(processDialog().getByRole('button', { name: '生成发货表 XLSX', exact: true })).toBeEnabled();
+  await expect(processDialog().getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/ })).toBeEnabled();
   state.seedCandidate(state.primary.id);
   await processDialog().getByRole('button', { name: '刷新处理数据', exact: true }).click();
   await expect(processDialog().getByText(/当前确认或箱编码尚未就绪/)).toBeVisible(); await currentProcess('成品与导出');
-  const exportButton = processDialog().getByRole('button', { name: '生成发货表 XLSX', exact: true });
+  const exportButton = processDialog().getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/ });
   assert((await exportButton.count()) === 0 || !(await exportButton.isVisible()) || !(await exportButton.isEnabled()), 'stale confirmation must disable/remove cached export action');
   assert.equal(state.exportBodies.length, 0); note(step); await context.close();
 
@@ -499,7 +499,7 @@ async function processFaultChecks() {
   await processDialog().getByRole('region', { name: '商品及逐箱数量，可横向滚动', exact: true }).locator('tbody').getByRole('checkbox').first().check();
   active.syncRuns.set(active.primary.id, [{ run: { id: id(), subBatchId: active.primary.id, groupVersion: active.primary.version, status: 'running', startDate: '2026-09-01', endDate: '2026-10-01', requestBudget: 10, requestsUsed: 0, maxPages: 10, errorCode: null, errorMessage: null, createdAt: now, startedAt: now, completedAt: null }, items: [] }]);
   await processDialog().getByRole('button', { name: '刷新处理数据', exact: true }).click();
-  await expect(processDialog().getByRole('button', { name: '生成发货表 XLSX', exact: true })).toBeDisabled();
+  await expect(processDialog().getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/ })).toBeDisabled();
   await processDialog().getByRole('button', { name: '返回制表确认与编码', exact: true }).click(); await currentProcess('制表确认与编码');
   await expect(processDialog().getByRole('checkbox', { name: /^已核对当前成员/ })).toHaveCount(0);
   await expect(processDialog().getByRole('button', { name: '确认并分配编码', exact: true })).toHaveCount(0);
@@ -594,11 +594,11 @@ async function dateMetadataChecks() {
   await processDialog().getByRole('button', { name: '返回处理步骤', exact: true }).click();
   await currentProcess('成品与导出');
   await processDialog().getByRole('region', { name: '商品及逐箱数量，可横向滚动', exact: true }).locator('tbody').getByRole('checkbox').first().check();
-  await expect(processDialog().getByRole('button', { name: '生成发货表 XLSX', exact: true })).toBeEnabled();
+  await expect(processDialog().getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/ })).toBeEnabled();
   await expect(processStage('实物箱确认')).toHaveCount(0);
   await page.reload(); await currentProcess('成品与导出');
   await processDialog().getByRole('region', { name: '商品及逐箱数量，可横向滚动', exact: true }).locator('tbody').getByRole('checkbox').first().check();
-  await expect(processDialog().getByRole('button', { name: '生成发货表 XLSX', exact: true })).toBeEnabled();
+  await expect(processDialog().getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/ })).toBeEnabled();
   note(step); await context.close();
 }
 

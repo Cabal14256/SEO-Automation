@@ -31,6 +31,17 @@ function fixture() {
   return { item, context, state, services, replay };
 }
 describe('durable automatic invoice stages', () => {
+  it('creates and retries a secondary-run ticket against its own source rather than the primary job run', async () => {
+    const { context, item, services } = fixture(); item.shippingRunId = randomUUID(); context.mode = 'single_workbook';
+    vi.mocked(services.create).mockRejectedValueOnce(new Error('response lost'));
+    await expect(advanceAutomationItem(context, item, services, async () => undefined)).rejects.toThrow('response lost');
+    expect(services.create).toHaveBeenCalledWith(expect.objectContaining({ shippingRunId: item.shippingRunId, demandIds: item.demandIds }));
+    const originalInput = vi.mocked(services.create).mock.calls[0]![0];
+    resetAutomationRetry(item, true);
+    await advanceAutomationItem(context, item, services, async () => undefined);
+    expect(vi.mocked(services.create).mock.calls[1]![0]).toEqual(originalInput);
+    expect(item).toMatchObject({ status: 'ready', shippingRunId: item.shippingRunId });
+  });
   it('stops every new-mode ticket at ready without requesting any per-document export', async () => {
     const first = fixture(), second = fixture(); first.context.mode = 'single_workbook'; second.context.mode = 'single_workbook';
     vi.mocked(first.services.prepare).mockResolvedValue({ document: first.state.document, issues: [{ code: 'VAT_REQUIRED', severity: 'error', message: 'VAT missing' }] });

@@ -11,7 +11,7 @@ import { invoiceBoxPreview, invoiceProductIdentity } from './document-invoice-pr
 import { LingxingProgress } from './lingxing-progress';
 
 const labels: Record<string, string> = {
-  englishName: '英文申报品名', chineseName: '中文申报品名', material: '材质', hsCode: 'HS 编码',
+  englishName: '英文申报品名', chineseName: '中文申报品名', material: '材质', hsCode: '进口国清关 HS 编码',
   use: '用途', brand: '品牌', model: '型号', unit: '申报单位', unitPrice: '申报单价', currency: '币种',
   salesLink: '销售链接', name: '名称', company: '公司', partyName: '主体名称', shopName: '店铺名称',
   companyName: '公司名称', address: '地址', phone: '电话', email: '邮箱', vat: 'VAT',
@@ -23,11 +23,16 @@ const labels: Record<string, string> = {
   subjectName: '主体名称', subjectType: '主体类型', status: '状态', registrationAddress: '注册地址',
   customsMode: '报关方式', clearanceMode: '清关方式', taxMode: '税务方式', tradeTerms: '贸易条款', remarks: '备注',
   unitPriceSourceLabel: '单价来源', salesPrice: 'Listing 普通售价', cartonQuantity: '标准箱规件数',
+  exportHsCode: '中国出口 HS 编码', originCountry: '原产国（地区）', domesticSource: '境内货源地', declarationElements: '其他申报要素',
+  taxExemption: '征免方式', productionSalesName: '生产销售企业名称', productionSalesCode: '生产销售企业代码',
+  firstLegalUnit: '第一法定单位', firstLegalUnitRate: '第一法定单位换算率', secondLegalUnit: '第二法定单位', secondLegalUnitRate: '第二法定单位换算率',
+  quarantineCode: '领星检疫相关原始值', brandType: '品牌类型', exportPreference: '出口享惠情况',
+  productNetWeightGrams: '单件产品净重（g）', productGrossWeightGrams: '单件产品毛重（g）', cartonGrossWeightKg: '装货外箱实重（kg）',
 };
 const productKeys = ['englishName', 'chineseName', 'material', 'hsCode', 'use', 'brand', 'model', 'unit', 'salesLink'];
 const productIssueLabels: Record<string, string> = {
-  LISTING_PRICE_INVALID: '领星售价或币种缺失、无效；本票仍按每件固定单价 2.00 申报。',
-  LISTING_PRICE_UNAVAILABLE: '未取得可采用的领星售价；本票仍按每件固定单价 2.00 申报。',
+  LISTING_PRICE_INVALID: '领星售价或币种缺失、无效；本票仍使用目的国家对应的固定申报单价。',
+  LISTING_PRICE_UNAVAILABLE: '未取得可采用的领星售价；本票仍使用目的国家对应的固定申报单价。',
   CARTON_QUANTITY_UNAVAILABLE: '领星未返回有效的每箱件数，申报数量将回退为本箱全部商品的实际数量；混装请导出后核对。',
   LISTING_PRODUCT_IDENTITY_MISMATCH: '售价记录的店铺、MSKU、FNSKU 或本地 SKU 与本票商品不一致，未采用该售价。',
   LISTING_PRODUCT_AMBIGUOUS: '同一店铺和 MSKU 返回多条售价记录，未自动采用，请核对领星 Listing。',
@@ -98,7 +103,7 @@ export function DocumentLingxing({ documentId, version, data, disabledReason, on
   const fixedPrice = documentInvoicePrice(data);
   return <section className="content-panel document-lingxing" aria-labelledby={`${id}-title`} aria-busy={mutation.isPending}>
     <div className="section-heading"><h3 id={`${id}-title`}>从领星补齐资料</h3><Button type="button" icon={RefreshCw} loading={querying} disabled={disabled} onClick={query}>{preview ? '重新查询领星资料' : '查询领星资料'}</Button></div>
-    <p className="mapping-help">按本票商品和店铺查询标准箱规、申报资料与图片。申报单价固定为每件 2.00，沿用本票币种。先核对预览，再采用到当前单据。</p>
+    <p className="mapping-help">按本票商品和店铺查询标准箱规、申报资料与图片。本票申报单价为每件 {fixedPrice.unitPrice} {fixedPrice.currency}。先核对预览，再采用到当前单据。</p>
     {disabledReason && <p className="mapping-help">{disabledReason}</p>}
     {queryStatus && <LingxingProgress label="领星单据资料查询" status={queryStatus} startedAt={mutation.variables?.phase === 'preview' ? mutation.submittedAt : undefined} detail={querying ? '正在查询并整理领星商品、主体与图片资料，等待服务器返回并归档结果。' : queryStatus === 'failed' ? '本次查询未完成，请核对提示后重试。' : queryStatus === 'partial' ? '本次查询已结束，仍有资料需核对或补齐。' : '本次查询已结束，请核对结果后采用。'} />}
     {mutation.isError && <p className="form-note error-note" role="alert"><CircleAlert size={16} aria-hidden="true" />{messageOf(mutation.error)}{mutation.error instanceof ApiError && mutation.error.status === 409 ? ' 请重新读取单据，再查询最新资料。' : ' 可核对领星授权与资料后重试。'}</p>}
@@ -120,7 +125,7 @@ export function DocumentLingxing({ documentId, version, data, disabledReason, on
       })}</div>}
       {Object.values(preview.fields).some(hasValue) && <details className="document-field-group"><summary>单票候选资料</summary><PreviewValues values={preview.fields} /></details>}
       {preview.parties.length > 0 && <details className="document-field-group"><summary>备货主体候选 · {preview.parties.length} 项</summary><p className="mapping-help">此列表供核对公司备货主体，不会自动确定本票卖方主体。</p>{preview.parties.map((party, index) => <PreviewValues key={index} values={party} />)}</details>}
-      <p className="mapping-help">采用后更新商品资料和标准箱规快照。申报单价固定为每件 2.00，无需勾选价格确认或补充售价。</p>
+      <p className="mapping-help">采用后更新商品资料和标准箱规快照。本票申报单价为每件 {fixedPrice.unitPrice} {fixedPrice.currency}，无需勾选价格确认或补充售价。</p>
       <div className="field document-reason"><label htmlFor={`${id}-reason`}>采用原因</label><Input id={`${id}-reason`} value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} disabled={disabled} /></div>
       <div className="document-footer-actions"><Button type="button" icon={ArrowRight} variant="primary" loading={mutation.isPending && mutation.variables.phase === 'apply'} disabled={disabled || !reason.trim()} onClick={apply}>采用领星资料补齐空项</Button><span className="mapping-help">商品资料补齐空项，箱规采用本次查询结果。采用后生成新修订，请重新校验。</span></div>
     </div>}

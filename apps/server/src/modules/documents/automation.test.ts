@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { PgBoss } from 'pg-boss';
 import type { DocumentCandidate, DocumentRevisionData } from '@scm/contracts';
+import { documentAutomationStartInputSchema } from '@scm/contracts';
 const mocks = vi.hoisted(() => ({ transaction: vi.fn(), actor: vi.fn(), candidates: vi.fn(), locked: vi.fn(), connect: vi.fn(), log: vi.fn(), requirements: vi.fn(), supplement: vi.fn() }));
 vi.mock('../../db/client.js', () => ({ db: { transaction: mocks.transaction }, pool: { connect: mocks.connect } }));
 vi.mock('../../errors.js', () => ({ logError: mocks.log }));
@@ -73,8 +74,9 @@ describe('persistent invoice automation submissions and recovery', () => {
   });
   function ownedDraft(row: Row, item = row.items[0]!, orphan = false) {
     const documentId = randomUUID(), version = orphan ? 1 : 3;
-    const data = { shippingRunId: row.shippingRunId, members: item.demandIds.map((id) => ({ demand: { id } })) } as DocumentRevisionData;
-    const input = { operationId: automationOperationId(row.id, item.id, 'create'), shippingRunId: row.shippingRunId, purpose: 'invoice', demandIds: item.demandIds, title: '自动发票', fields: {} };
+    const shippingRunId = item.shippingRunId ?? row.shippingRunId;
+    const data = { shippingRunId, members: item.demandIds.map((id) => ({ demand: { id } })) } as DocumentRevisionData;
+    const input = { operationId: automationOperationId(row.id, item.id, 'create'), shippingRunId, purpose: 'invoice', demandIds: item.demandIds, title: '自动发票', fields: {} };
     item.operations.create = { input }; item.documentId = orphan ? null : documentId; item.documentVersion = orphan ? null : version;
     operationRows.push({ operationId: input.operationId, action: 'document.create', actorId: row.createdBy, requestHash: documentDigest({ action: 'document.create', input }), result: { documentId, document: { id: documentId, version: 1, currentRevision: { data } } } });
     const saved = { record: { id: documentId, version, createdBy: row.createdBy, purpose: 'invoice', status: 'draft' }, revision: { data } };
@@ -96,6 +98,13 @@ describe('persistent invoice automation submissions and recovery', () => {
     const row = job(), { documentId } = ownedDraft(row, row.items[0], true); jobs = [row];
     const response = await deleteDocumentAutomation(row.id, 'admin', { operationId: randomUUID(), expectedVersion: 4, reason: '取消' });
     expect(response.cancelledDocumentIds).toEqual([documentId]); expect(mocks.locked).toHaveBeenCalledWith(tx, documentId, 'admin');
+  });
+  it('cancels its owned unexported draft from a secondary shipping run', async () => {
+    const row = job(); row.items[0]!.shippingRunId = randomUUID();
+    const { documentId } = ownedDraft(row); jobs = [row];
+    const response = await deleteDocumentAutomation(row.id, 'admin', { operationId: randomUUID(), expectedVersion: 4, reason: '取消跨表任务' });
+    expect(response.cancelledDocumentIds).toEqual([documentId]);
+    expect(updates.find((entry) => entry.table === documents)?.values).toMatchObject({ status: 'cancelled' });
   });
   it.each(['adopted', 'uncommitted', 'different-request', 'changed-version', 'exported', 'other-task', 'different-scope'])('preserves a %s document and every claim', async (kind) => {
     const row = job(), { documentId, saved } = ownedDraft(row); jobs = [row];
@@ -192,6 +201,36 @@ describe('persistent invoice automation submissions and recovery', () => {
     vi.mocked(boss.send).mockResolvedValue(null);
     await expect(startDocumentAutomation(boss, 'admin', { operationId: randomUUID(), shippingRunId: randomUUID() })).rejects.toMatchObject({ code: 'QUEUE_UNAVAILABLE' });
     expect(jobs).toEqual([]); expect(operationRows).toEqual([]);
+  });
+  it('accepts multiple shipping runs once and keeps same-destination invoices scoped to each source', async () => {
+    const runIds = [randomUUID(), randomUUID()], sources = runIds.map(() => candidate());
+    mocks.candidates.mockImplementation(async (_tx, _actor, query) => ({ items: [sources[runIds.indexOf(query.shippingRunId)]!] }));
+    const input = { operationId: randomUUID(), shippingRunIds: runIds, demandIds: sources.map((source) => source.demandId) };
+    const response = await startDocumentAutomation(boss, 'admin', input);
+    expect(response.job).toMatchObject({ shippingRunId: runIds[0], shippingRunIds: runIds, counts: { total: 2, queued: 2 } });
+    expect(jobs[0]!.items.map((item) => item.shippingRunId)).toEqual(runIds);
+    expect(jobs[0]!.items.map((item) => item.demandIds)).toEqual(sources.map((source) => [source.demandId]));
+    expect(boss.send).toHaveBeenCalledOnce();
+    const replay = await startDocumentAutomation(boss, 'admin', input);
+    expect(replay).toEqual({ ...response, replayed: true }); expect(mocks.candidates).toHaveBeenCalledTimes(2);
+  });
+  it('rejects missing, conflicting, duplicate or excessive shipping-run scopes', () => {
+    const operationId = randomUUID(), run = randomUUID(), documentId = randomUUID();
+    for (const scope of [{}, { shippingRunId: run, shippingRunIds: [run] }, { shippingRunIds: [run, run] }, { shippingRunIds: Array.from({ length: 501 }, () => randomUUID()) }, { shippingRunIds: [run], documentId, expectedVersion: 1 }]) {
+      expect(documentAutomationStartInputSchema.safeParse({ operationId, ...scope }).success).toBe(false);
+    }
+    expect(documentAutomationStartInputSchema.safeParse({ operationId, shippingRunId: run }).success).toBe(true);
+    expect(documentAutomationStartInputSchema.safeParse({ operationId, shippingRunIds: [run] }).success).toBe(true);
+  });
+  it('rejects members outside the selected shipping runs before enqueue', async () => {
+    await expect(startDocumentAutomation(boss, 'admin', { operationId: randomUUID(), shippingRunIds: [randomUUID(), randomUUID()], demandIds: [randomUUID()] })).rejects.toMatchObject({ code: 'DOCUMENT_MEMBER_UNAVAILABLE' });
+    expect(boss.send).not.toHaveBeenCalled(); expect(jobs).toEqual([]);
+  });
+  it('enforces the actual 500-member limit when demandIds is omitted across selected runs', async () => {
+    const runIds = [randomUUID(), randomUUID()], sources = Array.from({ length: 501 }, () => candidate());
+    mocks.candidates.mockImplementation(async (_tx, _actor, query) => ({ items: query.shippingRunId === runIds[0] ? sources.slice(0, 250) : sources.slice(250) }));
+    await expect(startDocumentAutomation(boss, 'admin', { operationId: randomUUID(), shippingRunIds: runIds })).rejects.toMatchObject({ code: 'DOCUMENT_MEMBER_LIMIT', status: 422 });
+    expect(boss.send).not.toHaveBeenCalled(); expect(jobs).toEqual([]);
   });
   it('refuses overlapping unfinished work and identifies the resumable existing task', async () => {
     const existing = job(), selected = candidate(); existing.items[0]!.demandIds = [selected.demandId]; jobs = [existing]; mocks.candidates.mockResolvedValue({ items: [selected] });

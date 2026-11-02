@@ -122,7 +122,7 @@ const nav = () => page.getByRole('navigation', { name: '需求与批次导航', 
 const modes = () => page.getByRole('navigation', { name: '发货工作台视图', exact: true });
 const demandTable = () => page.getByRole('region', { name: '需求商品与逐箱明细表，可横向滚动', exact: true });
 const reportTable = () => page.getByRole('region', { name: '商品及逐箱数量，可横向滚动', exact: true });
-const generate = () => page.getByRole('button', { name: '生成发货表 XLSX', exact: true });
+const generate = () => page.getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/ });
 const switchMode = async (name) => { await modes().getByRole('button', { name, exact: true }).click(); await expect(modes().getByRole('button', { name, exact: true })).toHaveAttribute('aria-current', 'page'); };
 const reset = async () => { await form().getByRole('button', { name: '重置', exact: true }).click(); };
 const noOverflow = async () => assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'page body must fit its viewport; wide tables scroll internally');

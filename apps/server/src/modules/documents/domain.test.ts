@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { documentBoxFieldKey, documentCreateInputSchema, documentRevisionInputSchema, documentCorrectInputSchema, documentProductSourceFact, documentRepresentativeProduct, documentRevisionDataSchema, type DocumentMemberSnapshot, type DocumentRevisionData } from '@scm/contracts';
+import { DOCUMENT_INVOICE_PRICING_RULE, documentBoxFieldKey, documentCreateInputSchema, documentRevisionInputSchema, documentCorrectInputSchema, documentExportReferenceSchema, documentProductSourceFact, documentRepresentativeProduct, documentRevisionDataSchema, type DocumentMemberSnapshot, type DocumentRevisionData } from '@scm/contracts';
 import { documentBoxFieldIssues, documentDependencyInvalidReason, documentDigest, documentExportRulesIssue, documentM2SourceReference, documentUsesProfileReference, reviseDocumentBoxFields, shipmentClaimKey, validateDocumentData } from './domain.js';
 
 function fixture(): DocumentRevisionData {
@@ -25,7 +25,18 @@ describe('document immutable snapshot validation', () => {
     expect(documentExportRulesIssue(next, {} as never)?.code).toBe('DOCUMENT_EXPORT_RULES_STALE');
     expect(documentExportRulesIssue(legacy, { generationRulesVersion: 'v2' })?.code).toBe('DOCUMENT_EXPORT_RULES_STALE');
     expect(documentExportRulesIssue(next, { generationRulesVersion: 'v2' })?.code).toBe('DOCUMENT_EXPORT_RULES_STALE');
-    expect(documentExportRulesIssue(next, { generationRulesVersion: 'v2', pricingRule: 'fixed-2' })).toBeNull();
+    expect(documentExportRulesIssue(next, { generationRulesVersion: 'v2', pricingRule: 'fixed-2' })?.code).toBe('DOCUMENT_EXPORT_RULES_STALE');
+    expect(documentExportRulesIssue(next, { generationRulesVersion: 'v2', pricingRule: DOCUMENT_INVOICE_PRICING_RULE })).toBeNull();
+  });
+  it('keeps historical fixed-2 references readable while requiring country pricing for new requests', () => {
+    const data = fixture(), template = data.templateReference!;
+    data.generationRulesVersion = 'v2';
+    const reference = { documentId: randomUUID(), revisionId: randomUUID(), revisionVersion: 1, templateId: template.templateId, templateVersion: template.version, templateSha256: template.sha256,
+      sources: data.members.map((member) => member.source), generationRulesVersion: 'v2', pricingRule: 'fixed-2' };
+    const archived = documentExportReferenceSchema.parse(reference);
+    expect(archived.pricingRule).toBe('fixed-2');
+    expect(documentExportRulesIssue(data, archived)).toMatchObject({ code: 'DOCUMENT_EXPORT_RULES_STALE', severity: 'error' });
+    expect(documentExportReferenceSchema.parse({ ...reference, pricingRule: DOCUMENT_INVOICE_PRICING_RULE }).pricingRule).toBe('fixed-country/v1');
   });
   it('validates a saved exact address-code reference even when its legacy destination FC differs', () => {
     const data = fixture(), member = data.members[0]!;

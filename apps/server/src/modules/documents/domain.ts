@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_BOX_FIELDS, documentAddressDifferences, documentBoxes, documentBoxValue, documentCountryCode, documentInvoiceBoxGroups, documentMemberAddressCode, documentRevisionDataSchema, hasCompleteDocumentAddress, type DocumentCandidate, type DocumentExportReference, type DocumentMemberSnapshot, type DocumentRevisionData, type DocumentSourceReference, type DocumentValidation } from '@scm/contracts';
+import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_BOX_FIELDS, DOCUMENT_INVOICE_PRICING_RULE, documentAddressDifferences, documentBoxes, documentBoxValue, documentCountryCode, documentInvoiceBoxGroups, documentMemberAddressCode, documentRevisionDataSchema, hasCompleteDocumentAddress, withDocumentInvoiceDefaults, type DocumentCandidate, type DocumentExportReference, type DocumentMemberSnapshot, type DocumentRevisionData, type DocumentSourceReference, type DocumentValidation } from '@scm/contracts';
 import { hasAddressConflict, haveDocumentAddressSourcesChanged } from './address.js';
 
 export function documentDigest(value: unknown): string {
@@ -13,7 +13,7 @@ export function documentExportRulesIssue(data: Pick<DocumentRevisionData, 'gener
   if (reference && (reference.generationRulesVersion !== 'v2' || reference.generationRulesVersion !== data.generationRulesVersion)) {
     return { code: 'DOCUMENT_EXPORT_RULES_STALE', severity: 'error', message: '该生成任务使用旧版规则或与单据修订不一致，请查询并采用领星资料后重新生成。' };
   }
-  if (reference && reference.pricingRule !== 'fixed-2') return { code: 'DOCUMENT_EXPORT_RULES_STALE', severity: 'error', message: '该生成任务使用历史申报价格规则，请按固定单价 2.00 重新生成。' };
+  if (reference && reference.pricingRule !== DOCUMENT_INVOICE_PRICING_RULE) return { code: 'DOCUMENT_EXPORT_RULES_STALE', severity: 'error', message: '该生成任务使用历史申报价格规则，请按美国每件 2.30 美元、欧元站点每件 2.00 欧元、英国每件 2.00 英镑的规则重新生成。' };
   return data.generationRulesVersion === 'v2' ? null : { code: 'DOCUMENT_GENERATION_UPGRADE_REQUIRED', severity: 'error', message: '旧草稿请先查询并采用领星商品及箱规资料升级；已有文件请建立更正单据后生成。' };
 }
 /** Local address profiles are historical; hidden product declarations do not gate v2 output. */
@@ -67,7 +67,8 @@ export function documentAddressSourceKey(members: DocumentRevisionData['members'
 
 export function shouldResolveDocumentAddress(data: DocumentRevisionData, previous?: DocumentRevisionData): boolean {
   // A field edit supplied in this revision takes precedence over automatic source defaults.
-  if (previous && documentAddressDifferences(previous.fields, data.fields).length > 0) return false;
+  // Deriving B4 from the same B3 is not a manual address edit.
+  if (previous && documentAddressDifferences(withDocumentInvoiceDefaults(previous.fields, previous.members), withDocumentInvoiceDefaults(data.fields, data.members)).length > 0) return false;
   const sourceChanged = Boolean(previous && (documentAddressSourceKey(previous.members) !== documentAddressSourceKey(data.members) || haveDocumentAddressSourcesChanged(previous.members, data.members)));
   // An intentionally cleared manual address stays empty on subsequent saves in the same scope.
   if (previous && !sourceChanged && data.fields.addressSelectionMode === 'manual') return false;

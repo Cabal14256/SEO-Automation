@@ -3,9 +3,9 @@ import { createPortal } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft, ArrowRight, Filter, X } from 'lucide-react';
 import type { DocumentAutomationJob, DocumentCandidate } from '@scm/contracts';
+import { withDocumentDefaults } from '@scm/contracts';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
-import { SelectField } from '../components/ui/select';
 import { MultiSelect } from '../components/ui/multi-select';
 import { filterMultiSelectOptions } from '../components/ui/multi-select-options';
 import { Check, QueryError } from './batch-shared';
@@ -26,8 +26,9 @@ export function NewDocument({ active, started, resume, onEditorState, actionsCon
   const id = useId();
   const [step, setStep] = useState<'sources' | 'details'>('sources');
   const heading = useRef<HTMLHeadingElement>(null);
-  const [draftRunId, setDraftRunId] = useState('');
-  const [runId, setRunId] = useState('');
+  const [draftRunIds, setDraftRunIds] = useState<string[]>([]);
+  const [runIds, setRunIds] = useState<string[]>([]);
+  const [runSearch, setRunSearch] = useState('');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [title, setTitle] = useState('');
@@ -35,12 +36,27 @@ export function NewDocument({ active, started, resume, onEditorState, actionsCon
   const [prefillScopeChanged, setPrefillScopeChanged] = useState(false);
   const action = useDocumentAction();
   const resetAction = action.reset;
-  useEffect(() => { resetAction(); }, [runId, selected, title, fields, resetAction]);
+  useEffect(() => { resetAction(); }, [runIds, selected, title, fields, resetAction]);
   const existing = useAutomationResume(action.error, resume, { preserveDraft: true, active });
   const locked = action.busy || existing.busy || blocked || !active;
-  useEffect(() => { onEditorState({ dirty: selected.length > 0 || Boolean(title.trim()) || Object.values(fields).some(Boolean), busy: action.busy || existing.busy }); }, [selected.length, title, fields, action.busy, existing.busy, onEditorState]);
+  useEffect(() => { onEditorState({ dirty: draftRunIds.length > 0 || selected.length > 0 || Boolean(title.trim()) || Object.values(fields).some(Boolean), busy: action.busy || existing.busy }); }, [draftRunIds.length, selected.length, title, fields, action.busy, existing.busy, onEditorState]);
   const runs = useQuery({ queryKey: ['shipping-runs'], queryFn: shippingRunApi.list, enabled: active, retry: false });
-  const candidates = useQuery({ queryKey: ['document-candidates', runId], queryFn: () => documentApi.candidates(runId), enabled: active && Boolean(runId), retry: false });
+  const candidates = useQuery({ queryKey: ['document-candidates', runIds], queryFn: async () => {
+    const results = await Promise.all(runIds.map(async (shippingRunId) => {
+      const result = await documentApi.candidates(shippingRunId);
+      return result.items.map((item) => ({ ...item, shippingRunId: item.shippingRunId ?? shippingRunId }));
+    }));
+    const items = [...new Map(results.flat().map((item) => [item.demandId, item])).values()];
+    return { items, total: items.length };
+  }, enabled: active && runIds.length > 0, retry: false });
+  useEffect(() => {
+    if (!candidates.isSuccess) return;
+    const available = new Set(candidates.data.items.map((item) => item.demandId));
+    setSelected((current) => {
+      const next = current.filter((demandId) => available.has(demandId));
+      return next.length === current.length ? current : next;
+    });
+  }, [candidates.data, candidates.isSuccess]);
   const options = useQuery({ queryKey: ['document-field-options'], queryFn: documentApi.fieldOptions, enabled: active, retry: false });
   const shipmentOptions = (candidates.data?.items ?? []).map((item) => ({ value: item.demandId,
     label: `${item.demand.snapshot.fba} · ${item.demand.snapshot.shop} · ${item.demand.snapshot.destinationFc || '目的仓未填写'}`,
@@ -49,7 +65,18 @@ export function NewDocument({ active, started, resume, onEditorState, actionsCon
   const visibleIds = new Set(filterMultiSelectOptions(shipmentOptions, search).map((option) => option.value));
   const visible = (candidates.data?.items ?? []).filter((item) => visibleIds.has(item.demandId));
   const members = (candidates.data?.items ?? []).filter((item) => selected.includes(item.demandId));
-  const canStart = !locked && Boolean(runId) && draftRunId === runId && !candidates.isPending && !candidates.isFetching && !candidates.isError && members.length > 0 && members.length === selected.length;
+  const scopeChanged = JSON.stringify([...draftRunIds].sort()) !== JSON.stringify(runIds);
+  const runSelectionTooLarge = draftRunIds.length > 500;
+  const selectionTooLarge = selected.length > 500;
+  const canStart = !locked && runIds.length > 0 && !scopeChanged && !selectionTooLarge && !candidates.isPending && !candidates.isFetching && !candidates.isError && members.length > 0 && members.length === selected.length;
+  const readCandidates = () => {
+    if (locked || !draftRunIds.length || runSelectionTooLarge || candidates.isFetching) return;
+    if (!scopeChanged) { void candidates.refetch(); return; }
+    if (runIds.length && (title.trim() || Object.values(fields).some(Boolean))) setPrefillScopeChanged(true);
+    const nextRunIds = [...draftRunIds].sort();
+    setRunIds(nextRunIds);
+    setSearch('');
+  };
   const chooseStep = (next: 'sources' | 'details') => { if (!locked && (next === 'sources' || canStart)) setStep(next); };
   useEffect(() => {
     if (!active) return;
@@ -58,29 +85,32 @@ export function NewDocument({ active, started, resume, onEditorState, actionsCon
   }, [active, step]);
   const start = () => {
     if (step !== 'details' || !canStart) return;
-    const input = { shippingRunId: runId, demandIds: members.map((item) => item.demandId), ...(title.trim() ? { title: title.trim() } : {}), fields: Object.fromEntries(Object.entries(fields).filter(([, value]) => value?.trim())) };
+    const input = { ...(runIds.length === 1 ? { shippingRunId: runIds[0] } : { shippingRunIds: runIds }), demandIds: members.map((item) => item.demandId), ...(title.trim() ? { title: title.trim() } : {}), fields: withDocumentDefaults(Object.fromEntries(Object.entries(fields).filter(([, value]) => value?.trim()))) };
     action.run(`automation-start:${JSON.stringify(input)}`, (operationId) => documentAutomationApi.start({ operationId, ...input }), '自动出单任务已开始。', (value) => started((value as { job: DocumentAutomationJob }).job));
   };
   return <div className="document-new-wizard">
     <nav className="import-wizard-progress" aria-label="新建发票步骤"><ol>{([{ value: 'sources', label: '选择货件' }, { value: 'details', label: '出单资料' }] as const).map((item, index) => <li key={item.value} data-current={step === item.value}><button type="button" aria-current={step === item.value ? 'step' : undefined} disabled={locked || item.value === 'details' && !canStart} onClick={() => chooseStep(item.value)}><span className="wizard-step-number" aria-hidden="true">{index + 1}</span><span>{item.label}</span></button></li>)}</ol></nav>
     <section className="content-panel document-new-panel" aria-labelledby={`${id}-new-title`}>
-    <div className="section-heading"><h3 ref={heading} tabIndex={-1} id={`${id}-new-title`}>{step === 'sources' ? '选择本次发货的货件' : '出单资料'}</h3><span>{step === 'sources' ? '支持多选，也可选择当前列表全部货件' : `已选 ${selected.length} 个货件 · 统一检查后生成发票 ZIP 压缩包`}</span></div>
+    <div className="section-heading"><h3 ref={heading} tabIndex={-1} id={`${id}-new-title`}>{step === 'sources' ? '选择发货货件' : '出单资料'}</h3><span>{step === 'sources' ? '支持勾选多个发货次，汇总后可全选货件' : `已选 ${runIds.length} 个发货次 · ${selected.length} 个货件 · 统一检查后生成发票 ZIP 压缩包`}</span></div>
     <div hidden={step !== 'sources'}>
     {runs.isError && <QueryError error={runs.error} retry={() => void runs.refetch()} />}
-    <form className="document-candidate-filters" onSubmit={(event) => { event.preventDefault(); if (locked) return; if (runId && draftRunId !== runId) setPrefillScopeChanged(Boolean(title.trim()) || Object.values(fields).some(Boolean)); setRunId(draftRunId); setSelected([]); setSearch(''); }}>
-      <div className="field"><label htmlFor={`${id}-run`}>发货次</label><SelectField id={`${id}-run`} value={draftRunId} disabled={locked || runs.isFetching} onValueChange={setDraftRunId} options={[{ value: '', label: '请选择发货次' }, ...(runs.data?.items ?? []).map((item) => ({ value: item.id, label: `${item.month} 第 ${item.sequence ?? '待分配'} 次 · ${item.numberingDate}` }))]} /></div>
-      <div className="field"><label htmlFor={`${id}-search`}>查找货件</label><MultiSelect id={`${id}-search`} values={selected} onValuesChange={setSelected} search={search} onSearchChange={setSearch} disabled={locked || !runId || draftRunId !== runId || candidates.isPending || candidates.isFetching || candidates.isError} placeholder="搜索并选择货件，可多选" selectedSummary={`已选 ${selected.length} 个货件`} popupLabel="选择货件" searchPlaceholder="搜索 FBA、店铺、目的仓或制表组…" emptyMessage="没有匹配货件，请换个关键词。" options={shipmentOptions} /></div>
-      <Button icon={Filter} type="submit" disabled={locked || runs.isFetching || !draftRunId} loading={candidates.isFetching}>读取货件</Button>
+    <form className="document-candidate-filters" onSubmit={(event) => { event.preventDefault(); readCandidates(); }}>
+      <div className="field"><label htmlFor={`${id}-run`}>发货次</label><MultiSelect id={`${id}-run`} values={draftRunIds} onValuesChange={setDraftRunIds} search={runSearch} onSearchChange={setRunSearch} disabled={locked || runs.isFetching} placeholder="请选择发货次，可多选" selectedSummary={`已选 ${draftRunIds.length} 个发货次`} popupLabel="选择发货次" searchPlaceholder="搜索月份、发货次或日期…" emptyMessage="没有匹配的发货次，请调整搜索词。" options={(runs.data?.items ?? []).map((item) => ({ value: item.id, label: `${item.month} 第 ${item.sequence ?? '待分配'} 次 · ${item.numberingDate}` }))} /></div>
+      <div className="field"><label htmlFor={`${id}-search`}>查找货件</label><MultiSelect id={`${id}-search`} values={selected} onValuesChange={setSelected} search={search} onSearchChange={setSearch} disabled={locked || !runIds.length || scopeChanged || candidates.isPending || candidates.isFetching || candidates.isError} placeholder="搜索并选择货件，可多选" selectedSummary={`已选 ${selected.length} 个货件`} popupLabel="选择货件" searchPlaceholder="搜索 FBA、店铺、目的仓或制表组…" emptyMessage="没有匹配货件，请换个关键词。" options={shipmentOptions} /></div>
+      <Button icon={Filter} type="submit" disabled={locked || runs.isFetching || !draftRunIds.length || runSelectionTooLarge} loading={candidates.isFetching}>读取货件</Button>
     </form>
+    {runSelectionTooLarge && <p className="form-note error-note" role="alert">单次最多支持 500 个发货次，请减少勾选。</p>}
+    {scopeChanged && runIds.length > 0 && <p className="mapping-help" role="status">发货次选择已更改，请点击“读取货件”更新列表。</p>}
     {search.trim() && <p className="mapping-help">当前搜索：{search} · 匹配 {visible.length} 个货件 <Button type="button" variant="text" disabled={locked} onClick={() => setSearch('')}>清除搜索</Button></p>}
-    {!runId ? <p className="list-state">先选择发货次并读取货件。</p> : candidates.isPending ? <p className="list-state" role="status">正在读取本次发货的货件…</p> : candidates.isError ? <QueryError error={candidates.error} retry={() => void candidates.refetch()} /> : candidates.data.items.length === 0 ? <p className="list-state">本次暂无有效制表确认的货件。请先在发货批次中完成 M2 制表确认与编码。</p> : <>
-      <div className="document-selection-bar"><Check checked={visible.length > 0 && visible.every((item) => selected.includes(item.demandId))} disabled={locked || draftRunId !== runId} onChange={(checked) => setSelected((current) => checked ? [...new Set([...current, ...visible.map((item) => item.demandId)])] : current.filter((item) => !visible.some((candidate) => candidate.demandId === item)))}>选择当前列表</Check><span>已选 {selected.length} 个 FBA</span></div>
-      <CandidateGrid rows={visible} selected={selected} setSelected={setSelected} active={active && step === 'sources'} locked={locked || draftRunId !== runId} scopeKey={`${runId}:${search}`} />{visible.length === 0 && <p className="list-state">未找到匹配货件，请调整搜索词。</p>}
+    {!runIds.length ? <p className="list-state">先选择一个或多个发货次，再读取货件。</p> : candidates.isPending ? <p className="list-state" role="status">正在汇总所选发货次的货件…</p> : candidates.isError ? <QueryError error={candidates.error} retry={() => void candidates.refetch()} /> : candidates.data.items.length === 0 ? <p className="list-state">所选发货次暂无有效制表确认的货件。请先在发货批次中完成 M2 制表确认与编码。</p> : <>
+      <div className="document-selection-bar"><Check checked={visible.length > 0 && visible.every((item) => selected.includes(item.demandId))} disabled={locked || scopeChanged || candidates.isFetching} onChange={(checked) => setSelected((current) => checked ? [...new Set([...current, ...visible.map((item) => item.demandId)])] : current.filter((item) => !visible.some((candidate) => candidate.demandId === item)))}>选择当前列表</Check><span>已汇总 {runIds.length} 个发货次 · {candidates.data.total} 个货件 · 已选 {selected.length} 个 FBA</span></div>
+      {selectionTooLarge && <p className="form-note error-note" role="alert">单次最多支持 500 个货件，当前已选 {selected.length} 个。请减少勾选或分批生成。</p>}
+      <CandidateGrid rows={visible} selected={selected} setSelected={setSelected} active={active && step === 'sources'} locked={locked || scopeChanged || candidates.isFetching} scopeKey={`${runIds.join(',')}:${search}`} />{visible.length === 0 && <p className="list-state">未找到匹配货件，请调整搜索词。</p>}
     </>}
     </div>
     <div hidden={step !== 'details'} aria-label="本次出单资料">
-      {prefillScopeChanged && <p className="permission-note warning-note" role="status">已切换发货次，已填写的出单资料仍保留。请核对这些资料是否适用于本次货件，再开始生成。</p>}
-      <p className="mapping-help">下方资料可选填写，用于补齐所选货件的空白字段，已有内容保留。未填写的资料由系统读取档案；仍有缺项时会统一提示。</p>
+      {prefillScopeChanged && <p className="permission-note warning-note" role="status">已调整发货次范围，已填写的出单资料仍保留。请核对这些资料是否适用于本次货件，再开始生成。</p>}
+      <p className="mapping-help">渠道、报关与税务资料可选填写，用于补齐所选货件的空白字段，已有内容保留。渠道服务留空时，系统按每票货件的国家与运输方式读取“设置 → 发票服务映射”；仍有缺项时会统一提示。含电池、含磁性、含液体、含粉末、危险品固定为“否”。</p>
       <div className="field document-title-field"><label htmlFor={`${id}-title`}>任务名称（可选）</label><Input id={`${id}-title`} value={title} maxLength={200} disabled={locked} onChange={(event) => setTitle(event.target.value)} /></div>
       <div className="document-form-grid">{commonFields.map(([key, label]) => <div className="field" key={key}><label htmlFor={`${id}-${key}`}>{label}</label><DocumentField id={`${id}-${key}`} fieldKey={key} value={fields[key] || ''} disabled={locked} onValueChange={(value) => setFields((current) => ({ ...current, [key]: value }))} services={options.data?.services ?? []} servicesLoading={options.isFetching} servicesError={options.isError} retryServices={() => void options.refetch()} /></div>)}</div>
       <p className="mapping-help">系统先读取所选货件资料并整批检查；有缺项时统一填写，全部通过后，每张发票生成独立 Excel 文件并打包为 ZIP；混装提醒不阻止输出。</p>
@@ -99,6 +129,7 @@ function CandidateGrid({ rows, selected, setSelected, active, locked, scopeKey }
     { key: 'rowNumber', title: '#', width: 48, utility: 'number', align: 'center', getValue: () => '' },
     { key: 'selection', title: '选择', width: 48, getValue: () => '', getChecked: (row) => selected.includes(row.demandId), disabled: () => locked, onToggle: choose },
     { key: 'fba', title: 'FBA', width: 190, getValue: (row) => row.demand.snapshot.fba },
+    { key: 'shippingRun', title: '发货次', width: 160, getValue: (row) => row.shippingRunMonth ? `${row.shippingRunMonth} 第 ${row.shippingRunSequence ?? '待分配'} 次` : '—' },
     { key: 'group', title: '批次', width: 200, getValue: (row) => row.groupName },
     { key: 'destinationFc', title: '目的仓', width: 110, getValue: (row) => row.demand.snapshot.destinationFc || '目的仓未填写' },
     { key: 'shop', title: '店铺', width: 160, getValue: (row) => row.demand.snapshot.shop },

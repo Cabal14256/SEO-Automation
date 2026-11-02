@@ -490,7 +490,7 @@ async function reportBehaviorChecks(state) {
   await reportForm().getByLabel('业务月份', { exact: true }).fill('2026-10');
   await chooseOption(reportForm().getByLabel('国家 / 区域', { exact: true }), 'EU');
   const appliedReads = state.reportQueries.length;
-  const generate = page.getByRole('button', { name: '生成发货表 XLSX', exact: true });
+  const generate = page.getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/ });
   await expect(generate).toBeDisabled();
   await expect(page.getByRole('status').filter({ hasText: '筛选条件已修改' })).toBeVisible();
   assert.equal(state.exportBodies.length, 0, 'unapplied filters cannot create an export');

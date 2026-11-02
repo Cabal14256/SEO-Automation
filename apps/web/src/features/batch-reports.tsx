@@ -11,6 +11,7 @@ import { SelectField } from '../components/ui/select';
 import { batchApi } from './batch-api';
 import { BatchPagination, BatchTable, downloadBlob, QueryError, TableSelectionCheckbox, timestamp, useBatchAction } from './batch-shared';
 import { ImportDialog } from './import-dialog';
+import { ShippingExportNotice, usePreviousShippingExport } from './shipping-export-notice';
 import { getReportTicketCodeRanges, getShippingBoxColumns, ShippingBoxQuantityCells, ShippingCodesCell, ShippingProductCells, ShippingShopCell } from './shipping-table-parts';
 import './batch-reports.css';
 
@@ -37,8 +38,11 @@ export function BatchReports({ weeklyBatchId, subBatchId, active = true, workspa
   const [historyOpen, setHistoryOpen] = useState(false);
   const action = useBatchAction();
   const report = useQuery({ queryKey: ['batch-reports', scope, page], queryFn: () => batchApi.reports({ ...workspaceFilters, month, region, q: query, weeklyBatchId, subBatchId, page }), retry: false, enabled: active });
-  const exports = useQuery({ queryKey: ['batch-exports', subBatchId, month], queryFn: () => batchApi.exports({ subBatchId, month }), retry: false, enabled: active && historyOpen, refetchInterval: (query) => active && historyOpen && query.state.data?.some((record) => record.status === 'queued' || record.status === 'running') ? 1500 : false });
   const refs = selection.scope === scope ? [...selection.references.values()].sort((left, right) => left.groupId.localeCompare(right.groupId)) : [];
+  const exports = useQuery({ queryKey: ['batch-exports', subBatchId, month], queryFn: () => batchApi.exports({ subBatchId, month }), retry: false, enabled: active && historyOpen, refetchInterval: (query) => active && historyOpen && query.state.data?.some((record) => record.status === 'queued' || record.status === 'running') ? 1500 : false });
+  const previousGeneration = usePreviousShippingExport(refs.map((ref) => ref.groupId), active);
+  const previousExport = previousGeneration.previous;
+  const frozenSelection = Boolean(report.data?.rows.some((row) => selection.references.has(row.groupId) && ['frozen', '已冻结'].includes(row.status)));
   const availableReferences = new Map(report.data?.confirmations.map((ref) => [ref.groupId, ref]));
   const visibleGroupIds = [...new Set(view === 'products' ? report.data?.rows.map((row) => row.groupId) : report.data?.boxes.filter((box) => box.items.length > 0).map((box) => box.groupId))];
   const visibleReferences = visibleGroupIds.flatMap((groupId) => { const ref = availableReferences.get(groupId); return ref ? [ref] : []; });
@@ -48,7 +52,7 @@ export function BatchReports({ weeklyBatchId, subBatchId, active = true, workspa
   const ticketRanges = getReportTicketCodeRanges(report.data);
   const filtersChanged = workspaceFilters ? workspaceFiltersPending : draftMonth !== month || draftRegion !== region || draftQuery.trim() !== query;
   const selectionDisabled = action.busy || report.isFetching || report.isPending || report.isError || filtersChanged;
-  const canExport = !selectionDisabled && refs.length > 0 && refs.every((ref) => sameReference(ref, availableReferences.get(ref.groupId)));
+  const canExport = !selectionDisabled && !previousGeneration.history.isPending && refs.length > 0 && refs.every((ref) => sameReference(ref, availableReferences.get(ref.groupId)));
   useEffect(() => {
     setPage(1);
     setSelection((current) => current.scope === scope ? current : { scope, references: new Map() });
@@ -108,13 +112,14 @@ export function BatchReports({ weeklyBatchId, subBatchId, active = true, workspa
       {!workspaceFilters && filtersChanged && <p className="form-note" role="status">筛选条件已修改，请点击“筛选”更新列表和导出范围。</p>}
       {workspaceFilters && <div className="field shipping-report-view"><label htmlFor={`${id}-embedded-view`}>明细视图</label><SelectField id={`${id}-embedded-view`} value={view} onValueChange={setView} options={[{ value: 'products', label: '商品及逐箱数量' }, { value: 'boxes', label: '逐箱长表' }]} /></div>}
       <div className="batch-report-toolbar" aria-label="成品表操作">
-        <Button type="button" icon={FileSpreadsheet} loading={action.pendingKey?.startsWith('["export",')} variant="primary" disabled={!canExport} onClick={generateExport}>生成发货表 XLSX</Button>
+        <Button type="button" icon={FileSpreadsheet} loading={action.pendingKey?.startsWith('["export",')} variant="primary" disabled={!canExport} onClick={generateExport}>{previousExport ? '再次生成发货表 XLSX' : '生成发货表 XLSX'}</Button>
         <Button type="button" icon={History} onClick={() => setHistoryOpen(true)}>发货表导出记录</Button>
         <IconButton type="button" icon={RefreshCw} label="刷新成品表" loading={report.isFetching} onClick={() => void report.refetch()} />
         <Button type="button" variant="text" disabled={refs.length === 0 || action.busy} onClick={clearSelection}>清空选择</Button>
         <span className="batch-report-total" role="status">{report.data ? `${report.data.total} 条商品 · 已选 ${refs.length} 个子批次` : '正在读取成品表…'}</span>
       </div>
       <p className="mapping-help batch-report-export-help">勾选表格中的子批次，按完整子批次导出并冻结，每次最多 500 个。月份、区域筛选保留现有报表口径；表格与 XLSX 引用同一确认版本。</p>
+      {refs.length > 0 && <ShippingExportNotice previous={previousExport} frozen={frozenSelection} historyUnavailable={previousGeneration.history.isError} />}
       {selectionNotice && <p className="form-note error-note" role="alert">{selectionNotice}</p>}
       {!historyOpen && action.feedback}
       <div className="section-heading demand-list-heading"><h2 id={`${id}-list-title`}>{view === 'products' ? '商品与逐箱明细' : '逐箱明细'}</h2><span>月份按首次业务日期筛选 · 留空显示全部</span></div>

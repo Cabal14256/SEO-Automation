@@ -242,7 +242,7 @@ try {
     data: { destinationFc: 'TECH-FC', countryCode, recipientName: 'Technical Receiver', addressLine1: '10 Technical Road', city: 'Test City', postalCode: '00000' },
   }, 201)).profile);
   let automatic = (await api<{ document: Document }>('/documents', { operationId: randomUUID(), weekStartDate: week, demandIds: [d2], title: '显式地址与属性默认值技术验证', fields: { battery: '是', dangerous: '否' } }, 201)).document;
-  assert.deepEqual(Object.fromEntries(['battery', 'magnetic', 'liquid', 'powder', 'dangerous'].map((key) => [key, automatic.currentRevision.data.fields[key]])), { battery: '是', magnetic: '否', liquid: '否', powder: '否', dangerous: '否' });
+  assert.deepEqual(Object.fromEntries(['battery', 'magnetic', 'liquid', 'powder', 'dangerous'].map((key) => [key, automatic.currentRevision.data.fields[key]])), { battery: '否', magnetic: '否', liquid: '否', powder: '否', dangerous: '否' });
   assert.equal(automatic.currentRevision.data.profileReferences.filter((reference) => reference.category === 'address').length, 0);
   assert.equal(automatic.currentRevision.data.fields.addressLine1, undefined);
   automatic = await revise(automatic, { fields: applyDocumentAddress(automatic.currentRevision.data.fields, addressDefaults[0]!.data), profileReferences: [{ category: 'address', profileId: addressDefaults[0]!.id, version: addressDefaults[0]!.version, data: {} }] });
@@ -260,7 +260,7 @@ try {
   assert.equal(ambiguous.currentRevision.data.fields.addressLine1, undefined);
   await api(`/documents/${ambiguous.id}/cancel`, docInput(ambiguous));
   for (const profile of [...addressDefaults, duplicate]) await pool.query("update document_profile set status='retired' where id=$1", [profile.id]);
-  await passed('invoice-four-flag-defaults-and-explicit-whole-address-adoption-without-implicit-selection');
+  await passed('invoice-five-fixed-flags-and-explicit-whole-address-adoption-without-implicit-selection');
 
   const lingxingItem = datasets.get(d2)!.items[0]!;
   const manualLingxing = (await api<{ profile: DocumentProfile }>('/document-profiles', { operationId: randomUUID(), category: 'product', key: 'lingxing-acceptance-existing', reason,
@@ -402,7 +402,7 @@ try {
   const complete = await exportRecord(retry.id); assert.equal(complete.status, 'completed'); assert(complete.fileId); assert.equal((await getSubBatchDetail(groupId, actorId)).group.status, 'frozen');
   assert.equal((await pool.query('select count(*) from file_index where id=$1', [complete.fileId])).rows[0].count, '1');
   const bytes = await binary(`/document-exports/${retry.id}/download`), book = new ExcelJS.Workbook(); await book.xlsx.load(bytes as never); const sheet = book.worksheets[0]!;
-  assert.equal(sheet.getCell('B16').value, 12); assert.equal(sheet.getCell('F15').value, 60); assert.equal(sheet.getCell('A18').value, 'FBAM4ISOLATED1U000001-12'); assert.equal(sheet.getCell('J18').value, 500); assert.equal(sheet.getCell('I18').value, 1.25); assert.equal(sheet.getCell('I18').numFmt, '0.00'); assert.equal(sheet.getImages().length, 1); assert.equal(sheet.rowCount, 18);
+  assert.equal(sheet.getCell('B16').value, 12); assert.equal(sheet.getCell('F15').value, 60); assert.equal(sheet.getCell('A18').value, 'FBAM4ISOLATED1U000001-12'); assert.equal(sheet.getCell('J18').value, 500); assert.equal(sheet.getCell('I18').value, 2.3); assert.equal(sheet.getCell('I18').numFmt, '0.00'); assert.equal(sheet.getImages().length, 1); assert.equal(sheet.rowCount, 18);
   assert.equal(sheet.getCell('C18').value, 1.25); assert.equal(sheet.getCell('D18').value, 12.34);
   await api(`/documents/${document.id}/revisions`, { ...docInput(await current(document.id)), fields: { ...modifiedFields, [documentBoxFieldKey(firstBoxId, 'length')]: '99' } }, 409);
   await binary(`/document-exports/${retry.id}/download`, '', 401);

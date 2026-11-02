@@ -52,7 +52,16 @@ function parseDocuments(value: unknown): { items: Document[]; total: number; pag
   };
 }
 
-async function file(path: string): Promise<Blob> {
+function invoiceDownloadName(response: Response): string | null {
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  const encoded = /(?:^|;)\s*filename\*\s*=\s*UTF-8''([^;]*)/i.exec(disposition)?.[1];
+  let name: string | undefined;
+  try { if (encoded) name = decodeURIComponent(encoded.trim()); } catch { /* Use the ASCII fallback when the extended name is malformed. */ }
+  name ??= /(?:^|;)\s*filename\s*=\s*"([^"]*)"/i.exec(disposition)?.[1];
+  return name?.trim() && !/[\\/]/.test(name) && !Array.from(name).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) && name !== '.' && name !== '..' ? name : null;
+}
+
+async function file(path: string, retainInvoiceName = false): Promise<Blob> {
   let response: Response;
   try { response = await fetch(`${base}${path}`, { credentials: 'same-origin' }); }
   catch { throw new ApiError('无法连接文件服务。', 0); }
@@ -61,7 +70,8 @@ async function file(path: string): Promise<Blob> {
     const err = object(body) && object(body.error) ? body.error : body;
     throw new ApiError(object(err) && typeof err.message === 'string' ? err.message : `文件下载失败（${response.status}）`, response.status);
   }
-  return response.blob();
+  const blob = await response.blob(), name = retainInvoiceName ? invoiceDownloadName(response) : null;
+  return name ? new File([blob], name, { type: blob.type }) : blob;
 }
 
 export const documentApi = {
@@ -185,5 +195,5 @@ export const documentApi = {
     return documentTemplateSchema.parse(object(value) && 'template' in value ? value.template : value);
   },
   export: async (id: string) => documentExportSchema.parse(await request(`${base}/document-exports/${pathId(id)}`)),
-  download: (id: string) => file(`/document-exports/${pathId(id)}/download`),
+  download: (id: string) => file(`/document-exports/${pathId(id)}/download`, true),
 };

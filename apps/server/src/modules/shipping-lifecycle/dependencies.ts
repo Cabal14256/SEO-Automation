@@ -4,6 +4,7 @@ import { operationAudit } from '../../db/schema.js';
 import type { BatchTx } from '../batches/service.js';
 import { documentExports, documentMemberClaims, documentRevisions, documents } from '../documents/schema.js';
 import { documentAutomationJobs } from '../documents/automation-schema.js';
+import { documentAutomationRunIds } from '../documents/automation-types.js';
 import { workflowClaims, workflowExports, workflowRecords, workflowRevisions } from '../workflow/schema.js';
 import { documentDigest } from '../documents/domain.js';
 
@@ -46,7 +47,7 @@ export async function invalidateShippingSourcesInTx(tx: BatchTx, scope: Shipping
   }
   const automations = await tx.select().from(documentAutomationJobs).where(isNull(documentAutomationJobs.deletedAt));
   for (const job of automations) {
-    if (!runs.has(job.shippingRunId) && !job.items.some((item) => item.demandIds.some((id) => demands.has(id)) || documentIds.has(item.documentId ?? ''))) continue;
+    if (!documentAutomationRunIds(job).some((id) => runs.has(id)) && !job.items.some((item) => item.demandIds.some((id) => demands.has(id)) || documentIds.has(item.documentId ?? ''))) continue;
     await tx.update(documentAutomationJobs).set({ status: 'blocked', phase: 'failed', version: job.version + 1, queueJobId: null, leaseUntil: null, retryRequests: [],
       error: { code: 'SHIPPING_SOURCE_VOID', message: '发货来源已作废，请重新确认后建立新的出单任务；历史文件保留。' }, updatedAt: now }).where(eq(documentAutomationJobs.id, job.id));
   }

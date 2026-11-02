@@ -9,6 +9,21 @@ function profile(addressCode: string, destinationFc = 'TEST1') {
 }
 
 describe('country currency and shipment address-code defaults', () => {
+  it.each(['TOL3', 'IND9', 'ONT8-12345'])('sets the invoice recipient to adopted address code %s without changing source fields', (addressCode) => {
+    const fields = { addressCode, recipientName: 'Amazon.com Services LLC', recipientCompany: 'Original Company', addressLine1: '9240 Fremont Pike', city: 'PERRYSBURG' };
+    const before = structuredClone(fields);
+    expect(withDocumentInvoiceDefaults(fields, [member('US')])).toMatchObject({ ...fields, recipientName: addressCode });
+    expect(fields).toEqual(before);
+  });
+  it('does not infer a recipient code from destination FC when no address code has been adopted', () => {
+    for (const addressCode of [undefined, null, '', '  ']) {
+      const fields = { ...(addressCode === undefined ? {} : { addressCode }), recipientName: 'Original Receiver' };
+      expect(withDocumentInvoiceDefaults(fields, [member('US', 'IND9')]).recipientName).toBe('Original Receiver');
+    }
+  });
+  it('trims the adopted code identically in both invoice headers', () => {
+    expect(withDocumentInvoiceDefaults({ addressCode: '  IND9  ', recipientName: 'Amazon.com Services LLC' }, [member('US')])).toMatchObject({ addressCode: 'IND9', recipientName: 'IND9' });
+  });
   it('merges sparse Lingxing list/detail addresses within the same FBA', () => {
     const shipment = member('US'), address = profile('ADDR-1').data;
     shipment.sourceCandidates = { products: [], issues: [], addresses: [

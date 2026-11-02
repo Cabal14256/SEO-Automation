@@ -18,7 +18,7 @@ export function DocumentSalesPrice({ data, product, draft, disabled, change }: {
       <div><dt>标准箱规件数</dt><dd>{fact?.cartonQuantity || '缺失，采用全箱实际数量'}</dd></div>
       <div><dt>领星资料时间</dt><dd>{fact ? timestamp(fact.fetchedAt) : '尚未采用资料'}</dd></div>
     </dl>
-    <p className="mapping-help">申报单价固定为每件 2.00，沿用本票币种，无需补充商品售价。</p>
+    <p className="mapping-help">本票申报单价为每件 {unitPrice} {currency}，无需补充商品售价。</p>
     {draft && <p className="mapping-help">本次保留的售价填写不再用于申报单价。<Button type="button" variant="text" disabled={disabled} onClick={() => change(undefined)}>清除本次售价填写</Button></p>}
   </div>;
 }

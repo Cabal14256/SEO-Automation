@@ -5,11 +5,13 @@ import { describe, expect, it } from 'vitest';
 import { createDocumentBundleArchive, extractDocumentArchiveInvoice } from './bundle-archive.js';
 import { createDocumentBundleWorkbook } from './bundle-workbook.js';
 import { DOCUMENT_MAIN_HEADERS } from './workbook.js';
+import type { InvoiceFileNameData } from './invoice-file-name.js';
 
 const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-async function invoice(id: string, address = '10 Road', unitPrice = 2) {
+async function invoice(id: string, address = '10 Road', unitPrice = 2, country = 'US') {
   const book = new ExcelJS.Workbook(), sheet = book.addWorksheet('清关单');
-  sheet.mergeCells('B6:D6'); sheet.getCell('B6').value = address; sheet.getCell('B12').value = 'US'; sheet.getCell('F12').value = '美元';
+  sheet.getCell('B3').value = 'ADDR-001'; sheet.getCell('B4').value = 'ADDR-001';
+  sheet.mergeCells('B6:D6'); sheet.getCell('B6').value = address; sheet.getCell('B12').value = country; sheet.getCell('F12').value = country === 'US' ? '美元' : country === 'GB' ? '英镑' : '欧元';
   sheet.getCell('B16').value = 1; sheet.getCell('F15').value = 5;
   DOCUMENT_MAIN_HEADERS.forEach((label, index) => { sheet.getCell(17, index + 1).value = label; });
   for (let column = 1; column <= 17; column++) sheet.getColumn(column).width = 25;
@@ -20,8 +22,42 @@ async function invoice(id: string, address = '10 Road', unitPrice = 2) {
   return { documentId: id, bytes: Buffer.from(await book.xlsx.writeBuffer()) };
 }
 async function load(bytes: Uint8Array) { const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(bytes) as never); return book; }
+function invoiceData(country = 'US') {
+  return { members: [{ demand: { snapshot: { shop: '测试店铺', country, channel: '海运' } } }], fields: { addressCode: 'ADDR-001', service: '渠道服务' } } as InvoiceFileNameData;
+}
 
 describe('independent invoice Excel files in a ZIP archive', () => {
+  it('names every invoice by business fields and actual boxes, retaining colliding invoices separately', async () => {
+    const inputs = await Promise.all(['A', 'B', 'C'].map(async (id) => ({ ...await invoice(id, '10 Road', 2.3), invoiceData: invoiceData() })));
+    const archive = await createDocumentBundleArchive(inputs, new Date('2026-10-30T16:01:00Z')), entries = unzipSync(archive.bytes);
+    expect(Object.keys(entries)).toEqual(['10.31号测试店铺-US-海运-1件（ADDR-001）.xlsx', '10.31号测试店铺-US-海运-1件（ADDR-001）-2.xlsx', '10.31号测试店铺-US-海运-1件（ADDR-001）-3.xlsx']);
+    for (const [index, metadata] of archive.sheets.entries()) {
+      expect(metadata.fileName).toBe(Object.keys(entries)[index]);
+      const book = await load(extractDocumentArchiveInvoice(archive.bytes, metadata.fileName!));
+      expect(book.worksheets[0]!.getCell('A18').value).toBe(`${['A', 'B', 'C'][index]}-box`);
+      expect(book.worksheets[0]!.getCell('F15').value).toBe(5);
+      expect(book.worksheets[0]!.getCell('J18').value).toBe(500);
+      expect(book.worksheets[0]!.getCell('I18').value).toBe(2.3);
+    }
+  });
+
+  it('keeps US, euro-site and UK invoices separate with each country price and currency', async () => {
+    const cases = [['US', 2.3, '美元'], ['DE', 2, '欧元'], ['GB', 2, '英镑']] as const;
+    const inputs = await Promise.all(cases.map(async ([country, unitPrice]) => ({ ...await invoice(country, '10 Road', unitPrice, country), invoiceData: invoiceData(country) })));
+    const archive = await createDocumentBundleArchive(inputs), entries = unzipSync(archive.bytes);
+    expect(archive.fileCount).toBe(3);
+    for (const [index, metadata] of archive.sheets.entries()) {
+      const [country, unitPrice, currencyLabel] = cases[index]!, book = await load(entries[metadata.fileName!]!), sheet = book.worksheets[0]!;
+      expect(book.worksheets).toHaveLength(1); expect(metadata.documentIds).toEqual([country]);
+      expect(sheet.getCell('I18').value).toBe(unitPrice); expect(sheet.getCell('I18').numFmt).toBe('0.00'); expect(sheet.getCell('F12').value).toBe(currencyLabel);
+      expect(sheet.getCell('J18').value).toBe(500); expect(sheet.getCell('F15').value).toBe(5);
+    }
+  });
+
+  it('rejects the former US 2.00 price when repackaging an invoice with its country metadata', async () => {
+    await expect(createDocumentBundleArchive([{ ...await invoice('US', '10 Road', 2), invoiceData: invoiceData() }])).rejects.toThrow('固定单价规则');
+  });
+
   it('keeps every invoice in its own single-sheet XLSX even when all headers match', async () => {
     const first = await invoice('A'), second = await invoice('B'), original = Buffer.from(first.bytes);
     const archive = await createDocumentBundleArchive([first, second]), entries = unzipSync(archive.bytes);

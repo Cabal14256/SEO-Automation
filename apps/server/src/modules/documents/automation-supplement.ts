@@ -5,7 +5,7 @@ import { documentDigest, validateDocumentData } from './domain.js';
 import { planAutomaticPreparation } from './automatic-preparation.js';
 import { DOCUMENT_HEADER_FIELDS, documentProductOverrideKey, validateWorkbookData } from './workbook.js';
 
-type ContextItem = { id: string; documentId: string | null; documentVersion?: number | null; status?: string; issues?: DocumentValidation['issues'] };
+type ContextItem = { id: string; shippingRunId?: string; documentId: string | null; documentVersion?: number | null; status?: string; issues?: DocumentValidation['issues'] };
 export type DocumentAutomationSupplementContext = { shippingRunId: string; items: readonly ContextItem[] };
 export type DocumentAutomationSupplementTicket = { item: ContextItem; document: Document };
 type Descriptor = DocumentAutomationFieldDescriptor;
@@ -56,9 +56,9 @@ export function buildDocumentAutomationRequirements(tickets: readonly DocumentAu
     const seen = new Set<string>();
     for (const issue of observed) { const key = documentDigest(issue); if (seen.has(key)) continue; seen.add(key); issues.push({ ...issue, itemId: item.id, documentId: document.id }); }
     if (item.status === 'completed' || ['cancelled', 'superseded', 'approved', 'pending_review'].includes(document.status)) continue;
-    const selectedChannel = currentReference(data, profiles, 'channel').selected;
-    const channels = selectedChannel ? [selectedChannel] : applicableProfiles(data, profiles, 'channel');
-    const services = [...new Set(channels.flatMap((profile) => Array.isArray(profile.data.allowedServices) ? profile.data.allowedServices.map(text).filter(Boolean) : [text(profile.data.service)].filter(Boolean)))];
+    const channelReferences = currentReference(data, profiles, 'channel').refs;
+    const explicitChannel = channelReferences.length === 1 ? channelReferences[0]!.data : undefined;
+    const services = explicitChannel ? [...new Set((Array.isArray(explicitChannel.allowedServices) ? explicitChannel.allowedServices : [explicitChannel.service]).map(text).filter(Boolean))] : [];
     for (const key of DOCUMENT_REQUIRED_FIELDS) {
       if ((DOCUMENT_ADDRESS_FIELDS as readonly string[]).includes(key)) continue;
       if (key === 'currency' && documentTicketCurrency(data.members)) continue;
@@ -73,7 +73,12 @@ export function buildDocumentAutomationRequirements(tickets: readonly DocumentAu
       if (defaults.length > 1) header(key, true, defaults);
     }
     for (const category of ['party', 'channel', 'tax'] as const) {
-      const candidates = applicableProfiles(data, profiles, category), saved = currentReference(data, profiles, category);
+      const saved = currentReference(data, profiles, category);
+      const candidates = applicableProfiles(data, profiles, category).filter((profile) => {
+        if (category !== 'channel' || saved.refs.length) return true;
+        const allowed = (Array.isArray(profile.data.allowedServices) ? profile.data.allowedServices : [profile.data.service]).map(text).filter(Boolean);
+        return !allowed.length || Boolean(text(data.fields.service)) && allowed.includes(text(data.fields.service));
+      });
       if (!candidates.length || saved.selected && candidates.some((profile) => profile.id === saved.selected!.id) && saved.refs.length === 1 || !saved.refs.length && candidates.length === 1) continue;
       add({ group: commonScope, fieldKey: `@profile.${category}`, label: `采用${categories[category]}`, kind: 'select', value: saved.selected ? profileValue(saved.selected) : '', required: true, scope: 'common', scopeLabel: commonLabel,
         options: candidates.map((profile) => ({ value: profileValue(profile), label: `${profile.key} · v${profile.version}` })).sort((a, b) => a.value.localeCompare(b.value)), help: '仅采用所选版本；不会修改公共资料。' });
@@ -147,8 +152,7 @@ export function planDocumentAutomationSupplement(tickets: readonly DocumentAutom
     revision.profileReferences = revision.profileReferences.filter((ref) => ref.category !== category || category === 'product' && documentProductOverrideKey(Number(ref.data.sid), { msku: text(ref.data.msku), fnsku: text(ref.data.fnsku), sku: text(ref.data.sku) }) !== identity);
     const selected = profiles.find((entry) => profileValue(entry) === value); if (!selected) continue; revision.profileReferences.push(referenceOf(selected));
     if (category !== 'product') {
-      for (const [key, value] of Object.entries(selected.data)) if (key in DOCUMENT_HEADER_FIELDS && !text(revision.fields[key]) && !(DOCUMENT_ADDRESS_FIELDS as readonly string[]).includes(key) && !['currency', 'orderNumber', 'reference', 'tradeTerms'].includes(key) && text(value)) revision.fields[key] = text(value);
-      if (category === 'channel' && !text(revision.fields.service)) { const services = Array.isArray(selected.data.allowedServices) ? selected.data.allowedServices.map(text).filter(Boolean) : []; if (services.length === 1) revision.fields.service = services[0]!; }
+      for (const [key, value] of Object.entries(selected.data)) if (key in DOCUMENT_HEADER_FIELDS && !text(revision.fields[key]) && !(DOCUMENT_ADDRESS_FIELDS as readonly string[]).includes(key) && !['service', 'currency', 'orderNumber', 'reference', 'tradeTerms'].includes(key) && text(value)) revision.fields[key] = text(value);
     }
   }
   for (const { descriptor, value } of submitted.filter((entry) => !entry.descriptor.targets[0]!.fieldKey.startsWith('@'))) for (const target of descriptor.targets) revisionFor(target).fields[target.fieldKey] = value;
@@ -171,7 +175,7 @@ async function supplementState(tx: BatchTx, actorId: string, context: DocumentAu
   const tickets: DocumentAutomationSupplementTicket[] = [], ids = context.items.flatMap((item) => item.documentId ? [item.documentId] : []);
   if (new Set(ids).size !== ids.length) throw new DocumentError('DOCUMENT_SCOPE_MISMATCH', 422, '任务包含重复单据，请重新读取任务。');
   if (versions && (Object.keys(versions).length !== ids.length || Object.keys(versions).some((id) => !ids.includes(id)))) throw new DocumentError('VERSION_CONFLICT', 409, '整批单据范围已变化，请保留输入并重新读取。');
-  for (const item of [...context.items].filter((item) => item.documentId).sort((a, b) => a.documentId!.localeCompare(b.documentId!))) { const { record, revision } = await lockedDocument(tx, item.documentId!, actorId, versions?.[item.documentId!]); if (revision.data.shippingRunId !== context.shippingRunId) throw new DocumentError('DOCUMENT_SCOPE_MISMATCH', 422, '补充单据不属于当前发货次。'); tickets.push({ item, document: serializeDocument(record, revision) }); }
+  for (const item of [...context.items].filter((item) => item.documentId).sort((a, b) => a.documentId!.localeCompare(b.documentId!))) { const { record, revision } = await lockedDocument(tx, item.documentId!, actorId, versions?.[item.documentId!]); if (revision.data.shippingRunId !== (item.shippingRunId ?? context.shippingRunId)) throw new DocumentError('DOCUMENT_SCOPE_MISMATCH', 422, '补充单据不属于当前发货表。'); tickets.push({ item, document: serializeDocument(record, revision) }); }
   const rows = await tx.select().from(documentProfiles).for('share');
   const templateRows = await tx.select({ template: documentTemplates, version: documentTemplateVersions }).from(documentTemplates).innerJoin(documentTemplateVersions, and(eq(documentTemplateVersions.templateId, documentTemplates.id), eq(documentTemplateVersions.version, documentTemplates.version))).for('share');
   const templates: DocumentTemplate[] = templateRows.map(({ template, version }) => ({ id: template.id, purpose: template.purpose as DocumentTemplate['purpose'], name: template.name, version: template.version, status: template.status as DocumentTemplate['status'], fileId: version.fileId, sha256: version.sha256, mimeType: version.mimeType, createdBy: template.createdBy, createdAt: template.createdAt.toISOString() }));

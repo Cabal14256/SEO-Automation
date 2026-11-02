@@ -9,6 +9,7 @@ const OPERATIONS = Object.freeze({
   listSellers: { method: 'GET', path: '/erp/sc/data/seller/lists' },
   listShipments: { method: 'POST', path: '/erp/sc/data/fba_report/shipmentList' },
   listInboundShipments: { method: 'POST', path: '/erp/sc/routing/storage/shipment/getInboundShipmentList' },
+  getInboundShipmentDetail: { method: 'POST', path: '/erp/sc/routing/storage/shipment/getInboundShipmentListMwsDetail' },
   listLogisticsChannels: { method: 'POST', path: '/erp/sc/data/local_inventory/channelList' },
   listTransportMethods: { method: 'POST', path: '/basicOpen/businessConfig/transportMethod/list' },
   getShipmentDetails: { method: 'POST', path: '/amzStaServer/openapi/inbound-shipment/shipmentDetailList' },
@@ -18,6 +19,8 @@ const OPERATIONS = Object.freeze({
   getListings: { method: 'POST', path: '/erp/sc/data/mws/listing' },
   getLocalProductDetail: { method: 'POST', path: '/erp/sc/routing/data/local_inventory/productInfo' },
   listStockSubjects: { method: 'POST', path: '/basicOpen/stockSubject/list' },
+  searchCustoms: { method: 'POST', path: '/basicOpen/customs/search' },
+  getCustomsDeclarationDetails: { method: 'POST', path: '/supplyShipmentBasic/openApi/customsDeclaration/batchDetail' },
 } as const);
 
 export type LingxingReadOperation = keyof typeof OPERATIONS;
@@ -31,6 +34,9 @@ export type LingxingFbaProductQuery = {
 export type LingxingLocalProductQuery = { id?: number; sku?: string; sku_identifier?: string };
 export type LingxingListingQuery = { sid: string; search_field: 'seller_sku'; search_value: readonly string[]; exact_search: 1; is_delete: 0; offset: number; length: number };
 export type LingxingStockSubjectQuery = { subjectType?: 'PLATFORM' | 'TEAM'; keyword?: string };
+export type LingxingCustomsSearchQuery = { offset: number; length: number; searchType: 3; searchValues: readonly string[] };
+export type LingxingCustomsDeclarationDetailsQuery = { declarationNos: readonly string[] };
+export type LingxingInboundShipmentDetailQuery = { shipment_sn: string };
 export type LingxingReadConfig = Partial<Pick<AppConfig,
   'LINGXING_REQUESTS_ENABLED' | 'LINGXING_APP_ID' | 'LINGXING_APP_SECRET' | 'LINGXING_ACCESS_TOKEN' | 'LINGXING_ENV_FILE' | 'LINGXING_TIMEOUT_MS' | 'DATABASE_URL' | 'BETTER_AUTH_SECRET'>>;
 export type LingxingTokens = { accessToken: string; refreshToken?: string; expiresAt?: number; refreshExpiresAt?: number };
@@ -94,6 +100,9 @@ function validateDocumentReadParameters(operation: LingxingReadOperation, params
   const only = (keys: string[]) => Object.keys(params).every((key) => keys.includes(key));
   const positiveId = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
   const text = (value: unknown) => typeof value === 'string' && value.trim().length > 0 && value.length <= 500;
+  const boundedText = (value: unknown) => typeof value === 'string' && value.trim().length > 0 && value.length <= 100;
+  const identifiers = (value: unknown) => Array.isArray(value) && value.length > 0 && value.length <= 50
+    && value.every(boundedText) && new Set(value).size === value.length;
   let valid = true;
   if (operation === 'getFbaProducts') valid = only(['sids', 'search_field', 'search_value', 'offset', 'length'])
     && Array.isArray(params.sids) && params.sids.length > 0 && params.sids.length <= 20 && params.sids.every(positiveId)
@@ -114,6 +123,13 @@ function validateDocumentReadParameters(operation: LingxingReadOperation, params
   if (operation === 'listStockSubjects') valid = only(['subjectType', 'keyword'])
     && (params.subjectType === undefined || ['PLATFORM', 'TEAM'].includes(String(params.subjectType)))
     && (params.keyword === undefined || text(params.keyword));
+  if (operation === 'searchCustoms') valid = only(['offset', 'length', 'searchType', 'searchValues'])
+    && typeof params.offset === 'number' && Number.isSafeInteger(params.offset) && params.offset >= 0
+    && typeof params.length === 'number' && Number.isSafeInteger(params.length) && params.length > 0 && params.length <= 100
+    && params.searchType === 3 && identifiers(params.searchValues)
+    && (params.searchValues as unknown[]).every((value) => typeof value === 'string' && /^FBA[A-Z0-9]+$/.test(value));
+  if (operation === 'getCustomsDeclarationDetails') valid = only(['declarationNos']) && identifiers(params.declarationNos);
+  if (operation === 'getInboundShipmentDetail') valid = only(['shipment_sn']) && boundedText(params.shipment_sn);
   if (!valid) throw new LingxingReadError('LINGXING_INVALID_REQUEST', '领星单据资料查询参数无效。');
 }
 
@@ -175,6 +191,7 @@ export class LingxingReadClient {
   listSellers() { return this.read('listSellers'); }
   listShipments(params: Readonly<Record<string, unknown>>) { return this.read('listShipments', params); }
   listInboundShipments(params: Readonly<Record<string, unknown>>) { return this.read('listInboundShipments', params); }
+  getInboundShipmentDetail(params: LingxingInboundShipmentDetailQuery) { return this.read('getInboundShipmentDetail', params); }
   listLogisticsChannels(params: Readonly<Record<string, unknown>>) { return this.read('listLogisticsChannels', params); }
   listTransportMethods(params: Readonly<Record<string, unknown>> = {}) { return this.read('listTransportMethods', params); }
   getShipmentDetails(params: Readonly<Record<string, unknown>>) { return this.read('getShipmentDetails', params); }
@@ -184,6 +201,8 @@ export class LingxingReadClient {
   getListings(params: LingxingListingQuery) { return this.read('getListings', params); }
   getLocalProductDetail(params: LingxingLocalProductQuery) { return this.read('getLocalProductDetail', params); }
   listStockSubjects(params: LingxingStockSubjectQuery = {}) { return this.read('listStockSubjects', params); }
+  searchCustoms(params: LingxingCustomsSearchQuery) { return this.read('searchCustoms', params); }
+  getCustomsDeclarationDetails(params: LingxingCustomsDeclarationDetailsQuery) { return this.read('getCustomsDeclarationDetails', params); }
 
   redact(value: unknown): unknown {
     if (typeof value === 'string') {

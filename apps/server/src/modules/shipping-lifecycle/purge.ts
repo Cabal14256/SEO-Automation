@@ -81,8 +81,10 @@ async function inspectScopeInTx(tx: BatchTx, scope: Scope): Promise<Inspection> 
     }
   }
   if (type === 'run') {
-    if ((await rows(tx, sql`SELECT j.id FROM document_automation_job j WHERE j.shipping_run_id=${id}::uuid
+    if ((await rows(tx, sql`SELECT j.id FROM document_automation_job j WHERE (j.shipping_run_id=${id}::uuid OR j.items @> ${JSON.stringify([{ shippingRunId: id }])}::jsonb)
       AND (j.status IN ('queued','running') OR j.bundle->>'status'='completed'
+        OR j.shipping_run_id<>${id}::uuid
+        OR EXISTS (SELECT 1 FROM jsonb_array_elements(j.items) AS item(value) WHERE item.value->>'shippingRunId' <> ${id})
         OR EXISTS (SELECT 1 FROM document_invoice_bundle b WHERE b.job_id=j.id)
         OR EXISTS (SELECT 1 FROM jsonb_array_elements(j.items) AS item(value) WHERE item.value->>'documentId' IS NOT NULL)) LIMIT 1`)).length) {
       reasons.push('自动出单任务仍在处理或已关联单据、整批文件，须保留发货次来源。');

@@ -51,6 +51,7 @@ function fixture() {
   shippingRunListSchema.parse({ items: runs });
   for (const [shippingRunId, items] of byRun) documentCandidateListSchema.parse({ items, total: items.length, shippingRunId });
   return { runs, first, second, byRun, candidateMode: 'ready', holdRuns: false, releaseRuns: null, holdCandidates: false, releaseCandidates: null,
+    fieldOptions: { services: ['TECH SERVICE', '已维护的服务'] }, fieldOptionsError: false, fieldOptionsCalls: 0, holdFieldOptions: false, releaseFieldOptions: null,
     allowStart: false, releaseStart: null, candidateCalls: [], startInputs: [], writes: [] };
 }
 
@@ -74,7 +75,11 @@ async function setup(state) {
     }
     if (path === '/api/v1/session') return json({ user: { id: 'document-source-fixture', name: 'Document source UI check', email: 'documents@fixture.invalid', role: 'admin' } });
     if (path === '/api/v1/documents/automations' && method === 'GET') return json({ items: [] });
-    if (path === '/api/v1/documents/field-options') return json({ services: ['TECH SERVICE'] });
+    if (path === '/api/v1/documents/field-options') {
+      state.fieldOptionsCalls += 1;
+      if (state.holdFieldOptions) await new Promise((release) => { state.releaseFieldOptions = () => { state.holdFieldOptions = false; release(); }; heldReleases.push(state.releaseFieldOptions); });
+      return state.fieldOptionsError ? json({ error: { code: 'DATABASE_UNAVAILABLE', message: '服务映射读取失败。' } }, 503) : json(state.fieldOptions);
+    }
     if (path === '/api/v1/documents') return json({ items: [], total: 0, page: 1, pageSize: 20 });
     if (path === '/api/v1/shipping-runs') {
       if (state.holdRuns) await new Promise((release) => { state.releaseRuns = () => { state.holdRuns = false; release(); }; heldReleases.push(state.releaseRuns); });
@@ -112,7 +117,15 @@ const search = () => popup().getByPlaceholder('搜索 FBA、店铺、目的仓�
 const choice = (candidate) => popup().getByRole('checkbox', { name: new RegExp(candidate.demand.snapshot.fba) });
 const bulk = () => popup().getByRole('button', { name: /^(全选|取消选择)搜索结果/ });
 async function open() { await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 60_000 }); await page.getByRole('button', { name: '制作发票', exact: true }).click(); await expect(wizard()).toBeVisible(); }
-async function readRun(runId) { await closeGridDetails(wizard(), sourceGridLabel); await chooseOption(wizard().getByLabel('发货次', { exact: true }), runId); await wizard().getByRole('button', { name: '读取货件', exact: true }).click(); }
+async function selectRun(run) {
+  await closeGridDetails(wizard(), sourceGridLabel); await wizard().getByLabel('发货次', { exact: true }).click();
+  const picker = wizard().getByRole('dialog', { name: '选择发货次', exact: true });
+  const clear = picker.getByRole('button', { name: '清空全部已选', exact: true });
+  if (await clear.isEnabled()) await clear.click();
+  await picker.getByRole('checkbox', { name: `${run.month} 第 ${run.sequence} 次 · ${run.numberingDate}`, exact: true }).check();
+  await picker.getByRole('button', { name: '完成选择', exact: true }).click();
+}
+async function readRun(run) { await selectRun(run); await wizard().getByRole('button', { name: '读取货件', exact: true }).click(); }
 async function openChoices() { await closeGridDetails(wizard(), sourceGridLabel); if (await shipment().getAttribute('aria-expanded') !== 'true') await shipment().click(); await expect(popup()).toBeVisible(); }
 async function finishChoices() { await popup().getByRole('button', { name: '完成选择', exact: true }).click(); await expect(popup()).not.toBeVisible(); }
 async function selected(count) { await expect(wizard().locator('.document-selection-bar')).toContainText('已选 ' + count + ' 个 FBA'); }
@@ -131,14 +144,14 @@ try {
   await expect(nextAction()).toBeDisabled(); await expect(startAction()).toHaveCount(0); await expect(prefill()).not.toBeVisible(); await expect(steps().getByRole('button', { name: '出单资料', exact: true })).toBeDisabled();
   await expect(shipment()).toBeDisabled(); await expect.poll(() => typeof state.releaseRuns).toBe('function'); state.releaseRuns();
   await expect(wizard().getByLabel('发货次', { exact: true })).toBeEnabled();
-  state.holdCandidates = true; await readRun(state.runs[0].id); await expect.poll(() => typeof state.releaseCandidates).toBe('function');
-  await expect(wizard().getByRole('status').filter({ hasText: '正在读取本次发货的货件' })).toBeVisible(); await expect(nextAction()).toBeDisabled(); await expect(shipment()).toBeDisabled();
+  state.holdCandidates = true; await readRun(state.runs[0]); await expect.poll(() => typeof state.releaseCandidates).toBe('function');
+  await expect(wizard().getByRole('status').filter({ hasText: '正在汇总所选发货次的货件' })).toBeVisible(); await expect(nextAction()).toBeDisabled(); await expect(shipment()).toBeDisabled();
   state.releaseCandidates(); await expect.poll(() => gridRowCount(wizard(), sourceGridLabel)).toBe(3); await expect(nextAction()).toBeDisabled();
   await expect(wizard().getByRole('button', { name: '预览出单范围', exact: true })).toHaveCount(0);
   await expect(wizard().getByRole('button', { name: '下一步', exact: true })).toHaveCount(0); assert.equal(state.writes.length, 0); note(step);
 
   step = 'search-multiselect-matches-all-keys-and-filters-the-table-without-selecting';
-  assert.deepEqual(await visibleColumnKeys(wizard(), sourceGridLabel), ['rowNumber', 'selection', 'fba', 'group', 'destinationFc', 'shop', 'country', 'channel', 'address', 'source', 'readiness', 'actions']);
+  assert.deepEqual(await visibleColumnKeys(wizard(), sourceGridLabel), ['rowNumber', 'selection', 'fba', 'shippingRun', 'group', 'destinationFc', 'shop', 'country', 'channel', 'address', 'source', 'readiness', 'actions']);
   await assertBottomNavigation(wizard(), sourceGridLabel);
   await setColumnVisible(wizard(), sourceGridLabel, '店铺', 'shop', false); await setColumnVisible(wizard(), sourceGridLabel, '店铺', 'shop', true);
   const candidateMenu = await openRowMenu(wizard(), sourceGridLabel, 1); await expect(candidateMenu).toContainText(state.first[1].demand.snapshot.fba); await candidateMenu.press('Escape');
@@ -182,7 +195,13 @@ try {
   await nextAction().click(); await expect(wizard().getByRole('heading', { name: '出单资料', exact: true })).toBeVisible(); await expect(prefill()).toBeVisible();
   await expect(steps().getByRole('button', { name: '出单资料', exact: true })).toHaveAttribute('aria-current', 'step'); await expect(table()).not.toBeVisible(); await expect(nextAction()).toHaveCount(0);
   await expect(wizard().getByLabel('任务名称（可选）', { exact: true })).toHaveValue(''); await expect(wizard().getByLabel('渠道服务', { exact: true })).toHaveAttribute('data-value', '');
-  await expect(wizard().getByRole('status').filter({ hasText: '已切换发货次' })).toHaveCount(0); await expect(startAction()).toBeEnabled(); assert.equal(state.writes.length, 0); note(step);
+  await expect(wizard().getByRole('status').filter({ hasText: '已调整发货次范围' })).toHaveCount(0); await expect(startAction()).toBeEnabled(); assert.equal(state.writes.length, 0); note(step);
+
+  step = 'manually-maintained-services-are-selectable-without-automatically-filling-the-ticket';
+  await chooseOption(wizard().getByLabel('渠道服务', { exact: true }), '已维护的服务');
+  await expect(wizard().getByLabel('渠道服务', { exact: true })).toHaveAttribute('data-value', '已维护的服务');
+  await expect(wizard().getByRole('button', { name: '重试服务列表', exact: true })).toHaveCount(0);
+  assert(state.fieldOptionsCalls >= 1); assert.equal(state.writes.length, 0); note(step);
 
   step = 'details-back-and-close-resume-preserve-prefill-fields-selection-and-search';
   await wizard().getByLabel('任务名称（可选）', { exact: true }).fill('Technical range selection'); await chooseOption(wizard().getByLabel('渠道服务', { exact: true }), 'TECH SERVICE');
@@ -200,12 +219,12 @@ try {
   await previousAction().click(); await openChoices(); await search().fill(''); for (const index of [0, 2]) await expect(choice(state.first[index])).toBeChecked(); await finishChoices(); assert.equal(state.writes.length, 0); note(step);
 
   step = 'changing-shipping-run-disables-old-scope-and-reading-clears-filter-and-checks';
-  await openChoices(); await search().fill('Pacific Batch'); await finishChoices(); await chooseOption(wizard().getByLabel('发货次', { exact: true }), state.runs[1].id);
+  await openChoices(); await search().fill('Pacific Batch'); await finishChoices(); await selectRun(state.runs[1]);
   await expect(nextAction()).toBeDisabled(); await expect(shipment()).toBeDisabled(); for (const checkbox of await table().getByRole('checkbox').all()) await expect(checkbox).toBeDisabled();
   await wizard().getByRole('button', { name: '读取货件', exact: true }).click(); await expect.poll(() => gridRowCount(wizard(), sourceGridLabel)).toBe(1);
   await selected(0); await expect(nextAction()).toBeDisabled(); await openChoices(); await expect(search()).toHaveValue(''); await expect(popup().getByRole('checkbox')).toHaveCount(1); await finishChoices();
   await expect((await tableChoice(state.second[0]))).not.toBeChecked();
-  await readRun(state.runs[0].id); await expect.poll(() => gridRowCount(wizard(), sourceGridLabel)).toBe(3); await selected(0); assert.equal(state.writes.length, 0); note(step);
+  await readRun(state.runs[0]); await expect.poll(() => gridRowCount(wizard(), sourceGridLabel)).toBe(3); await selected(0); assert.equal(state.writes.length, 0); note(step);
 
   step = 'narrow-multiselect-supports-keyboard-checkboxes-and-escape-only-closes-the-popup';
   for (const width of [390, 320]) {
@@ -226,16 +245,42 @@ try {
   await wizard().getByRole('button', { name: '清除搜索', exact: true }).click(); await expect.poll(() => gridRowCount(wizard(), sourceGridLabel)).toBe(3); await selected(0); note(step);
 
   step = 'candidate-errors-and-empty-runs-keep-the-next-action-disabled-until-a-valid-selection';
-  const errored = fixture(); errored.candidateMode = 'error'; const mainPage = page; const errorContext = await setup(errored); await open(); await readRun(errored.runs[0].id);
+  const errored = fixture(); errored.candidateMode = 'error'; const mainPage = page; const errorContext = await setup(errored); await open(); await readRun(errored.runs[0]);
   await expect(wizard().getByRole('alert')).toContainText('候选货件暂不可用'); await expect(nextAction()).toBeDisabled(); await expect(shipment()).toBeDisabled();
   errored.candidateMode = 'ready'; await wizard().getByRole('button', { name: '重试', exact: true }).click(); await expect.poll(() => gridRowCount(wizard(), sourceGridLabel)).toBe(3); await expect(nextAction()).toBeDisabled();
-  errored.candidateMode = 'empty'; await readRun(errored.runs[1].id); await expect(wizard().getByText('本次暂无有效制表确认的货件。请先在发货批次中完成 M2 制表确认与编码。', { exact: true })).toBeVisible();
+  errored.candidateMode = 'empty'; await readRun(errored.runs[1]); await expect(wizard().getByText('所选发货次暂无有效制表确认的货件。请先在发货批次中完成 M2 制表确认与编码。', { exact: true })).toBeVisible();
   await expect(nextAction()).toBeDisabled(); assert.equal(errored.writes.length, 0); await errorContext.close(); page = mainPage; note(step);
+
+  step = 'unavailable-service-mappings-retain-manual-input-and-retry-on-narrow-screens';
+  const unavailable = fixture(); unavailable.fieldOptionsError = true;
+  const unavailableContext = await setup(unavailable); await open(); await readRun(unavailable.runs[0]);
+  await openChoices(); await choice(unavailable.first[0]).check(); await finishChoices(); await nextAction().click();
+  const serviceControl = () => wizard().getByLabel('渠道服务', { exact: true });
+  const serviceStatus = () => wizard().getByRole('status').filter({ hasText: '服务列表读取失败' });
+  const retryServices = () => wizard().getByRole('button', { name: '重试服务列表', exact: true });
+  await expect(serviceStatus()).toContainText('可重试或手动填写'); await expect(retryServices()).toBeEnabled();
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 1000 }); await wizard().locator(':scope > .import-dialog-body').evaluate((node) => { node.scrollTop = 0; });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    for (const control of [serviceControl(), serviceStatus(), retryServices()]) { const bounds = await control.boundingBox(); assert(bounds && bounds.x >= -1 && bounds.x + bounds.width <= width + 1, 'Service failure controls must fit the narrow viewport'); }
+    await screenshot('document-source-channel-unavailable-' + width + '.png');
+  }
+  await wizard().getByRole('button', { name: '手动填写渠道服务', exact: true }).click(); await expect(serviceControl()).toHaveValue('');
+  await serviceControl().fill('已确认的手工渠道服务');
+  unavailable.holdFieldOptions = true; const priorCalls = unavailable.fieldOptionsCalls; await retryServices().click();
+  await expect.poll(() => unavailable.fieldOptionsCalls).toBe(priorCalls + 1); await expect.poll(() => typeof unavailable.releaseFieldOptions).toBe('function');
+  await expect(retryServices()).toHaveCount(0); await expect(serviceControl()).toHaveValue('已确认的手工渠道服务');
+  await expect(wizard().getByText('正在读取服务列表，已填写的服务会保留。', { exact: true })).toBeVisible();
+  unavailable.fieldOptionsError = false; unavailable.fieldOptions = { services: ['TECH SERVICE', '已维护的服务'] }; unavailable.releaseFieldOptions();
+  await expect(retryServices()).toHaveCount(0); await expect(serviceStatus()).toHaveCount(0); await expect(serviceControl()).toHaveValue('已确认的手工渠道服务');
+  await wizard().getByRole('button', { name: '从目录选择渠道服务', exact: true }).click(); await expect(serviceControl()).toHaveAttribute('data-value', '已确认的手工渠道服务');
+  await chooseOption(serviceControl(), '已维护的服务'); await expect(serviceControl()).toHaveAttribute('data-value', '已维护的服务');
+  assert.equal(unavailable.writes.length, 0); await unavailableContext.close(); page = mainPage; note(step);
 
   step = 'only-explicit-automation-start-writes-the-whole-selected-scope-and-locks-repeat-actions';
   await openChoices(); for (const index of [0, 2]) await choice(state.first[index]).check(); await finishChoices(); assert.equal(state.writes.length, 0);
   await nextAction().click(); await expect(prefill()).toBeVisible();
-  await expect(wizard().getByRole('status').filter({ hasText: '已切换发货次' })).toHaveText('已切换发货次，已填写的出单资料仍保留。请核对这些资料是否适用于本次货件，再开始生成。');
+  await expect(wizard().getByRole('status').filter({ hasText: '已调整发货次范围' })).toHaveText('已调整发货次范围，已填写的出单资料仍保留。请核对这些资料是否适用于本次货件，再开始生成。');
   assert.equal(state.writes.length, 0); state.allowStart = true; await startAction().dblclick();
   await expect.poll(() => state.startInputs.length).toBe(1); await expect.poll(() => typeof state.releaseStart).toBe('function');
   assert.deepEqual(state.startInputs[0].demandIds, [state.first[0].demandId, state.first[2].demandId]); assert.equal(state.startInputs[0].shippingRunId, state.runs[0].id);

@@ -42,7 +42,7 @@ function fixture(needsReview = false, correction = false) {
   state.detail = (status) => {
     const numbered = state.numberedRunning || status === 'ready' || status === 'needs_review' && !state.correction;
     const run = { id: runId, version: state.controlledVersion ?? (numbered ? 3 : state.retried ? 2 : 1), status, stage: status === 'ready' ? 'ready' : state.controlledStage ?? (status === 'needs_review' && !state.correction ? 'confirmation' : 'lookup'),
-      numberingDate, month: '2026-10', sequence: numbered ? 3 : null, importId: state.retried ? state.replacementImportId : importId, parseRunId: state.retried ? state.replacementParseRunId : parseRunId, error: null, createdAt: now, updatedAt: now };
+      numberingDate, month: '2026-10', sequence: numbered ? 3 : null, membershipFrozenAt: state.membershipFrozenAt ?? null, importId: state.retried ? state.replacementImportId : importId, parseRunId: state.retried ? state.replacementParseRunId : parseRunId, error: null, createdAt: now, updatedAt: now };
     return contracts.shippingRunDetailSchema.parse({ run, tickets: (state.correction && !state.retried ? [0] : [0, 1]).map((index) => ({ id: ticketIds[index], sourceTicketIndex: index + 1,
       country: numbered ? index === 0 ? 'US' : 'UK' : null, ticketSequence: numbered ? 1 : null, number: numbered ? `20261023-3-${index === 0 ? 'US' : 'UK'}-1` : null,
       members: (state.correction && !state.retried ? [0, 1, 2] : index === 0 ? [0, 1] : [2]).map((member) => ({ demandId: numbered ? demandIds[member] : null, fba: fbas[member], sid: numbered ? member < 2 ? 101 : 202 : null, inputOrder: member + 1, groupId: numbered ? groupIds[member] : null })) })),
@@ -200,6 +200,7 @@ async function contextFor(state) {
         const record = contracts.reportExportRecordSchema.parse({ id: id(), status: 'completed', shippingRunId: state.runId, shippingRunVersion: 3,
           groupIds: body.groupIds, references: body.expectedConfirmations, month: null, region: 'all', fileId: id(), error: null, createdAt: now, completedAt: now,
           rowCount: 3, boxCount: 15, valid: true, invalidReason: null });
+        state.membershipFrozenAt = now;
         state.exports.push(record); return json({ export: record, replayed: false }, 202);
       }
       if (method === 'GET' && path.startsWith('/api/v1/files/')) return route.fulfill({ contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', body: 'isolated-shipping-run-download-fixture' });
@@ -217,7 +218,7 @@ async function contextFor(state) {
 const wizard = () => page.getByRole('dialog', { name: '导入向导', exact: true });
 const result = () => page.getByRole('region', { name: '本次发货整理结果', exact: true });
 const productTable = () => grid(page, '本次发货商品表');
-const generate = () => page.getByRole('button', { name: '生成本次发货 XLSX', exact: true });
+const generate = () => page.getByRole('button', { name: /^(?:再次)?生成本次发货 XLSX$/ });
 const progress = () => result().getByRole('status', { name: '自动整理进度', exact: true });
 const stepper = () => result().getByLabel('整理步骤', { exact: true });
 
@@ -294,6 +295,26 @@ async function automaticChecks(state) {
   const download = page.waitForEvent('download'); await wizard().getByRole('button', { name: '下载 XLSX', exact: true }).click();
   assert.equal((await download).suggestedFilename(), '20261023-3-发货表.xlsx'); note();
 
+  step = 'frozen-run-can-generate-again-with-prior-generation-notice-and-retained-history';
+  await expect(wizard().getByText(/当前范围此前已生成过发货表/)).toBeVisible();
+  await expect(generate()).toHaveText('再次生成本次发货 XLSX'); await expect(generate()).toBeEnabled();
+  const originalFile = copy(state.exports[0]);
+  await generate().click(); await expect.poll(() => state.exportBodies.length).toBe(2);
+  await expect.poll(() => state.exports.length).toBe(2);
+  assert.notEqual(state.exportBodies[0].operationId, state.exportBodies[1].operationId, 'an intentional regeneration has a fresh operation ID');
+  assert.deepEqual(state.exportBodies[0].expectedConfirmations, state.exportBodies[1].expectedConfirmations, 'regeneration retains the frozen confirmation');
+  assert.deepEqual(state.exports[0], originalFile, 'the first file and its historical record remain unchanged');
+  assert.notEqual(state.exports[0].fileId, state.exports[1].fileId);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 });
+    await generate().scrollIntoViewIfNeeded(); await expect(generate()).toBeEnabled();
+    await expect(wizard().getByText(/当前范围此前已生成过发货表/)).toBeVisible();
+    const noticeBounds = await wizard().getByText(/当前范围此前已生成过发货表/).boundingBox();
+    assert(noticeBounds.x >= 0 && noticeBounds.x + noticeBounds.width <= width, 'the regeneration notice fits the viewport without horizontal scrolling');
+    await page.screenshot({ path: resolve(evidence, `frozen-regenerate-${width}.png`), animations: 'disabled' });
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 }); note();
+
   step = 'close-and-reopen-the-same-run-from-shipping-history';
   await wizard().getByRole('button', { name: '关闭导入向导', exact: true }).click(); await expect(wizard()).not.toBeVisible();
   await page.getByRole('button', { name: '本次发货与票号', exact: true }).click();
@@ -309,6 +330,8 @@ async function automaticChecks(state) {
   await page.getByRole('button', { name: '查看发货表', exact: true }).click();
   const recovered = page.getByRole('dialog', { name: '本次发货表', exact: true });
   await expect(recovered).toBeVisible(); await expect(await findGridRow(page, '本次发货商品表', '20261023-3-UK-1')).toContainText('20261023-3-UK-1');
+  await expect(recovered.getByText(/当前范围此前已生成过发货表/)).toBeVisible();
+  await expect(generate()).toBeEnabled();
   assert.equal(state.createBodies.length, 1, 'history recovery must not create another run');
   await recovered.getByRole('button', { name: '逐箱明细', exact: true }).click();
   const boxTable = grid(recovered, '本次发货逐箱表');

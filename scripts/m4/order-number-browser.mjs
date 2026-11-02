@@ -7,8 +7,7 @@ import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
-import { documentCreateInputSchema, documentRevisionInputSchema, documentSchema, documentExportSchema, withDocumentDefaults as documentFlagDefaults } from '../../packages/contracts/dist/index.js';
-import { chooseOption } from '../shared/ui-controls.mjs';
+import { DOCUMENT_DEFAULT_FLAGS, documentCreateInputSchema, documentRevisionInputSchema, documentSchema, documentExportSchema, withDocumentDefaults as documentFlagDefaults } from '../../packages/contracts/dist/index.js';
 
 const withDocumentDefaults = (fields = {}) => documentFlagDefaults({ orderNumber: null, reference: null, tradeTerms: null, currency: 'USD', ...fields });
 
@@ -67,6 +66,12 @@ async function setupRoutes(context) {
 const wizard = () => page.getByRole('dialog', { name: '发票与单据向导', exact: true });
 async function openEditor(id) { await page.goto('/shipping?view=documents&documentId=' + id); await wizard().getByRole('navigation', { name: '单据制作步骤', exact: true }).getByRole('button', { name: '单票资料', exact: true }).click(); await expect(wizard().locator('.document-edit-form')).toBeVisible(); }
 async function openTax() { const summary = page.getByText('申报与税务', { exact: true }); if (!(await summary.locator('..').getAttribute('open'))) await summary.click(); }
+async function expectFixedFlags() {
+  for (const label of ['含电池', '含磁性', '含液体', '含粉末', '危险品']) {
+    const control = page.getByLabel(label, { exact: true });
+    await expect(control).toHaveAttribute('data-value', '否'); await expect(control).toBeDisabled();
+  }
+}
 try {
   await mkdir(evidence, { recursive: true });
   const socket = createServer(); await new Promise((done) => socket.listen(0, '127.0.0.1', done)); const port = socket.address().port; await new Promise((done) => socket.close(done)); baseURL = 'http://127.0.0.1:' + port;
@@ -74,19 +79,19 @@ try {
   await expect.poll(async () => { try { return (await fetch(baseURL)).status; } catch { return 0; } }, { timeout: 20000 }).toBe(200);
   browser = await chromium.launch({ headless: true, channel: process.env.IMPORT_BROWSER_CHANNEL || 'chrome' });
   const context = await browser.newContext({ baseURL, locale: 'zh-CN', timezoneId: 'Asia/Shanghai', viewport: { width: 1440, height: 1000 } }); await setupRoutes(context); page = await context.newPage(); page.on('pageerror', (error) => browserErrors.push(error.message));
-  step = 'retired-header-fields-are-absent-and-dangerous-defaults-to-no';
+  step = 'retired-header-fields-are-absent-and-all-flags-are-fixed-to-no';
   const initial = createDocument({ shippingRunId: shippingRun.id, title: 'Legacy document details compatibility fixture' }); documents.push(initial); await openEditor(initial.id);
   assert.equal(documents[0].currentRevision.data.fields.dangerous, '否');
   for (const label of ['订单编号', '参考号', '贸易条款']) await expect(page.getByLabel(label, { exact: true })).toHaveCount(0);
-  await expect(page.getByLabel('危险品', { exact: true })).toHaveAttribute('data-value', '否'); note();
-  step = 'title-and-dangerous-save-while-retired-header-values-stay-blank';
-  await page.getByLabel('草稿名称', { exact: true }).fill('MANUAL-TITLE-001'); await openTax(); await chooseOption(page.getByLabel('危险品', { exact: true }), '是'); await page.getByRole('button', { name: '保存草稿', exact: true }).click(); await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toBeDisabled();
+  await expectFixedFlags(); note();
+  step = 'title-saves-while-flags-stay-no-and-retired-header-values-stay-blank';
+  await page.getByLabel('草稿名称', { exact: true }).fill('MANUAL-TITLE-001'); await openTax(); await expectFixedFlags(); await page.getByRole('button', { name: '保存草稿', exact: true }).click(); await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toBeDisabled();
   assert.equal(revisions.at(-1).title, 'MANUAL-TITLE-001'); for (const key of ['orderNumber', 'reference', 'tradeTerms']) assert.equal(revisions.at(-1).fields[key], null);
-  assert.equal(revisions.at(-1).fields.dangerous, '是'); await page.getByRole('button', { name: '重新读取单据', exact: true }).click(); await expect(page.getByLabel('草稿名称', { exact: true })).toHaveValue('MANUAL-TITLE-001'); await expect(page.getByLabel('危险品', { exact: true })).toHaveAttribute('data-value', '是'); note();
-  step = 'legacy-empty-default-and-explicit-yes-preserved';
+  for (const key of DOCUMENT_DEFAULT_FLAGS) assert.equal(revisions.at(-1).fields[key], '否'); await page.getByRole('button', { name: '重新读取单据', exact: true }).click(); await expect(page.getByLabel('草稿名称', { exact: true })).toHaveValue('MANUAL-TITLE-001'); await expectFixedFlags(); note();
+  step = 'legacy-empty-and-explicit-yes-drafts-display-fixed-no-without-mutating-snapshots';
   const legacy = createDocument({ weekStartDate: week, title: '旧草稿空危险品', fields: { orderNumber: 'EXISTING-MANUAL', reference: 'OLD-REFERENCE', tradeTerms: 'OLD-TERMS', dangerous: ' ' } }); legacy.currentRevision.data.fields.dangerous = ''; documents.push(legacy); await openEditor(legacy.id); await expect(page.getByLabel('危险品', { exact: true })).toHaveAttribute('data-value', '否');
   for (const label of ['订单编号', '参考号', '贸易条款']) await expect(page.getByLabel(label, { exact: true })).toHaveCount(0);
-  const reviewed = createDocument({ weekStartDate: week, title: '旧草稿已确认危险品', fields: { orderNumber: 'REVIEWED-MANUAL', dangerous: '是' } }); documents.push(reviewed); await openEditor(reviewed.id); await openTax(); await expect(page.getByLabel('危险品', { exact: true })).toHaveAttribute('data-value', '是'); note();
+  const reviewed = createDocument({ weekStartDate: week, title: '旧草稿已确认危险品', fields: { orderNumber: 'REVIEWED-MANUAL' } }); for (const key of DOCUMENT_DEFAULT_FLAGS) reviewed.currentRevision.data.fields[key] = '是'; documents.push(reviewed); await openEditor(reviewed.id); await openTax(); await expectFixedFlags(); for (const key of DOCUMENT_DEFAULT_FLAGS) assert.equal(reviewed.currentRevision.data.fields[key], '是'); note();
   step = 'desktop-and-mobile-controls-layout';
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 1000 });

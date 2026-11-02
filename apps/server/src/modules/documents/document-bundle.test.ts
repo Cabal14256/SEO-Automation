@@ -3,7 +3,7 @@ import ExcelJS from 'exceljs';
 import { unzipSync } from 'fflate';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DocumentExportReference, DocumentRevisionData } from '@scm/contracts';
+import { DOCUMENT_INVOICE_PRICING_RULE, type DocumentExportReference, type DocumentRevisionData } from '@scm/contracts';
 const mocks = vi.hoisted(() => ({ transaction: vi.fn(), actor: vi.fn(), freeze: vi.fn(), locked: vi.fn(), validate: vi.fn(), checked: vi.fn(), publish: vi.fn(), render: vi.fn() }));
 vi.mock('../../db/client.js', () => ({ db: { transaction: mocks.transaction } }));
 vi.mock('../batches/service.js', () => ({ BatchError: class extends Error { constructor(public code: string, public status: number, message: string, public details?: unknown) { super(message); } }, requireBatchActor: mocks.actor, freezeGroupForExport: mocks.freeze }));
@@ -55,16 +55,16 @@ const tx = {
 beforeEach(async () => {
   vi.clearAllMocks(); invalid = new Set();
   const book = new ExcelJS.Workbook(), sheet = book.addWorksheet('清关单'); DOCUMENT_MAIN_HEADERS.forEach((label, index) => { sheet.getCell(17, index + 1).value = label; });
-  sheet.getCell('B4').value = 'Receiver'; sheet.getCell('B6').value = '10 Road'; sheet.getCell('B12').value = 'US'; sheet.getCell('F12').value = '美元'; sheet.getCell('B16').value = 1; sheet.getCell('F15').value = 5;
+  sheet.getCell('B3').value = 'ADDR-001'; sheet.getCell('B4').value = 'ADDR-001'; sheet.getCell('B6').value = '10 Road'; sheet.getCell('B12').value = 'US'; sheet.getCell('F12').value = '美元'; sheet.getCell('B16').value = 1; sheet.getCell('F15').value = 5;
   for (let row = 1; row <= 5; row++) sheet.getCell(`F${row}`).value = '否';
-  sheet.getRow(18).values = ['FBA-BOX', 'PO', 1, 2, 3, 4, 'Product', '商品', 2, 5, 'Glass', '123', 'Use', 'Brand', 'Model', null, 'https://example.invalid']; sheet.pageSetup.printArea = 'A1:Q18';
+  sheet.getRow(18).values = ['FBA-BOX', 'PO', 1, 2, 3, 4, 'Product', '商品', 2.3, 5, 'Glass', '123', 'Use', 'Brand', 'Model', null, 'https://example.invalid']; sheet.pageSetup.printArea = 'A1:Q18';
   bytes = Buffer.from(await book.xlsx.writeBuffer());
   const jobId = randomUUID(), templateId = randomUUID(), templateFile: StoredFile = { id: randomUUID(), originalName: 'template.xlsx', storageKey: 'template.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', byteSize: bytes.length, sha256: 'a'.repeat(64), createdBy: 'admin', createdAt: at };
   const docs = new Map<string, Saved>();
   sources = Array.from({ length: 2 }, () => {
     const documentId = randomUUID(), revisionId = randomUUID(), source = { groupId: randomUUID(), m2ConfirmationId: randomUUID(), demandId: randomUUID() };
-    const data = { purpose: 'invoice', generationRulesVersion: 'v2', templateReference: { templateId, version: 1, sha256: templateFile.sha256, fileId: templateFile.id }, members: [{ source, demand: { id: source.demandId, snapshot: { country: 'US' } } }], profileReferences: [], fields: { recipientName: 'Receiver', addressLine1: '10 Road', countryCode: 'US', currency: 'USD' } } as unknown as DocumentRevisionData;
-    const reference: DocumentExportReference = { documentId, revisionId, revisionVersion: 1, templateId, templateVersion: 1, templateSha256: templateFile.sha256, sources: [source] as DocumentExportReference['sources'], generationRulesVersion: 'v2', pricingRule: 'fixed-2', bundleJobId: jobId };
+    const data = { purpose: 'invoice', generationRulesVersion: 'v2', templateReference: { templateId, version: 1, sha256: templateFile.sha256, fileId: templateFile.id }, members: [{ source, demand: { id: source.demandId, snapshot: { shop: '测试店铺', country: 'US', channel: '海运' } } }], profileReferences: [], fields: { addressCode: 'ADDR-001', recipientName: 'Receiver', addressLine1: '10 Road', countryCode: 'US', currency: 'USD' } } as unknown as DocumentRevisionData;
+    const reference: DocumentExportReference = { documentId, revisionId, revisionVersion: 1, templateId, templateVersion: 1, templateSha256: templateFile.sha256, sources: [source] as DocumentExportReference['sources'], generationRulesVersion: 'v2', pricingRule: DOCUMENT_INVOICE_PRICING_RULE, bundleJobId: jobId };
     docs.set(documentId, { record: { id: documentId, version: 1, status: 'draft', currentRevisionId: revisionId }, revision: { id: revisionId, version: 1, data } });
     return { itemId: randomUUID(), documentId, version: 1, reference, data, file: templateFile, existingExportId: null };
   });
@@ -78,6 +78,25 @@ beforeEach(async () => {
   mocks.publish.mockImplementation(async (input, action) => { const file: StoredFile = { ...templateFile, id: randomUUID(), originalName: input.originalName, mimeType: input.mimeType, storageKey: 'bundle.zip', byteSize: input.bytes.length, sha256: 'b'.repeat(64) }; await action(file); return file; });
 });
 describe('whole-batch preflight and atomic ZIP publication', () => {
+  it('publishes invoices from multiple shipping runs together while retaining each source reference', async () => {
+    const runIds = [state.job.shippingRunId, randomUUID()];
+    sources.forEach((source, index) => {
+      state.job.items[index]!.shippingRunId = runIds[index];
+      source.data.shippingRunId = runIds[index];
+      source.reference.sources[0]!.shippingRunId = runIds[index];
+    });
+    const prepared = await preflightDocumentBundle(state.job);
+    expect(prepared.items.map((item) => item.status)).toEqual(['ready', 'ready']);
+    await publishDocumentBundle(structuredClone(state.job), prepared.sources);
+    expect(state.job.bundle).toMatchObject({ status: 'completed', fileCount: 2 });
+    expect(state.bundles[0]!.references.map((reference) => reference.sources[0]!.shippingRunId).sort()).toEqual([...runIds].sort());
+  });
+  it('blocks a ticket whose document belongs to a different shipping run before creating the batch file', async () => {
+    state.job.items[0]!.shippingRunId = randomUUID();
+    const result = await preflightDocumentBundle(state.job);
+    expect(result.items[0]).toMatchObject({ status: 'blocked', error: { code: 'DOCUMENT_SCOPE_MISMATCH' } });
+    expect(mocks.render).not.toHaveBeenCalled(); expect(mocks.publish).not.toHaveBeenCalled();
+  });
   it('blocks deleted task downloads and ordinary scope validation while retaining fully validated historic export access', async () => {
     const id = state.job.id; await publishDocumentBundle(structuredClone(state.job), sources); state.job.deletedAt = at;
     await expect(readDocumentBundle(id, 'admin')).rejects.toMatchObject({ code: 'NOT_FOUND' });
@@ -106,9 +125,9 @@ describe('whole-batch preflight and atomic ZIP publication', () => {
     expect(result.items.find((item) => item.documentId === source.documentId)).toMatchObject({ status: 'blocked', error: { code: 'DOCUMENT_GENERATION_UPGRADE_REQUIRED' } });
     expect(mocks.publish).not.toHaveBeenCalled();
   });
-  it('requires a correction before reusing exports made with historical prices', async () => {
+  it.each([undefined, 'fixed-2'] as const)('requires a correction before reusing exports made with historical pricing rule %s', async (pricingRule) => {
     const source = sources[0]!;
-    state.exports.push({ id: randomUUID(), fileId: source.file.id, status: 'completed', reference: { ...source.reference, pricingRule: undefined, bundleJobId: undefined }, createdAt: at } as typeof documentExports.$inferSelect);
+    state.exports.push({ id: randomUUID(), fileId: source.file.id, status: 'completed', reference: { ...source.reference, pricingRule, bundleJobId: undefined }, createdAt: at } as typeof documentExports.$inferSelect);
     const result = await preflightDocumentBundle(state.job);
     expect(result.items.find((item) => item.documentId === source.documentId)).toMatchObject({ status: 'blocked', error: { code: 'DOCUMENT_PRICING_UPGRADE_REQUIRED' } });
     expect(mocks.publish).not.toHaveBeenCalled();
@@ -123,12 +142,15 @@ describe('whole-batch preflight and atomic ZIP publication', () => {
   it('publishes exactly one bundle and all per-document references/freeze decisions in the same transaction', async () => {
     const snapshot = structuredClone(state.job); await publishDocumentBundle(snapshot, sources);
     expect(mocks.publish).toHaveBeenCalledOnce(); expect(state.bundles).toHaveLength(1); expect(state.exports).toHaveLength(2);
+    expect(state.exports.every((entry) => entry.reference.pricingRule === DOCUMENT_INVOICE_PRICING_RULE)).toBe(true);
     expect(new Set(state.exports.map((entry) => entry.fileId)).size).toBe(1); expect(state.exports.every((entry) => entry.reference.bundleJobId === snapshot.id)).toBe(true);
     expect(state.job).toMatchObject({ status: 'completed', phase: 'completed', bundle: { status: 'completed', sheetCount: 2, fileCount: 2 } });
     expect(state.job.items.every((item) => item.status === 'completed')).toBe(true); expect(state.frozen).toHaveLength(2);
     const published = vi.mocked(mocks.publish).mock.calls[0]![0], entries = unzipSync(published.bytes);
     expect(published).toMatchObject({ mimeType: 'application/zip', originalName: expect.stringMatching(/\.zip$/) });
     expect(Object.keys(entries)).toHaveLength(2);
+    expect(Object.keys(entries)[0]).toMatch(/^\d{1,2}\.\d{1,2}号测试店铺-US-海运-1件（ADDR-001）\.xlsx$/);
+    expect(Object.keys(entries)[1]).toBe(Object.keys(entries)[0]!.replace(/\.xlsx$/, '-2.xlsx'));
     for (const entry of state.exports) {
       const child = entries[entry.reference.invoiceFileName!]!;
       expect(child).toBeDefined(); expect(entry.reference.invoiceFileSha256).toBe(createHash('sha256').update(child).digest('hex'));
@@ -136,7 +158,8 @@ describe('whole-batch preflight and atomic ZIP publication', () => {
     }
     for (const bytes of Object.values(entries)) {
       const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(bytes) as never);
-      expect(book.worksheets).toHaveLength(1); expect(book.worksheets[0]!.getCell('B16').value).toBe(1); expect(book.worksheets[0]!.getCell('F15').value).toBe(5); expect(book.worksheets[0]!.getCell('I18').value).toBe(2);
+      expect(book.worksheets).toHaveLength(1); expect(book.worksheets[0]!.getCell('B16').value).toBe(1); expect(book.worksheets[0]!.getCell('F15').value).toBe(5); expect(book.worksheets[0]!.getCell('I18').value).toBe(2.3);
+      expect(book.worksheets[0]!.getCell('B3').value).toBe('ADDR-001'); expect(book.worksheets[0]!.getCell('B4').value).toBe('ADDR-001');
     }
     await expect(publishDocumentBundle(snapshot, sources)).resolves.toBe(false); expect(state.bundles).toHaveLength(1); expect(state.exports).toHaveLength(2);
   });

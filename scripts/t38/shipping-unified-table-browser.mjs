@@ -22,6 +22,7 @@ const copy = (value) => structuredClone(value);
 const checks = [], unexpectedRequests = [], browserErrors = [];
 const entryOnly = process.env.SHIPPING_UNIFIED_ENTRY_ONLY === '1';
 const interactionsOnly = process.env.SHIPPING_UNIFIED_INTERACTIONS_ONLY === '1';
+const regenerationOnly = process.env.SHIPPING_UNIFIED_REGENERATION_ONLY === '1';
 let browser, viteProcess, page, baseURL, activeCrudState, step = 'setup', failed = false, currentRows = [];
 const note = () => { checks.push({ name: step, result: 'passed' }); console.log('PASS ' + step); };
 
@@ -143,7 +144,7 @@ const nav = () => page.getByRole('navigation', { name: '需求与批次导航', 
 const scopes = () => page.getByRole('group', { name: '发货范围切换', exact: true });
 const table = () => page.locator('[data-grid-label="发货明细表"]');
 const presentation = () => page.getByLabel('展示方式', { exact: true });
-const generate = () => page.getByRole('button', { name: '生成所选批次 XLSX', exact: true });
+const generate = () => page.getByRole('button', { name: /^(?:再次)?生成所选批次 XLSX$/ });
 const newBatch = () => page.getByRole('button', { name: '新建发货批次', exact: true });
 const demandCheck = async (fba) => { await locateShipment(fba); return table().getByRole('checkbox', { name: `选择货件 ${fba}`, exact: true }); };
 const exportCheck = async (name) => {
@@ -446,7 +447,15 @@ async function presentationsAndSelections(state) {
   await (await exportCheck(state.groups[1].name)).first().check(); await expect(generate()).toBeEnabled();
   await closeRecord(); await generate().click(); await expect.poll(() => state.exports.length).toBe(1);
   assert.deepEqual(state.exportBodies.at(-1).expectedConfirmations, [state.references[1]], 'frozen export guards the current group version and keeps its original confirmation identity');
-  assert.deepEqual(state.exportBodies.at(-1).groupIds, [state.groups[1].id]); await (await exportCheck(state.groups[1].name)).first().uncheck(); note();
+  assert.deepEqual(state.exportBodies.at(-1).groupIds, [state.groups[1].id]);
+  await expect(page.getByText(/当前范围此前已生成过发货表/)).toBeVisible();
+  await expect(generate()).toHaveText('再次生成所选批次 XLSX');
+  const firstFrozenFile = copy(state.exports[0]);
+  await closeRecord(); await generate().click(); await expect.poll(() => state.exports.length).toBe(2);
+  assert.deepEqual(state.exports[0], firstFrozenFile, 'regenerating a frozen batch preserves its first published file');
+  assert.notEqual(state.exportBodies[0].operationId, state.exportBodies[1].operationId);
+  assert.deepEqual(state.exportBodies[0].expectedConfirmations, state.exportBodies[1].expectedConfirmations);
+  await (await exportCheck(state.groups[1].name)).first().uncheck(); note();
 }
 
 async function searchEligibility(state) {
@@ -857,13 +866,14 @@ try {
   await expect.poll(async () => { try { return (await fetch(baseURL)).status; } catch { return 0; } }, { timeout: 20000 }).toBe(200); browser = await chromium.launch({ headless: true, channel: process.env.IMPORT_BROWSER_CHANNEL || 'chrome' });
   if (interactionsOnly) { const state = interactionFixture(), context = await contextFor(state); await interactionChecks(state); await context.close(); }
   if (entryOnly) { const context = await contextFor(fixture()); await entryChecks(); await context.close(); }
-  if (!entryOnly && !interactionsOnly && process.env.SHIPPING_UNIFIED_CRUD_ONLY !== '1') {
+  if (regenerationOnly) { const state = fixture(), context = await contextFor(state); await unifiedNavigation(state); await presentationsAndSelections(state); await context.close(); }
+  if (!entryOnly && !interactionsOnly && !regenerationOnly && process.env.SHIPPING_UNIFIED_CRUD_ONLY !== '1') {
     const scrollState = scrollFixture(), scrollContext = await contextFor(scrollState); await scopeScrollChecks(scrollState); await scrollContext.close();
     const state = fixture(), context = await contextFor(state); await unifiedNavigation(state); await presentationsAndSelections(state); await searchEligibility(state); await filtersAndScope(state); await exportChecks(state); await layoutChecks(); await context.close();
     const limits = await contextFor(limitFixture()); await limitChecks(); await limits.close();
     const interactionState = interactionFixture(), interactionContext = await contextFor(interactionState); await interactionChecks(interactionState); await interactionContext.close();
   }
-  if (!entryOnly && !interactionsOnly) { activeCrudState = crudFixture(); const crudContext = await contextFor(activeCrudState); await crudChecks(activeCrudState); await crudContext.close(); }
+  if (!entryOnly && !interactionsOnly && !regenerationOnly) { activeCrudState = crudFixture(); const crudContext = await contextFor(activeCrudState); await crudChecks(activeCrudState); await crudContext.close(); }
   assert.deepEqual(unexpectedRequests, []); assert.deepEqual(browserErrors, []);
 } catch (error) {
   failed = true; checks.push({ name: step, result: 'failed', message: error.message }); console.error(error.stack || error); if (page && !page.isClosed()) await page.screenshot({ path: resolve(evidence, 'failure.png'), fullPage: true }).catch(() => {});

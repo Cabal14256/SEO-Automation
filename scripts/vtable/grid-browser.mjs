@@ -59,6 +59,38 @@ try {
   await page.getByRole('button', { name: '切换编辑锁定', exact: true }).click(); await small.click({ position: { x: 60 + 180 + 220 + 120 + 35, y: 36 + 16 } });
   await expect(page.getByRole('region', { name: '编辑夹具 当前记录', exact: true })).toContainText('已选'); await page.getByRole('button', { name: '编辑首行 PO', exact: true }).click(); await expect(input).toHaveCount(0);
   await page.getByRole('button', { name: '切换编辑锁定', exact: true }).click(); checks.push('A disabled ancestor blocks Canvas editing and checkbox mutations');
+  const checkboxState = async () => JSON.parse(await page.locator('[data-checkbox-state]').textContent());
+  const checkboxEvents = [{ id: 'a', checked: true }];
+  const expectCheckboxes = async (selected) => {
+    await expect.poll(async () => (await checkboxState()).selected).toEqual(selected);
+    assert.deepEqual((await checkboxState()).events, checkboxEvents, 'External checkbox synchronization must not dispatch duplicate business toggles');
+  };
+  // A stale Canvas cache reports the wrong inverse on the next real pointer click,
+  // even while React's controlled selection output already looks correct.
+  const clickCheckbox = async (row, id, checked, selected) => {
+    checkboxEvents.push({ id, checked });
+    await small.click({ position: { x: 60 + 180 + 220 + 120 + 35, y: 36 + (row - 1) * 32 + 16 } });
+    await expectCheckboxes(selected);
+  };
+  await expectCheckboxes(['a']);
+  await page.getByRole('button', { name: '全选夹具货件', exact: true }).click(); await expectCheckboxes(['a', 'b']);
+  await page.getByRole('button', { name: '刷新夹具同键数据', exact: true }).click();
+  await expect.poll(async () => (await checkboxState()).po).toEqual(['外部更新:a', '外部更新:b']); await expectCheckboxes(['a', 'b']);
+  await clickCheckbox(2, 'b', false, ['a']);
+  checks.push('External select-all and same-key record updates synchronize Canvas checkbox caches without synthetic business toggles');
+  await page.getByRole('button', { name: '清空夹具货件', exact: true }).click(); await expectCheckboxes([]);
+  await clickCheckbox(1, 'a', true, ['a']);
+  await page.getByRole('button', { name: '反选夹具货件', exact: true }).click(); await expectCheckboxes(['b']);
+  await clickCheckbox(1, 'a', true, ['a', 'b']);
+  checks.push('External clear-all and invert actions keep subsequent Canvas clicks aligned with controlled selection');
+  await page.getByRole('button', { name: '切换夹具货件筛选', exact: true }).click();
+  await expect(page.locator('[data-grid-label="编辑夹具"]')).toHaveAttribute('data-row-count', '1');
+  await page.getByRole('button', { name: '清空夹具货件', exact: true }).click(); await expectCheckboxes([]);
+  await clickCheckbox(1, 'b', true, ['b']);
+  await page.getByRole('button', { name: '切换夹具货件筛选', exact: true }).click();
+  await expect(page.locator('[data-grid-label="编辑夹具"]')).toHaveAttribute('data-row-count', '2');
+  await clickCheckbox(2, 'b', false, []);
+  checks.push('Filtering and restoring rows preserve stable checkbox targets and cache synchronization');
   await page.getByRole('spinbutton', { name: '辅助表夹具 定位行', exact: true }).fill('2');
   await page.getByRole('button', { name: '操作 技术商品乙', exact: true }).click(); await expect(page.locator('[data-saved]')).toHaveText('b'); checks.push('Scoped auxiliary rows retain native business controls');
   const structural = page.getByRole('region', { name: '结构单元格夹具 当前记录', exact: true });

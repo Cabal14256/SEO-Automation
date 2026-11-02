@@ -284,8 +284,10 @@ async function serializeExport(record: ExportRow): Promise<ReportExportRecord> {
     rowCount: record.rowCount, boxCount: record.boxCount, valid: record.status === 'completed' && !invalidReason, invalidReason };
 }
 export async function getExport(id: string) { const [record] = await db.select().from(batchExports).where(eq(batchExports.id, id)); if (!record) throw new BatchError('NOT_FOUND', 404, '导出记录不存在。'); return { export: await serializeExport(record) }; }
-export async function listExports(filter: { subBatchId?: string; month?: string; shippingRunId?: string } = {}) {
+export async function listExports(filter: { subBatchId?: string; month?: string; shippingRunId?: string; groupIds?: string[] } = {}) {
   const records = await db.select().from(batchExports).where(and(filter.month ? eq(batchExports.month, filter.month) : undefined,
+    filter.subBatchId ? sql`${batchExports.groupIds} @> ${JSON.stringify([filter.subBatchId])}::jsonb` : undefined,
+    filter.groupIds?.length ? sql`${batchExports.groupIds} ?| ${sql.param(filter.groupIds)}::text[]` : undefined,
     filter.shippingRunId ? sql`${batchExports.projection}->>'shippingRunId' = ${filter.shippingRunId}` : undefined)).orderBy(desc(batchExports.createdAt)).limit(200);
   return { items: await Promise.all(records.filter((r) => !filter.subBatchId || r.groupIds.includes(filter.subBatchId)).map(serializeExport)) };
 }

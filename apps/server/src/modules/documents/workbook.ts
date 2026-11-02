@@ -42,11 +42,11 @@ const ticketCurrencies = (data: DocumentRevisionData) => new Set(data.members.fl
   return currency ? [currency] : [];
 }));
 const fieldOptionErrors: Record<keyof typeof DOCUMENT_FIELD_OPTIONS, [string, string]> = {
-  battery: ['FLAG_INVALID', 'battery 只接受“是”或“否”。'],
-  magnetic: ['FLAG_INVALID', 'magnetic 只接受“是”或“否”。'],
-  liquid: ['FLAG_INVALID', 'liquid 只接受“是”或“否”。'],
-  powder: ['FLAG_INVALID', 'powder 只接受“是”或“否”。'],
-  dangerous: ['FLAG_INVALID', 'dangerous 只接受“是”或“否”。'],
+  battery: ['FLAG_INVALID', '含电池固定为“否”。'],
+  magnetic: ['FLAG_INVALID', '含磁性固定为“否”。'],
+  liquid: ['FLAG_INVALID', '含液体固定为“否”。'],
+  powder: ['FLAG_INVALID', '含粉末固定为“否”。'],
+  dangerous: ['FLAG_INVALID', '危险品固定为“否”。'],
   taxMode: ['TAX_MODE_INVALID', '交税方式不属于当前丰信模板选项。'],
   customsMode: ['CUSTOMS_MODE_INVALID', '报关方式不属于当前丰信模板选项。'],
   clearanceMode: ['CLEARANCE_MODE_INVALID', '清关方式不属于当前丰信模板选项。'],

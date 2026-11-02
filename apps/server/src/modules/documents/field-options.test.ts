@@ -1,48 +1,40 @@
-import ExcelJS from 'exceljs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { documentFieldOptionsSchema } from '@scm/contracts';
 
-const mocks = vi.hoisted(() => ({ requireActor: vi.fn(), limit: vi.fn(), orderBy: vi.fn() }));
+const mocks = vi.hoisted(() => ({ requireActor: vi.fn(), mappings: vi.fn(), transaction: {} }));
 vi.mock('../batches/service.js', () => ({ requireBatchActor: mocks.requireActor }));
-vi.mock('../../db/client.js', () => ({ db: { transaction: async (action: (tx: unknown) => unknown) => action({ select: () => ({ from: () => ({ where: () => ({ orderBy: mocks.orderBy }) }) }) }) } }));
-import { getDocumentFieldOptions, referenceServiceOptions } from './field-options.js';
-
-const row = (name: string, extra: Record<string, unknown> = {}) => ({ values: { name, section: '美国' }, issues: [], cells: [{ type: ExcelJS.ValueType.String, formula: false }], ...extra });
+vi.mock('../../db/client.js', () => ({ db: { transaction: async (action: (tx: unknown) => unknown) => action(mocks.transaction) } }));
+vi.mock('../service-mappings/repository.js', () => ({ getActiveServiceMappingsInTx: mocks.mappings }));
+import { getDocumentFieldOptions } from './field-options.js';
 
 beforeEach(() => {
-  mocks.requireActor.mockReset(); mocks.limit.mockReset(); mocks.orderBy.mockReset();
-  mocks.requireActor.mockResolvedValue({}); mocks.limit.mockResolvedValue([]); mocks.orderBy.mockReturnValue({ limit: mocks.limit });
+  vi.clearAllMocks(); mocks.requireActor.mockResolvedValue({}); mocks.mappings.mockResolvedValue([]);
 });
 
-describe('document service reference choices', () => {
-  it('keeps unique service names while excluding invalid, formula and error reference rows', () => {
-    expect(referenceServiceOptions({ rows: [row(' 服务甲 '), row('服务甲'), row('服务乙'), row(''),
-      row('有问题', { issues: ['CHANNEL_REFERENCE_INCOMPLETE'] }),
-      row('公式缓存', { cells: [{ type: ExcelJS.ValueType.Formula, formula: true }] }),
-      row('错误值', { cells: [{ type: ExcelJS.ValueType.Error, formula: false }] }),
-      row('其他列公式', { cells: [{ type: ExcelJS.ValueType.String, formula: false }, { type: ExcelJS.ValueType.Formula, formula: true }] }),
-      { values: { name: '缺少证据' } }, null,
-    ] })).toEqual(['服务甲', '服务乙']);
-    expect(referenceServiceOptions(undefined)).toEqual([]);
-    expect(referenceServiceOptions({ rows: 'invalid' })).toEqual([]);
+describe('manually maintained invoice service choices', () => {
+  it('returns unique nonempty service values from active country and transport mappings', async () => {
+    mocks.mappings.mockResolvedValue([{ countryCode: 'US', transportMethod: '海派', service: ' 丰速达18T卡派 ' },
+      { countryCode: 'GB', transportMethod: '卡航', service: '中欧卡航VAT-递延' },
+      { countryCode: 'FR', transportMethod: '卡航', service: '中欧卡航VAT-递延' }, { service: ' ' }]);
+    const result = await getDocumentFieldOptions('admin');
+    expect(documentFieldOptionsSchema.parse(result)).toEqual({ services: ['丰速达18T卡派', '中欧卡航VAT-递延'] });
+    expect(mocks.requireActor).toHaveBeenCalledWith(mocks.transaction, 'admin');
+    expect(mocks.mappings).toHaveBeenCalledWith(mocks.transaction);
+    expect(result).not.toHaveProperty('lingxing');
   });
 
-  it('returns only the latest catalog as options and leaves an absent catalog empty', async () => {
-    const absent = await getDocumentFieldOptions('admin');
-    expect(absent).toEqual({ services: [] });
-    expect(mocks.requireActor).toHaveBeenCalledWith(expect.any(Object), 'admin');
-    expect(mocks.orderBy).toHaveBeenCalledWith(expect.anything(), expect.anything());
-    expect(mocks.limit).toHaveBeenCalledWith(1);
-    mocks.limit.mockResolvedValueOnce([{ data: { rows: [row('丰信参考服务')] } }]);
-    const available = await getDocumentFieldOptions('admin');
-    expect(documentFieldOptionsSchema.parse(available)).toEqual({ services: ['丰信参考服务'] });
-    expect(available).not.toHaveProperty('businessChannel');
-    expect(available).not.toHaveProperty('currency');
+  it('leaves the service list empty when no mappings have been maintained', async () => {
+    expect(await getDocumentFieldOptions('admin')).toEqual({ services: [] });
   });
 
-  it('checks the current actor before reading the catalog', async () => {
+  it('rejects inactive actors before reading any mappings', async () => {
     mocks.requireActor.mockRejectedValueOnce(new Error('inactive actor'));
     await expect(getDocumentFieldOptions('old-admin')).rejects.toThrow('inactive actor');
-    expect(mocks.orderBy).not.toHaveBeenCalled();
+    expect(mocks.mappings).not.toHaveBeenCalled();
+  });
+
+  it('reports storage failures instead of replacing service names with remote channel codes', async () => {
+    mocks.mappings.mockRejectedValueOnce(new Error('mapping storage unavailable'));
+    await expect(getDocumentFieldOptions('admin')).rejects.toThrow('mapping storage unavailable');
   });
 });

@@ -1,10 +1,10 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const state = vi.hoisted(() => ({ session: vi.fn(), report: vi.fn(), authorize: vi.fn(), transaction: vi.fn() }));
+const state = vi.hoisted(() => ({ session: vi.fn(), report: vi.fn(), exports: vi.fn(), authorize: vi.fn(), transaction: vi.fn() }));
 vi.mock('../../auth.js', () => ({ auth: { api: { getSession: state.session } } }));
 vi.mock('../../db/client.js', () => ({ db: { transaction: state.transaction } }));
-vi.mock('./report-service.js', () => ({ getShipmentReport: state.report }));
+vi.mock('./report-service.js', () => ({ getShipmentReport: state.report, listExports: state.exports }));
 vi.mock('./service.js', () => ({ requireBatchActor: state.authorize, BatchError: class extends Error {
   constructor(public code: string, public status: number, message: string) { super(message); }
 } }));
@@ -14,11 +14,24 @@ const app = () => new Hono().route('/api/v1/batch-reports', createReportRoutes((
 beforeEach(() => {
   state.session.mockReset().mockResolvedValue({ user: { id: 'technical-admin', role: 'admin', banned: false } });
   state.report.mockReset().mockResolvedValue({ rows: [], boxes: [], confirmations: [], total: 0 });
+  state.exports.mockReset().mockResolvedValue({ items: [] });
   state.authorize.mockReset().mockResolvedValue({ id: 'technical-admin' });
   state.transaction.mockReset().mockImplementation(async (work: (tx: unknown) => unknown) => work({}));
 });
 
 describe('GET /batch-reports search', () => {
+  it('reads prior generation records for selected groups independently of the current report month', async () => {
+    const groupIds = ['271ad5d0-ccbd-44eb-b402-5538426c1df3', 'c8ed63cb-5413-4ac5-aa0a-8aa2e881a070'];
+    const response = await app().request(`/api/v1/batch-reports/exports?groupIds=${groupIds.join(',')}`);
+    expect(response.status).toBe(200);
+    expect(state.exports).toHaveBeenCalledExactlyOnceWith({ groupIds, region: 'all', page: 1, pageSize: 50 });
+  });
+
+  it.each(['', 'not-a-group', '271ad5d0-ccbd-44eb-b402-5538426c1df3,invalid'])('rejects invalid prior-generation group scope %s', async (groupIds) => {
+    expect((await app().request(`/api/v1/batch-reports/exports?groupIds=${groupIds}`)).status).toBe(422);
+    expect(state.exports).not.toHaveBeenCalled();
+  });
+
   it('passes a trimmed search with the applied filters and pagination', async () => {
     const response = await app().request('/api/v1/batch-reports?month=2026-09&region=US&q=%20%20FBA-Alpha%20%20&page=2&pageSize=20');
     expect(response.status).toBe(200); expect(response.headers.get('Cache-Control')).toBe('no-store');

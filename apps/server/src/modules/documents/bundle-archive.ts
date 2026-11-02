@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
 import { unzipSync, zipSync, type Zippable } from 'fflate';
-import { DOCUMENT_INVOICE_UNIT_PRICE } from '@scm/contracts';
+import { DOCUMENT_INVOICE_UNIT_PRICE, documentInvoicePrice } from '@scm/contracts';
 import { createDocumentBundleWorkbook, type BundleSheet, type BundleWorkbookInput } from './bundle-workbook.js';
 import { DocumentWorkbookError } from './workbook-errors.js';
+import { documentInvoiceFileName, type InvoiceFileNameData } from './invoice-file-name.js';
+
+export type BundleArchiveInput = BundleWorkbookInput & { invoiceData?: InvoiceFileNameData };
 
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 const safeFileName = (name: string) => name.length <= 200 && !/[\\/:*?"<>|]/.test(name) && !Array.from(name).some((character) => character.charCodeAt(0) < 32) && !name.startsWith('.') && /\.xlsx$/i.test(name);
@@ -28,14 +31,20 @@ export function documentBundleInvoiceBytes(input: BundleWorkbookInput): Buffer {
 }
 
 /** One independent, single-sheet XLSX per invoice, including invoices with identical headers. */
-export async function createDocumentBundleArchive(inputs: BundleWorkbookInput[]): Promise<{ bytes: Buffer; sheets: BundleSheet[]; fileCount: number }> {
+export async function createDocumentBundleArchive(inputs: BundleArchiveInput[], generatedAt = new Date()): Promise<{ bytes: Buffer; sheets: BundleSheet[]; fileCount: number }> {
   if (!inputs.length || new Set(inputs.map((input) => input.documentId)).size !== inputs.length) throw new DocumentWorkbookError('整批发票范围为空或存在重复单据。');
-  const entries: Zippable = {}, sheets: BundleSheet[] = [], expected = new Map<string, string>();
+  const entries: Zippable = {}, sheets: BundleSheet[] = [], expected = new Map<string, string>(), usedNames = new Set<string>();
   for (const [index, input] of inputs.entries()) {
-    const workbook = await createDocumentBundleWorkbook([{ ...input, bytes: documentBundleInvoiceBytes(input), expectedUnitPrice: Number(DOCUMENT_INVOICE_UNIT_PRICE) }]);
+    const expectedUnitPrice = input.invoiceData ? Number(documentInvoicePrice(input.invoiceData).unitPrice) : input.expectedUnitPrice ?? Number(DOCUMENT_INVOICE_UNIT_PRICE);
+    const workbook = await createDocumentBundleWorkbook([{ ...input, bytes: documentBundleInvoiceBytes(input), expectedUnitPrice }]);
     if (workbook.sheets.length !== 1) throw new DocumentWorkbookError('同一张发票包含不一致的表头，无法输出为独立单工作表 Excel 文件。');
     const identity = input.documentId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || 'invoice';
-    const fileName = `发票-${String(index + 1).padStart(3, '0')}-${identity}.xlsx`;
+    const requestedName = input.invoiceData ? documentInvoiceFileName(input.invoiceData, workbook.sheets[0]!.boxes, generatedAt) : `发票-${String(index + 1).padStart(3, '0')}-${identity}.xlsx`;
+    let fileName = requestedName, suffix = 2;
+    const nameKey = (name: string) => name.normalize('NFKC').toLowerCase();
+    while (usedNames.has(nameKey(fileName))) fileName = `${requestedName.slice(0, -5)}-${suffix++}.xlsx`;
+    if (!safeFileName(fileName)) throw new DocumentWorkbookError('整批压缩包的单票文件名无效。');
+    usedNames.add(nameKey(fileName));
     entries[fileName] = [workbook.bytes, { level: 0, mtime: new Date('2026-10-25T00:00:00Z') }];
     const fileSha256 = digest(workbook.bytes);
     expected.set(fileName, fileSha256);

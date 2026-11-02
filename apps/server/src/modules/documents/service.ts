@@ -8,7 +8,7 @@ import { fileIndex, operationAudit } from '../../db/schema.js';
 import { batchOperations, subBatches, weeklyBatches } from '../batches/schema.js';
 import { BatchError, getConfirmedGroupInTx, requireBatchActor, type BatchTx } from '../batches/service.js';
 import { checkedFileBytes } from '../imports/service.js';
-import { documentAddressSourceKey, documentBoxFieldIssues, documentDependencyInvalidReason, documentDigest, documentM2SourceReference, documentUsesProfileReference, memberFromCandidate, reviseDocumentBoxFields, shipmentClaimKey, shouldResolveDocumentAddress, validateDocumentData } from './domain.js';
+import { documentAddressSourceKey, documentBoxFieldIssues, documentDependencyInvalidReason, documentDigest, documentExportRulesIssue, documentM2SourceReference, documentUsesProfileReference, memberFromCandidate, reviseDocumentBoxFields, shipmentClaimKey, shouldResolveDocumentAddress, validateDocumentData } from './domain.js';
 import { haveDocumentAddressSourcesChanged, reviseDocumentAddressFields } from './address.js';
 import { checkedDocumentExportFile, documentExportFileSha256 } from './export-file.js';
 import { documentExports, documentMemberClaims, documentProfiles, documentProfileVersions, documentRevisions, documentReviews, documents, documentTemplates, documentTemplateVersions, documentValidations } from './schema.js';
@@ -139,10 +139,15 @@ async function claimMembers(tx: BatchTx, documentId: string, revisionId: string,
 }
 /** Defaults use archived Lingxing shipment evidence; local address profiles are historical only. */
 export async function applyDocumentAutomaticDefaultsInTx(tx: BatchTx, data: DocumentRevisionData, previous?: DocumentRevisionData): Promise<DocumentRevisionData> {
-  const finish = (value: DocumentRevisionData) => applyDocumentAddressCodeDefaults(value).catch(addressCodeCatalogFailure);
+  const finish = (value: DocumentRevisionData) => applyDocumentAddressCodeDefaults({ ...value, fields: withDocumentInvoiceDefaults(value.fields, value.members) }).catch(addressCodeCatalogFailure);
   data = await hydrateDocumentAddressCodeSourcesInTx(tx, data);
-  const fields = withDocumentInvoiceDefaults(data.fields, data.members);
-  let next = { ...data, fields };
+  let next = { ...data, fields: { ...data.fields } };
+  if (!previous && !next.fields.service?.trim()) {
+    const { getActiveServiceMappingsInTx } = await import('../service-mappings/repository.js');
+    const { planDocumentServiceMapping } = await import('./automatic-preparation.js');
+    const mapped = planDocumentServiceMapping(next, await getActiveServiceMappingsInTx(tx));
+    if (mapped.service) next.fields.service = mapped.service;
+  }
   if (!shouldResolveDocumentAddress(next, previous)) return finish(next);
   const sourceChanged = Boolean(previous && (documentAddressSourceKey(previous.members) !== documentAddressSourceKey(next.members) || haveDocumentAddressSourcesChanged(previous.members, next.members)));
   if (sourceChanged) next = { ...next, profileReferences: next.profileReferences.filter((reference) => reference.category !== 'address'), fields: {
@@ -381,6 +386,10 @@ export async function reviewDocument(id: string, actorId: string, input: z.infer
     if (active) throw new BatchError('DOCUMENT_EXPORT_BUSY', 409, '当前发票仍在生成，请等待任务结束后复核具体文件。');
     const [exported] = await tx.select().from(documentExports).where(and(eq(documentExports.id, input.exportId), eq(documentExports.status, 'completed'), sql`${documentExports.reference}->>'documentId' = ${id}`, sql`${documentExports.reference}->>'revisionId' = ${revision.id}`)).limit(1);
     if (!exported?.fileId) throw new BatchError('DOCUMENT_FILE_REQUIRED', 422, '待复核文件尚未成功发布。');
+    if (input.decision === 'approve') {
+      const rulesIssue = documentExportRulesIssue(revision.data, exported.reference);
+      if (rulesIssue) throw new BatchError(rulesIssue.code, 422, '该文件使用历史申报价格或生成规则，请建立更正单据并按当前规则生成后复核。');
+    }
     const validation = await validateDocumentInTx(tx, id, actorId, input.expectedVersion); if (input.decision === 'approve' && !validation.valid) throw new BatchError('VALIDATION_BLOCKED', 422, '来源或资料已变化，不能通过复核。', validation.issues);
     const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, exported.fileId)); if (!file) throw new BatchError('FILE_UNAVAILABLE', 503, '复核文件索引缺失。');
     const fileSha256 = documentExportFileSha256(exported.reference, file.sha256)!;

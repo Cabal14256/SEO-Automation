@@ -3,6 +3,11 @@ import { calculateInvoiceUnitPrice } from './workbook.js';
 
 export type LingxingProductIdentity = { sid: number; msku: string; fnsku: string; sku: string; country: string };
 export type LingxingMappedProduct = { data: Record<string, unknown>; imageUrls: string[]; issues: string[] };
+export const LINGXING_CUSTOMS_PRODUCT_FIELDS = [
+  'exportHsCode', 'originCountry', 'domesticSource', 'declarationElements', 'taxExemption', 'productionSalesName', 'productionSalesCode',
+  'firstLegalUnit', 'firstLegalUnitRate', 'secondLegalUnit', 'secondLegalUnitRate', 'quarantineCode', 'brandType', 'exportPreference',
+  'productNetWeightGrams', 'productGrossWeightGrams', 'cartonGrossWeightKg',
+] as const;
 type Row = Record<string, unknown>;
 type PriceCandidate = { source: string; kind: 'country-clearance' | 'default-clearance' | 'declaration' | 'legacy-declaration'; unitPrice: string; currency: string };
 const Exact = Decimal.clone({ precision: 100 });
@@ -21,6 +26,20 @@ function positivePrice(value: unknown): string {
   // silently round a remote price or allow a lossy XLSX numeric conversion.
   if (exact.lte(0) || exact.gt(Number.MAX_SAFE_INTEGER) || exact.decimalPlaces() > 2 || !new Exact(String(Number(input))).equals(exact)) return '';
   return exact.toFixed(exact.decimalPlaces());
+}
+function positiveDecimal(value: unknown): string {
+  const input = typeof value === 'number' && Number.isFinite(value) ? new Exact(value).toFixed() : text(value);
+  if (!/^\d+(?:\.\d+)?$/.test(input) || !Number.isFinite(Number(input)) || Number(input) <= 0) return '';
+  return new Exact(input).toFixed();
+}
+const brandTypes: Record<string, string> = { '1': '无品牌', '2': '境内自主品牌', '3': '境内收购品牌', '4': '境外品牌（贴牌生产）', '5': '境外品牌（其他）' };
+const exportPreferences: Record<string, string> = { '1': '不享惠', '2': '享惠', '3': '不确定享惠情况' };
+function declarationEnum(value: unknown, labels: Record<string, string>, label: string, issues: string[]): string {
+  if (value === undefined || value === null || typeof value === 'string' && !text(value)) return '';
+  const code = typeof value === 'number' && Number.isInteger(value) ? String(value) : text(value);
+  if (Object.hasOwn(labels, code)) return labels[code]!;
+  issues.push(`领星${label}编码无效或不支持，未采用该报关候选。`);
+  return '';
 }
 function webUrl(value: unknown): string {
   const input = text(value);
@@ -102,6 +121,27 @@ export function mapLingxingProduct(identity: LingxingProductIdentity, fbaProduct
     unit: firstText(declaration.customs_declaration_unit, local?.unit),
     hsCode: countryHs.length > 1 ? '' : (countryHs.length === 1 ? countryHs[0] : '') || hsCode(clearance.customs_clearance_hs_code) || (country === 'US' ? hsCode(local?.bg_import_hs_code) : ''),
     salesLink: webUrl(fba?.asin_url),
+    // China export declaration candidates stay separate from destination import
+    // HS codes and the current commercial invoice's price/currency fields.
+    originCountry: text(declaration.customs_declaration_origin_produce),
+    domesticSource: text(declaration.customs_declaration_inlands_source),
+    declarationElements: text(declaration.other_declare_element),
+    taxExemption: text(declaration.customs_declaration_exempt),
+    productionSalesName: text(declaration.production_and_sales_enterprise_name),
+    productionSalesCode: text(declaration.production_and_sales_enterprise_code),
+    firstLegalUnit: text(declaration.customs_declaration_first_unit),
+    firstLegalUnitRate: positiveDecimal(declaration.customs_declaration_first_unit_rate),
+    secondLegalUnit: text(declaration.customs_declaration_second_unit),
+    secondLegalUnitRate: positiveDecimal(declaration.customs_declaration_second_unit_rate),
+    // The API's extra quarantine text can be "N：出口商品检验"; it is not
+    // evidence of a three-digit CIQ suffix and must not be inferred as one.
+    quarantineCode: text(declaration.customs_declaration_extra_quarantine_code),
+    brandType: declarationEnum(clearance.customs_clearance_brand_type, brandTypes, '品牌类型', issues),
+    exportPreference: declarationEnum(clearance.customs_clearance_preferential, exportPreferences, '出口享惠情况', issues),
+    productNetWeightGrams: positiveDecimal(local?.cg_product_net_weight),
+    productGrossWeightGrams: positiveDecimal(local?.cg_product_gross_weight),
+    // cg_box_weight is the carton's actual gross weight in KG, not tare weight.
+    cartonGrossWeightKg: positiveDecimal(local?.cg_box_weight),
   };
   for (const [key, value] of Object.entries(fields)) if (value) data[key] = value;
   if (id(local?.id)) data.lingxingProductId = id(local?.id);

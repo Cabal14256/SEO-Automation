@@ -20,7 +20,7 @@ export function groupAutomationCandidates(candidates: DocumentCandidate[]): Docu
   for (const candidate of candidates) {
     const snapshot = candidate.demand.snapshot;
     const addresses = [...new Set((candidate.sourceCandidates?.addresses ?? []).map((address) => DOCUMENT_ADDRESS_FIELDS.map((key) => address.data[key]?.normalize('NFKC').trim().replace(/\s+/g, ' ').toUpperCase() ?? '').join('\u001f')))].sort();
-    const key = documentDigest([snapshot.sid, snapshot.country.trim().toUpperCase(), snapshot.channel ?? '', snapshot.destinationFc?.trim().toUpperCase() ?? '', documentMemberAddressCode(candidate) ?? '', addresses]);
+    const key = documentDigest([candidate.shippingRunId ?? null, snapshot.sid, snapshot.country.trim().toUpperCase(), snapshot.channel ?? '', snapshot.destinationFc?.trim().toUpperCase() ?? '', documentMemberAddressCode(candidate) ?? '', addresses]);
     const group = groups.get(key); if (group) group.push(candidate); else groups.set(key, [candidate]);
   }
   const bounded: DocumentCandidate[][] = [];
@@ -60,7 +60,7 @@ export function resetAutomationRetry(item: StoredDocumentAutomationItem, exact: 
 export function candidateItem(candidates: DocumentCandidate[], id: string): StoredDocumentAutomationItem {
   const issues = candidates.flatMap((candidate) => candidate.blockers);
   for (const candidate of candidates) if (candidateIdentities(candidate).size > 50) issues.push({ code: 'DOCUMENT_PRODUCT_LIMIT', severity: 'error', message: `${candidate.demand.snapshot.fba} 单个完整 FBA 超过 50 个不同商品查询身份，不能拆开 FBA；请先明确维护资料或调整查询策略。` });
-  return { id, demandIds: candidates.map((candidate) => candidate.demandId), fbas: candidates.map((candidate) => candidate.demand.snapshot.fba),
+  return { id, ...(candidates[0]?.shippingRunId ? { shippingRunId: candidates[0].shippingRunId } : {}), demandIds: candidates.map((candidate) => candidate.demandId), fbas: candidates.map((candidate) => candidate.demand.snapshot.fba),
     documentId: null, documentVersion: null, exportId: null, fileId: null, stage: 'create', status: issues.some((issue) => issue.severity === 'error') ? 'blocked' : 'queued',
     issues, error: issues.some((issue) => issue.severity === 'error') ? { code: issues.find((issue) => issue.severity === 'error')!.code, message: issues.find((issue) => issue.severity === 'error')!.message } : null, attempt: 1, sourceDigest: automationSourceDigest(candidates.map(memberFromCandidate)), operations: {} };
 }
@@ -140,7 +140,7 @@ export async function advanceAutomationItem(context: AutomationContext, item: St
         if (await services.sourceDigest(item.demandIds) !== item.sourceDigest) throw new BatchError('DOCUMENT_SOURCE_STALE', 409, 'FBA 来源在任务开始后已变化，请核对当前来源后续跑。');
         const existing = await services.existing(item);
         if (existing) { item.documentId = existing.document.id; item.documentVersion = existing.document.version; item.stage = 'preview'; await persist(); continue; }
-        operation = { input: { operationId, shippingRunId: context.shippingRunId, purpose: 'invoice', demandIds: item.demandIds, title: context.title || `自动发票 · ${item.fbas.join(' / ').slice(0, 160)}`, fields: context.fields } };
+        operation = { input: { operationId, shippingRunId: item.shippingRunId ?? context.shippingRunId, purpose: 'invoice', demandIds: item.demandIds, title: context.title || `自动发票 · ${item.fbas.join(' / ').slice(0, 160)}`, fields: context.fields } };
       } else {
         const current = await currentDocument(item, services, context.mode === 'single_workbook');
         if (!current) { await persist(); return; }

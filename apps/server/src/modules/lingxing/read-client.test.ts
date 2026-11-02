@@ -17,6 +17,7 @@ const definitions = [
   ['listSellers', 'GET', '/erp/sc/data/seller/lists'],
   ['listShipments', 'POST', '/erp/sc/data/fba_report/shipmentList'],
   ['listInboundShipments', 'POST', '/erp/sc/routing/storage/shipment/getInboundShipmentList'],
+  ['getInboundShipmentDetail', 'POST', '/erp/sc/routing/storage/shipment/getInboundShipmentListMwsDetail'],
   ['listLogisticsChannels', 'POST', '/erp/sc/data/local_inventory/channelList'],
   ['listTransportMethods', 'POST', '/basicOpen/businessConfig/transportMethod/list'],
   ['getShipmentDetails', 'POST', '/amzStaServer/openapi/inbound-shipment/shipmentDetailList'],
@@ -26,11 +27,16 @@ const definitions = [
   ['getListings', 'POST', '/erp/sc/data/mws/listing'],
   ['getLocalProductDetail', 'POST', '/erp/sc/routing/data/local_inventory/productInfo'],
   ['listStockSubjects', 'POST', '/basicOpen/stockSubject/list'],
+  ['searchCustoms', 'POST', '/basicOpen/customs/search'],
+  ['getCustomsDeclarationDetails', 'POST', '/supplyShipmentBasic/openApi/customsDeclaration/batchDetail'],
 ] as const;
 const queryFor = (operation: LingxingReadOperation): Record<string, unknown> => operation === 'getFbaProducts'
   ? { sids: [1], search_field: 'msku', search_value: 'SKU-1', offset: 0, length: 20 }
   : operation === 'getListings' ? { sid: '1', search_field: 'seller_sku', search_value: ['SKU-1'], exact_search: 1, is_delete: 0, offset: 0, length: 100 }
     : operation === 'getLocalProductDetail' ? { id: 1 } : operation === 'listStockSubjects' ? { subjectType: 'PLATFORM' }
+    : operation === 'searchCustoms' ? { offset: 0, length: 20, searchType: 3, searchValues: ['FBATEST001'] }
+    : operation === 'getCustomsDeclarationDetails' ? { declarationNos: ['CD20261101001'] }
+    : operation === 'getInboundShipmentDetail' ? { shipment_sn: 'SP20261101001' }
     : operation === 'listSellers' ? {} : { sid: 1 };
 
 afterEach(() => vi.unstubAllEnvs());
@@ -173,6 +179,53 @@ describe('Lingxing operation-scoped read client', () => {
       { sids: [17], search_field: 'msku', search_value: 'seller-SKU', offset: 20, length: 20 }, { sku: 'local-SKU' },
       { sid: '17', search_field: 'seller_sku', search_value: ['seller-SKU'], exact_search: 1, is_delete: 0, offset: 0, length: 100 }, {},
     ]);
+  });
+
+  it('rejects broad or malformed customs queries before credentials, authentication or request hooks are used', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(), onAuthAttempt = vi.fn(), beforeRequest = vi.fn();
+    const shared = coordinator(), loadTokens = vi.spyOn(shared.value, 'loadTokens');
+    const client = new LingxingReadClient({ appId, appSecret: 'offline-secret' },
+      { fetchImpl, coordinator: shared.value, onAuthAttempt, beforeRequest });
+    const invalid: Array<[LingxingReadOperation, Record<string, unknown>]> = [
+      ['searchCustoms', {}],
+      ...[
+        { offset: -1 }, { offset: 0.5 }, { offset: '0' }, { offset: Number.MAX_SAFE_INTEGER + 1 },
+        { length: 0 }, { length: 101 }, { length: 1.5 }, { length: '20' },
+        { searchType: 1 }, { searchType: '3' }, { searchValue: 'FBATEST001' }, { path: '/write' },
+        { searchValues: [] }, { searchValues: ['FBATEST001', 'FBATEST001'] }, { searchValues: [''] },
+        { searchValues: [' '] }, { searchValues: ['SP20261101001'] }, { searchValues: ['FBATEST/001'] },
+        { searchValues: ['FBA' + 'A'.repeat(98)] }, { searchValues: [1] },
+        { searchValues: Array.from({ length: 51 }, (_, index) => `FBATEST${index}`) },
+      ].map((override) => ['searchCustoms', { ...queryFor('searchCustoms'), ...override }] as [LingxingReadOperation, Record<string, unknown>]),
+      ['getCustomsDeclarationDetails', {}],
+      ...[
+        { declarationNos: [] }, { declarationNos: ['CD1', 'CD1'] }, { declarationNos: [''] },
+        { declarationNos: [' '] }, { declarationNos: ['A'.repeat(101)] }, { declarationNos: [1] },
+        { declarationNos: Array.from({ length: 51 }, (_, index) => `CD${index}`) }, { offset: 0 },
+      ].map((override) => ['getCustomsDeclarationDetails', { ...queryFor('getCustomsDeclarationDetails'), ...override }] as [LingxingReadOperation, Record<string, unknown>]),
+      ['getInboundShipmentDetail', {}], ['getInboundShipmentDetail', { shipment_sn: '' }],
+      ['getInboundShipmentDetail', { shipment_sn: ' ' }], ['getInboundShipmentDetail', { shipment_sn: 1 }],
+      ['getInboundShipmentDetail', { shipment_sn: 'A'.repeat(101) }],
+      ['getInboundShipmentDetail', { shipment_sn: 'SP20261101001', return_deleted: true }],
+    ];
+    for (const [operation, params] of invalid) await expect(client.read(operation, params)).rejects.toMatchObject({ code: 'LINGXING_INVALID_REQUEST' });
+    expect(fetchImpl).not.toHaveBeenCalled(); expect(loadTokens).not.toHaveBeenCalled();
+    expect(onAuthAttempt).not.toHaveBeenCalled(); expect(beforeRequest).not.toHaveBeenCalled();
+  });
+
+  it('exposes narrow customs helpers and preserves exact wire values at their supported boundaries', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => json({ code: 0, data: [] }));
+    const client = new LingxingReadClient({ appId, accessToken: token }, { fetchImpl });
+    const search = { offset: 0, length: 100, searchType: 3 as const, searchValues: Array.from({ length: 50 }, (_, index) => 'FBA' + String(index).padStart(97, '0')) };
+    const details = { declarationNos: Array.from({ length: 50 }, (_, index) => String(index).padStart(100, '0')) };
+    const inbound = { shipment_sn: 'S'.repeat(100) };
+    await client.searchCustoms(search); await client.getCustomsDeclarationDetails(details); await client.getInboundShipmentDetail(inbound);
+    expect(fetchImpl.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      '/basicOpen/customs/search', '/supplyShipmentBasic/openApi/customsDeclaration/batchDetail',
+      '/erp/sc/routing/storage/shipment/getInboundShipmentListMwsDetail',
+    ]);
+    expect(fetchImpl.mock.calls.map(([, options]) => options?.method)).toEqual(['POST', 'POST', 'POST']);
+    expect(fetchImpl.mock.calls.map(([, options]) => JSON.parse(String(options?.body)))).toEqual([search, details, inbound]);
   });
 
   it('authenticates separately using multipart and shares one in-memory token request', async () => {

@@ -10,6 +10,7 @@ export * from './online-imports.js';
 export * from './import-drafts.js';
 export * from './demand-workspace.js';
 export * from './documents.js';
+export * from './service-mappings.js';
 export * from './document-boxes.js';
 export * from './workflow.js';
 export * from './maintenance.js';

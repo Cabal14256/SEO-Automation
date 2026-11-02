@@ -169,6 +169,13 @@
       "when": 1793115880078,
       "tag": "0023_shipping_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1793604953825,
+      "tag": "0024_service_mappings",
+      "breakpoints": true
     }
   ]
 }

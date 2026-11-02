@@ -26,11 +26,12 @@ export function customsContentFingerprint(record: WorkflowRecord, context: Workf
   return digestCustomsValue({ source: record.source, boxIds: [...record.boxIds].sort(), data: content, logistics: customsLogisticsDependencies(record, context).map((peer) => ({ id: peer.id, version: peer.version, data: peer.data, source: peer.source })), ...(purpose === 'filing9810-checklist' ? { checklist: { customsExternalNumber: data.customsResult.externalNumber, reviewExportId: data.review?.exportId ?? '', reviewSha256: data.review?.fileSha256 ?? '' } } : {}) });
 }
 
-/** Defaults split on the business keys; combining countries always needs explicit evidence. */
-export function suggestCustomsGroups(members: ReadonlyArray<{ entity: string; country: string; declarationMode: string; currency: string; boxIds: string[] }>): Array<{ key: string; boxIds: string[] }> {
+/** Store boundaries are mandatory; combining countries within one store still needs explicit evidence. */
+export function suggestCustomsGroups(members: ReadonlyArray<{ sid: number; entity: string; country: string; declarationMode: string; currency: string; boxIds: string[] }>): Array<{ key: string; boxIds: string[] }> {
   const groups = new Map<string, string[]>();
   for (const member of members) {
-    const key = JSON.stringify([member.entity, documentCountryCode(member.country) ?? member.country.toUpperCase(), member.declarationMode, member.currency]);
+    if (!Number.isSafeInteger(member.sid) || member.sid <= 0) throw new Error('报关分组缺少有效店铺 SID。');
+    const key = JSON.stringify([member.sid, member.entity, documentCountryCode(member.country) ?? member.country.toUpperCase(), member.declarationMode, member.currency]);
     groups.set(key, [...(groups.get(key) ?? []), ...member.boxIds]);
   }
   return [...groups].map(([key, boxIds]) => ({ key, boxIds: [...new Set(boxIds)] }));
@@ -42,6 +43,8 @@ export function validateCustomsContent(record: WorkflowRecord, context: Workflow
   if (!context.sourceValid) add('CUSTOMS_SOURCE_STALE', context.sourceInvalidReason ?? 'M4 来源已变化，请重新采用有效单据。');
   const boxes = workflowBoxes(record.source).filter((box) => record.boxIds.includes(box.id));
   if (!record.boxIds.length || new Set(record.boxIds).size !== record.boxIds.length || boxes.length !== record.boxIds.length) add('CUSTOMS_BOX_SCOPE', '报关箱范围必须唯一且属于当前 M4 单据。');
+  if (boxes.some((box) => !Number.isSafeInteger(box.sid) || box.sid <= 0)) add('CUSTOMS_SHOP_SCOPE', '报关箱必须有明确且有效的所属店铺。');
+  if (new Set(boxes.map((box) => box.sid)).size > 1) add('CUSTOMS_CROSS_SHOP', '清关及报关资料须严格按店铺隔离，不同店铺不能合报；相同主体或跨国合并确认不解除店铺隔离。');
   const countries = [...new Set(boxes.map((box) => documentCountryCode(box.country) ?? box.country.toUpperCase()))].sort();
   if (countries.join(',') !== [...new Set(data.countryCodes)].sort().join(',')) add('CUSTOMS_COUNTRY_SCOPE', '报关国家必须与所选箱子的目的国家一致。');
   if (countries.length > 1 && (!data.crossCountryConfirmation.confirmed || !data.crossCountryConfirmation.reason)) add('CUSTOMS_CROSS_COUNTRY_CONFIRMATION', '跨国合并必须逐组确认依据，默认按国家拆组。');

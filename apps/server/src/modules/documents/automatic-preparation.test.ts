@@ -1,14 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { documentAutomationJobSchema, documentAutomationRetryInputSchema, documentAutomationStartInputSchema, type DocumentProfile, type DocumentRevisionData, type DocumentTemplate } from '@scm/contracts';
-import { planAutomaticPreparation, prepareDocumentAutomation } from './automatic-preparation.js';
+import { planAutomaticPreparation as planWithServiceMappings, planDocumentServiceMapping, prepareDocumentAutomation } from './automatic-preparation.js';
+import type { ActiveServiceMapping } from '../service-mappings/repository.js';
 import { validateDocumentData } from './domain.js';
 import { documentProductOverrideKey, validateWorkbookData } from './workbook.js';
 
 const service = vi.hoisted(() => ({ documentOperation: vi.fn(), lockedDocument: vi.fn(), reviseDocumentInTx: vi.fn(), serializeProfile: vi.fn() }));
+const mappingRepository = vi.hoisted(() => ({ active: vi.fn() }));
 vi.mock('./service.js', () => service);
+vi.mock('../service-mappings/repository.js', () => ({ getActiveServiceMappingsInTx: mappingRepository.active }));
 
 const now = '2026-10-25T00:00:00.000Z';
+const mapping = (overrides: Partial<ActiveServiceMapping> = {}): ActiveServiceMapping => ({ id: randomUUID(), version: 1, countryCode: 'US', transportMethod: 'HY', service: 'EXPRESS', ...overrides });
+const planAutomaticPreparation = (data: DocumentRevisionData, profiles: readonly DocumentProfile[], templates: readonly DocumentTemplate[], fields: DocumentRevisionData['fields'] = {}, mappings: readonly ActiveServiceMapping[] = [mapping()]) => planWithServiceMappings(data, profiles, templates, fields, mappings);
+beforeEach(() => { mappingRepository.active.mockReset(); mappingRepository.active.mockResolvedValue([mapping()]); });
 const address = { addressCode: 'ONT8', destinationFc: 'ONT8', countryCode: 'US', recipientName: 'Receiver', addressLine1: '1 Test Road', city: 'City', postalCode: '12345' };
 function profile(category: DocumentProfile['category'], data: Record<string, unknown>): DocumentProfile {
   return { id: randomUUID(), category, key: `${category}资料`, version: 1, status: 'active', data, createdBy: 'admin', createdAt: now };
@@ -37,7 +43,104 @@ function catalog() {
 }
 const errors = (plan: ReturnType<typeof planAutomaticPreparation>) => plan.issues.filter((issue) => issue.severity === 'error');
 
+describe('invoice country and transport method service mappings', () => {
+  it('matches a configured BR country while leaving unknown ZZ unresolved', () => {
+    const data = fixture(); data.members[0]!.demand.snapshot.country = 'BR';
+    expect(planDocumentServiceMapping(data, [mapping({ countryCode: 'BR' })])).toEqual({ service: 'EXPRESS', issues: [] });
+    data.members[0]!.demand.snapshot.country = 'ZZ';
+    expect(planDocumentServiceMapping(data, [mapping({ countryCode: 'ZZ' })])).toMatchObject({ issues: [{ code: 'DOCUMENT_SERVICE_MAPPING_MISSING' }] });
+  });
+  it.each([['HY', '海运'], ['KP', '空派'], ['KH', '卡航']])('matches the confirmed legacy method %s to %s without modifying shipment snapshots', (code, name) => {
+    const data = fixture(); data.members[0]!.demand.snapshot.channel = ` ${code.toLowerCase()} `;
+    const original = structuredClone(data);
+    expect(planDocumentServiceMapping(data, [mapping({ transportMethod: name })])).toEqual({ service: 'EXPRESS', issues: [] });
+    expect(data).toEqual(original);
+    data.members[0]!.demand.snapshot.channel = name;
+    expect(planDocumentServiceMapping(data, [mapping({ transportMethod: code })])).toEqual({ service: 'EXPRESS', issues: [] });
+  });
+  it('does not broaden 海运 into 海派 and rejects ambiguous code/name mapping duplicates', () => {
+    const data = fixture(); data.members[0]!.demand.snapshot.channel = 'HY';
+    expect(planDocumentServiceMapping(data, [mapping({ transportMethod: '海派' })])).toMatchObject({ issues: [{ code: 'DOCUMENT_SERVICE_MAPPING_MISSING' }] });
+    expect(planDocumentServiceMapping(data, [mapping({ transportMethod: 'HY' }), mapping({ transportMethod: '海运' })])).toMatchObject({ issues: [{ code: 'DOCUMENT_SERVICE_MAPPING_AMBIGUOUS' }] });
+  });
+  it('normalizes member country aliases and trims the method without guessing transport aliases', () => {
+    const data = fixture(), mappings = [mapping({ transportMethod: '海派', service: '手写服务' })];
+    data.members[0]!.demand.snapshot.country = '美国'; data.members[0]!.demand.snapshot.channel = ' 海派 ';
+    const before = structuredClone({ data, mappings });
+    expect(planDocumentServiceMapping(data, mappings)).toEqual({ service: '手写服务', issues: [] });
+    expect({ data, mappings }).toEqual(before);
+    data.members[0]!.demand.snapshot.channel = 'SEA';
+    expect(planDocumentServiceMapping(data, mappings).issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_SERVICE_MAPPING_MISSING' }));
+  });
+  it.each(['no mapping', 'wrong country', 'wrong method', 'missing method', 'unknown country'])('leaves %s unresolved instead of falling back to generic channel services', (kind) => {
+    const data = fixture(), mappings = kind === 'no mapping' ? [] : [mapping()];
+    if (kind === 'wrong country') mappings[0]!.countryCode = 'GB';
+    if (kind === 'wrong method') mappings[0]!.transportMethod = 'OTHER';
+    if (kind === 'missing method') data.members[0]!.demand.snapshot.channel = '';
+    if (kind === 'unknown country') data.members[0]!.demand.snapshot.country = '未知国家';
+    const plan = planAutomaticPreparation(data, catalog(), [template()], {}, mappings);
+    expect(plan.fields.service).toBeUndefined();
+    expect(plan.issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_SERVICE_MAPPING_MISSING' }));
+  });
+  it('requires every member to have a unique mapping and the whole ticket to share one service', () => {
+    const data = fixture(), second = structuredClone(data.members[0]!);
+    second.demand.snapshot.country = '英国'; second.demand.snapshot.channel = '空派'; data.members.push(second);
+    const mappings = [mapping(), mapping({ countryCode: 'GB', transportMethod: '空派' })];
+    expect(planDocumentServiceMapping(data, mappings)).toEqual({ service: 'EXPRESS', issues: [] });
+    expect(planDocumentServiceMapping(data, mappings.slice(0, 1))).toMatchObject({ issues: [{ code: 'DOCUMENT_SERVICE_MAPPING_MISSING' }] });
+    mappings[1]!.service = '英国服务';
+    expect(planDocumentServiceMapping(data, mappings)).toMatchObject({ issues: [{ code: 'DOCUMENT_SERVICE_MAPPING_CONFLICT' }] });
+    expect(planDocumentServiceMapping(fixture(), [mapping(), mapping()])).toMatchObject({ issues: [{ code: 'DOCUMENT_SERVICE_MAPPING_AMBIGUOUS' }] });
+  });
+  it('preserves explicit ticket or operation fields even when the mapping differs or is absent', () => {
+    const data = fixture(); data.fields.service = '本票服务';
+    expect(planAutomaticPreparation(data, [], [], { service: '其它服务' }, []).fields.service).toBe('本票服务');
+    expect(planAutomaticPreparation(data, [], [], {}, []).issues.some((issue) => issue.code.startsWith('DOCUMENT_SERVICE_MAPPING'))).toBe(false);
+    delete data.fields.service;
+    expect(planAutomaticPreparation(data, [], [], { service: '本次手填服务' }).fields.service).toBe('本次手填服务');
+    expect(planAutomaticPreparation(data, [], [], { service: '本次手填服务' }, []).issues.some((issue) => issue.code.startsWith('DOCUMENT_SERVICE_MAPPING'))).toBe(false);
+  });
+  it('skips incompatible generic channel defaults while enforcing explicitly referenced service limits', () => {
+    const data = fixture(), profiles = catalog(), channel = profiles.find((entry) => entry.category === 'channel')!;
+    const mappings = [mapping({ service: '手写映射服务' })];
+    let plan = planAutomaticPreparation(data, profiles, [template()], {}, mappings);
+    expect(plan.fields.service).toBe('手写映射服务');
+    expect(plan.profileReferences.some((entry) => entry.category === 'channel')).toBe(false);
+    expect(plan.issues.some((issue) => issue.code === 'DOCUMENT_SERVICE_INVALID')).toBe(false);
+    data.profileReferences = [reference(channel)];
+    plan = planAutomaticPreparation(data, profiles, [template()], {}, mappings);
+    expect(plan.fields.service).toBe('手写映射服务');
+    expect(plan.issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_SERVICE_INVALID', profileCategory: 'channel' }));
+    data.fields.service = 'EXPRESS';
+    expect(planAutomaticPreparation(data, profiles, [template()], {}, mappings).fields.service).toBe('EXPRESS');
+  });
+  it('adopts a changed mapping only for a deliberately blank service and retains saved historical values', () => {
+    const data = fixture(), first = mapping({ service: '原服务' });
+    const initial = planAutomaticPreparation(data, [], [], {}, [first]);
+    const saved = { ...data, fields: initial.fields }, previous = structuredClone(saved);
+    const current = { ...first, version: 2, service: '新服务' };
+    expect(planAutomaticPreparation(saved, [], [], {}, [current]).fields.service).toBe('原服务');
+    expect(saved).toEqual(previous);
+    saved.fields = { ...saved.fields, service: '' };
+    expect(planAutomaticPreparation(saved, [], [], {}, [current]).fields.service).toBe('新服务');
+  });
+});
+
 describe('automatic invoice preparation', () => {
+  it('fixes flags to no despite explicit drafts, submitted overrides or conflicting profile defaults', () => {
+    for (const explicit of [false, true]) {
+      const data = fixture(), profiles = catalog(), templates = [template()];
+      const flags = { battery: '是', magnetic: '是', liquid: '是', powder: '是', dangerous: '是' };
+      if (explicit) Object.assign(data.fields, flags);
+      Object.assign(profiles.find((entry) => entry.category === 'channel')!.data, flags);
+      Object.assign(profiles.find((entry) => entry.category === 'party')!.data, { battery: '否', magnetic: '否', liquid: '否', powder: '否', dangerous: '否' });
+      const original = structuredClone({ data, profiles, templates });
+      const plan = planAutomaticPreparation(data, profiles, templates, explicit ? flags : {});
+      expect(errors(plan)).toEqual([]);
+      expect(plan.fields).toMatchObject({ battery: '否', magnetic: '否', liquid: '否', powder: '否', dangerous: '否' });
+      expect({ data, profiles, templates }).toEqual(original);
+    }
+  });
   it('adopts scoped versions and confirms complete Lingxing shipment addresses without local address profiles', () => {
     const data = fixture(true), profiles = catalog(), templates = [template()];
     data.fields.orderNumber = 'OLD'; data.fields.currency = 'EUR';
@@ -77,11 +180,14 @@ describe('automatic invoice preparation', () => {
   it('respects an existing allowed service override but blocks a service outside the scoped channel rules', () => {
     const data = fixture(), profiles = catalog(), channel = profiles.find((entry) => entry.category === 'channel')!;
     channel.data.allowedServices = ['EXPRESS', 'ECONOMY']; channel.data.service = 'EXPRESS'; data.fields.service = 'ECONOMY';
+    data.profileReferences = [reference(channel)];
     expect(planAutomaticPreparation(data, profiles, [template()]).fields.service).toBe('ECONOMY');
     expect(errors(planAutomaticPreparation(data, profiles, [template()]))).toEqual([]);
     data.fields.service = 'UNLISTED'; expect(planAutomaticPreparation(data, profiles, [template()]).issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_SERVICE_INVALID' }));
     delete data.fields.service; delete channel.data.service;
-    expect(planAutomaticPreparation(data, profiles, [template()]).issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_SERVICE_AMBIGUOUS' }));
+    const unresolved = planAutomaticPreparation(data, profiles, [template()], {}, []);
+    expect(unresolved.fields.service).toBeUndefined();
+    expect(unresolved.issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_SERVICE_MAPPING_MISSING' }));
   });
   it('does not infer tax or VAT from unbound profiles, country or parties', () => {
     const profiles = [profile('party', { recipientCompany: 'Unbound party', taxMode: '包税', vat: 'NOT-BOUND' }), profile('tax', { taxMode: '自主税号', vat: 'NOT-BOUND' })];
@@ -98,7 +204,8 @@ describe('automatic invoice preparation', () => {
     const data = fixture(); data.fields = { addressSelectionMode: 'manual', ...(mode === 'manual-empty' ? {} : address), ...(mode === 'confirmed' ? { addressConfirmed: 'true', addressConfirmationReason: '人工核对依据' } : {}) };
     const original = structuredClone(data.fields), plan = planAutomaticPreparation(data, catalog(), [template()]);
     expect(plan.confirmAddress).toBe(false); expect(plan.fields.addressSelectionMode).toBe('manual');
-    for (const [key, value] of Object.entries(original)) expect(plan.fields[key]).toBe(value);
+    for (const [key, value] of Object.entries(original)) expect(plan.fields[key]).toBe(key === 'recipientName' && original.addressCode ? original.addressCode : value);
+    expect(data.fields).toEqual(original);
     expect(plan.profileReferences.some((entry) => entry.category === 'address')).toBe(false);
     expect(plan.issues.some((issue) => issue.code === 'DOCUMENT_ADDRESS_UNCONFIRMED')).toBe(mode !== 'confirmed');
   });
@@ -128,7 +235,7 @@ describe('automatic invoice preparation', () => {
     chosen.version = 2; chosen.data.service = 'NEW'; const currentTemplate = { ...oldTemplate, version: 2, fileId: randomUUID() };
     const plan = planAutomaticPreparation(data, profiles, [currentTemplate]);
     expect(plan.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining(['DOCUMENT_PROFILE_STALE', 'DOCUMENT_TEMPLATE_STALE']));
-    expect(plan.profileReferences.find((entry) => entry.profileId === chosen.id)?.version).toBe(1); expect(plan.fields.service).toBeUndefined(); expect(plan.templateReference?.version).toBe(1);
+    expect(plan.profileReferences.find((entry) => entry.profileId === chosen.id)?.version).toBe(1); expect(plan.fields.service).toBe('EXPRESS'); expect(plan.templateReference?.version).toBe(1);
   });
   it('does not gate a merged FBA on the stale profile of a product outside its global representative', () => {
     const data = fixture(true), member = data.members[0]!, [representative, hidden] = member.shipment.data.items;
@@ -174,6 +281,7 @@ describe('automatic preparation revision boundary', () => {
     const result = await prepareDocumentAutomation(id, 'admin', input);
     expect(locks).toEqual(['share', 'share']);
     expect(service.lockedDocument).toHaveBeenCalledWith(tx, id, 'admin', 3);
+    expect(mappingRepository.active).toHaveBeenCalledWith(tx);
     expect(service.reviseDocumentInTx).toHaveBeenCalledWith(tx, id, 'admin', expect.objectContaining({ expectedVersion: 3, operationId: input.operationId, confirmAddress: true, fields: expect.objectContaining({ addressConfirmed: 'true', currency: 'USD' }) }));
     expect(result).toMatchObject({ documentId: id, document: { version: 4 }, replayed: false, issues: [] });
   });
@@ -182,6 +290,7 @@ describe('automatic preparation revision boundary', () => {
     service.lockedDocument.mockRejectedValue(new Error('VERSION_CONFLICT'));
     await expect(prepareDocumentAutomation(randomUUID(), 'admin', { operationId: randomUUID(), expectedVersion: 2, reason: '自动准备资料' })).rejects.toThrow('VERSION_CONFLICT');
     expect(tx.select).not.toHaveBeenCalled(); expect(service.reviseDocumentInTx).not.toHaveBeenCalled();
+    expect(mappingRepository.active).not.toHaveBeenCalled();
   });
   it('returns ambiguity issues beside the saved safe partial revision for durable blocking', async () => {
     const data = fixture(), profiles = catalog(), channel = profiles.find((entry) => entry.category === 'channel')!; profiles.push({ ...structuredClone(channel), id: randomUUID() });

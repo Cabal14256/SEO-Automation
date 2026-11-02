@@ -1,24 +1,25 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { documentListQuerySchema, type DocumentRevisionData } from '@scm/contracts';
-import { operationAudit } from '../../db/schema.js';
+import { DOCUMENT_INVOICE_PRICING_RULE, documentListQuerySchema, type DocumentExportReference, type DocumentRevisionData } from '@scm/contracts';
+import { fileIndex, operationAudit } from '../../db/schema.js';
 import { batchOperations, subBatches, weeklyBatches } from '../batches/schema.js';
 import { documentDigest } from './domain.js';
 import { haveDocumentAddressSourcesChanged, reviseDocumentAddressFields } from './address.js';
 import { planAutomaticPreparation } from './automatic-preparation.js';
-import { documentExports, documentMemberClaims, documentRevisions, documents } from './schema.js';
+import { documentExports, documentMemberClaims, documentReviews, documentRevisions, documents } from './schema.js';
 
-const mocks = vi.hoisted(() => ({ transaction: vi.fn(), select: vi.fn(), actor: vi.fn(), execute: vi.fn(), update: vi.fn(), insert: vi.fn(), confirmedGroup: vi.fn(), physical: vi.fn(), sourceCandidates: vi.fn(), checked: vi.fn() }));
+const mocks = vi.hoisted(() => ({ transaction: vi.fn(), select: vi.fn(), actor: vi.fn(), execute: vi.fn(), update: vi.fn(), insert: vi.fn(), confirmedGroup: vi.fn(), physical: vi.fn(), sourceCandidates: vi.fn(), checked: vi.fn(), serviceMappings: vi.fn() }));
 vi.mock('../../db/client.js', () => ({ db: { transaction: mocks.transaction } }));
 vi.mock('../batches/service.js', async (original) => ({ ...await original<typeof import('../batches/service.js')>(), requireBatchActor: mocks.actor, getConfirmedGroupInTx: mocks.confirmedGroup }));
 vi.mock('../physical/service.js', () => ({ getValidPhysicalConfirmationInTx: mocks.physical }));
 vi.mock('../imports/service.js', () => ({ checkedFileBytes: mocks.checked }));
 vi.mock('./sources.js', () => ({ loadDocumentSourceCandidates: mocks.sourceCandidates }));
+vi.mock('../service-mappings/repository.js', () => ({ getActiveServiceMappingsInTx: mocks.serviceMappings }));
 vi.mock('./domain.js', async (original) => ({ ...await original<typeof import('./domain.js')>(), validateDocumentData: () => [] }));
 vi.mock('./workbook.js', async (original) => ({ DOCUMENT_HEADER_FIELDS: (await original<typeof import('./workbook.js')>()).DOCUMENT_HEADER_FIELDS, validateWorkbookData: () => [], reviseDocumentProductFields: (_previous: DocumentRevisionData, next: DocumentRevisionData) => ({ ...next.fields }) }));
-import { appendDocumentRevisionInTx, applyDocumentAutomaticDefaultsInTx, cancelDocument, documentCandidatesInTx, listDocumentCandidates, listDocuments, reviseDocumentInTx, serializeDocument } from './service.js';
+import { appendDocumentRevisionInTx, applyDocumentAutomaticDefaultsInTx, cancelDocument, documentCandidatesInTx, listDocumentCandidates, listDocuments, reviewDocument, reviseDocumentInTx, serializeDocument } from './service.js';
 import { DocumentReadContext } from './read-context.js';
 import type { BatchTx } from '../batches/service.js';
 
@@ -60,6 +61,7 @@ beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset();
   selected = []; selections = []; updated = []; inserted = []; updateResult = [];
   mocks.actor.mockResolvedValue({}); mocks.execute.mockResolvedValue({});
+  mocks.serviceMappings.mockResolvedValue([]);
   mocks.select.mockImplementation((fields: unknown) => {
     if (!selected.length) throw new Error('Unexpected database selection');
     const selection = { fields }; selections.push(selection);
@@ -213,6 +215,30 @@ describe('server-derived invoice currency and Lingxing address defaults', () => 
     return data;
   };
   const tx = () => ({ select: mocks.select }) as unknown as BatchTx;
+  it('fills a new invoice from the current exact country/method mapping without changing source members', async () => {
+    const data = dataFor('美国'); data.members[0]!.demand.snapshot.channel = '海派';
+    const original = structuredClone(data), transaction = tx();
+    mocks.serviceMappings.mockResolvedValue([{ id: randomUUID(), version: 2, countryCode: 'US', transportMethod: '海派', service: '手写服务' }]);
+    const next = await applyDocumentAutomaticDefaultsInTx(transaction, data);
+    expect(next.fields.service).toBe('手写服务'); expect(data).toEqual(original);
+    expect(mocks.serviceMappings).toHaveBeenCalledWith(transaction);
+  });
+  it('preserves existing service fields and never rereads mappings during ordinary historical revisions', async () => {
+    const data = dataFor(); data.members[0]!.demand.snapshot.channel = '海派'; data.fields.service = '本票手填';
+    mocks.serviceMappings.mockResolvedValue([{ id: randomUUID(), version: 2, countryCode: 'US', transportMethod: '海派', service: '新版服务' }]);
+    expect((await applyDocumentAutomaticDefaultsInTx(tx(), data)).fields.service).toBe('本票手填');
+    expect(mocks.serviceMappings).not.toHaveBeenCalled();
+    const previous = structuredClone(data), changed = structuredClone(data); changed.fields.service = '';
+    expect((await applyDocumentAutomaticDefaultsInTx(tx(), changed, previous)).fields.service).toBe('');
+    expect(mocks.serviceMappings).not.toHaveBeenCalled();
+  });
+  it('leaves unmapped or conflicting new invoice services blank for the later preparation check', async () => {
+    const data = dataFor(); data.members[0]!.demand.snapshot.channel = '海派';
+    expect((await applyDocumentAutomaticDefaultsInTx(tx(), data)).fields.service).toBeUndefined();
+    const other = structuredClone(data.members[0]!); other.demand.snapshot.country = '英国'; other.demand.snapshot.channel = '空派'; data.members.push(other);
+    mocks.serviceMappings.mockResolvedValue([{ id: randomUUID(), version: 1, countryCode: 'US', transportMethod: '海派', service: '美国服务' }, { id: randomUUID(), version: 1, countryCode: 'GB', transportMethod: '空派', service: '英国服务' }]);
+    expect((await applyDocumentAutomaticDefaultsInTx(tx(), data)).fields.service).toBeUndefined();
+  });
   it('keeps one automatic preparation confirmed when hydration only completes parsing of the same bound files', async () => {
     const previous = dataFor('US'); previous.generationRulesVersion = 'v2';
     const sourceAddress = { ...address }; delete (sourceAddress as Partial<typeof address>).addressCode;
@@ -257,7 +283,7 @@ describe('server-derived invoice currency and Lingxing address defaults', () => 
   });
   it('fills a new ticket from archived Lingxing evidence without querying the local address book', async () => {
     const data = dataFor(), next = await applyDocumentAutomaticDefaultsInTx(tx(), data);
-    expect(next.fields).toMatchObject({ currency: 'USD', orderNumber: null, reference: null, tradeTerms: null, ...address, addressConfirmed: 'false', addressConfirmationReason: '', addressSelectionMode: 'lingxing', addressSourceLabel: '领星货件地址' });
+    expect(next.fields).toMatchObject({ currency: 'USD', orderNumber: null, reference: null, tradeTerms: null, ...address, recipientName: address.addressCode, addressConfirmed: 'false', addressConfirmationReason: '', addressSelectionMode: 'lingxing', addressSourceLabel: '领星货件地址' });
     expect(next.profileReferences).toEqual([]); expect(selections).toEqual([]);
     expect(data.fields).toMatchObject({ orderNumber: 'OLD-ORDER', currency: 'GBP' });
   });
@@ -265,11 +291,18 @@ describe('server-derived invoice currency and Lingxing address defaults', () => 
     const data = dataFor(country); data.fields.recipientName = 'Manual Receiver';
     expect((await applyDocumentAutomaticDefaultsInTx(tx(), data)).fields.currency).toBe(currency); expect(selections).toEqual([]);
   });
+  it('still adopts the complete source address when a new ticket only supplies an address code', async () => {
+    const data = dataFor(); data.fields.addressCode = address.addressCode;
+    const next = await applyDocumentAutomaticDefaultsInTx(tx(), data);
+    expect(next.fields).toMatchObject({ ...address, recipientName: address.addressCode, addressSelectionMode: 'lingxing', addressConfirmed: 'false' });
+    expect(data.fields.recipientName).toBeUndefined();
+  });
   it('preserves confirmed manual corrections and historical references during ordinary saves', async () => {
     const previous = dataFor(); previous.fields = { ...address, recipientName: 'Manual Receiver', addressSelectionMode: 'manual', addressConfirmed: 'true', addressConfirmationReason: 'Checked with receiver' };
     previous.profileReferences = [{ category: 'address', profileId: randomUUID(), version: 2, data: address }];
     const next = await applyDocumentAutomaticDefaultsInTx(tx(), structuredClone(previous), previous);
-    expect(next.fields).toMatchObject(previous.fields); expect(next.profileReferences).toEqual(previous.profileReferences); expect(selections).toEqual([]);
+    expect(next.fields).toMatchObject({ ...previous.fields, recipientName: address.addressCode }); expect(next.profileReferences).toEqual(previous.profileReferences); expect(selections).toEqual([]);
+    expect(previous.fields.recipientName).toBe('Manual Receiver');
   });
   it('preserves address edits submitted together with a member source change', async () => {
     const previous = dataFor(); previous.fields = { ...address };
@@ -285,18 +318,18 @@ describe('server-derived invoice currency and Lingxing address defaults', () => 
     const previous = dataFor(); previous.fields = { ...address, addressLine1: 'Obsolete Local Road', phone: 'OLD-PHONE', addressSelectionMode: 'profile', addressConfirmed: 'true', addressConfirmationReason: 'Old book' };
     previous.profileReferences = [{ category: 'address', profileId: randomUUID(), version: 2, data: { ...previous.fields } }];
     const next = await applyDocumentAutomaticDefaultsInTx(tx(), structuredClone(previous), previous);
-    expect(next.fields).toMatchObject({ ...address, phone: '', addressConfirmed: 'false', addressSelectionMode: 'lingxing' }); expect(next.profileReferences).toEqual([]);
+    expect(next.fields).toMatchObject({ ...address, recipientName: address.addressCode, phone: '', addressConfirmed: 'false', addressSelectionMode: 'lingxing' }); expect(next.profileReferences).toEqual([]);
   });
-  it('refreshes source values even when the FBA and address code stay the same', async () => {
+  it.each([address.recipientName, address.addressCode])('refreshes source values with the same FBA and address code when the submitted recipient is %s', async (recipientName) => {
     const previous = dataFor(); previous.fields = { ...address, addressSelectionMode: 'lingxing', addressConfirmed: 'true', addressConfirmationReason: 'Old source' };
-    const data = structuredClone(previous); data.members[0]!.sourceCandidates!.addresses[0]!.data.addressLine1 = '20 Updated Source Road';
+    const data = structuredClone(previous); data.fields.recipientName = recipientName; data.members[0]!.sourceCandidates!.addresses[0]!.data.addressLine1 = '20 Updated Source Road';
     const next = await applyDocumentAutomaticDefaultsInTx(tx(), data, previous);
-    expect(next.fields).toMatchObject({ addressLine1: '20 Updated Source Road', addressConfirmed: 'false', addressConfirmationReason: '' });
+    expect(next.fields).toMatchObject({ addressLine1: '20 Updated Source Road', recipientName: address.addressCode, addressConfirmed: 'false', addressConfirmationReason: '' });
   });
   it('requires fresh confirmation of a legacy local default when Lingxing evidence is missing', async () => {
     const previous = dataFor(); previous.fields = { ...address, addressSelectionMode: 'profile', addressConfirmed: 'true', addressConfirmationReason: 'Old book' }; previous.members[0]!.sourceCandidates!.addresses = [];
     const next = await applyDocumentAutomaticDefaultsInTx(tx(), structuredClone(previous), previous);
-    expect(next.fields).toMatchObject({ ...address, addressSelectionMode: 'manual', addressConfirmed: 'false', addressConfirmationReason: '' }); expect(selections).toEqual([]);
+    expect(next.fields).toMatchObject({ ...address, recipientName: address.addressCode, addressSelectionMode: 'manual', addressConfirmed: 'false', addressConfirmationReason: '' }); expect(selections).toEqual([]);
   });
   it.each(['missing', 'conflicting', 'incomplete', 'foreign'] as const)('leaves %s Lingxing evidence unresolved', async (kind) => {
     const data = dataFor(), candidates = data.members[0]!.sourceCandidates!;
@@ -346,5 +379,40 @@ describe('document cancel audit, claims and generation protection', () => {
     selected.push([{ actorId: 'admin', requestHash: documentDigest({ action: 'document.cancel', input: { id: value.record.id, ...input } }), result }]);
     expect(await cancelDocument(value.record.id, 'admin', input)).toEqual({ ...result, replayed: true });
     expect(selections).toHaveLength(1); expect(updated).toEqual([]); expect(inserted).toEqual([]);
+  });
+});
+
+describe('document review country pricing rules', () => {
+  function reviewFixture(pricingRule: DocumentExportReference['pricingRule']) {
+    const value = fixture('pending_review'), bytes = Buffer.from('immutable published invoice');
+    value.revision.data.generationRulesVersion = 'v2';
+    const file = { id: randomUUID(), sha256: createHash('sha256').update(bytes).digest('hex'), mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+    const reference: DocumentExportReference = { documentId: value.record.id, revisionId: value.revision.id, revisionVersion: 3, templateId: randomUUID(), templateVersion: 1, templateSha256: 'a'.repeat(64), sources: [], generationRulesVersion: 'v2', pricingRule };
+    const exported = { id: randomUUID(), fileId: file.id, status: 'completed', reference };
+    mocks.checked.mockResolvedValue(bytes);
+    selected.push([], [value.record], [value.revision], [], [exported]);
+    return { value, file, exported };
+  }
+
+  it('rejects approval of a historical fixed-2 file before checking the file or recording a review', async () => {
+    const { value, file, exported } = reviewFixture('fixed-2');
+    await expect(reviewDocument(value.record.id, 'admin', { operationId: randomUUID(), expectedVersion: 3, exportId: exported.id, fileSha256: file.sha256, decision: 'approve', reason: '复核旧文件' })).rejects.toMatchObject({ code: 'DOCUMENT_EXPORT_RULES_STALE', status: 422 });
+    expect(mocks.checked).not.toHaveBeenCalled(); expect(updated).toEqual([]); expect(inserted).toEqual([]); expect(selected).toEqual([]);
+  });
+
+  it.each([
+    [DOCUMENT_INVOICE_PRICING_RULE, 'approve', 'approved'], ['fixed-2', 'return', 'returned'],
+  ] as const)('allows %s files to receive %s after validating the exact file', async (pricingRule, decision, status) => {
+    const { value, file, exported } = reviewFixture(pricingRule);
+    selected.push([value.record], [value.revision], [], [file]);
+    updateResult = [{ ...value.record, status, version: 4 }];
+    const input = { operationId: randomUUID(), expectedVersion: 3, exportId: exported.id, fileSha256: file.sha256, decision, reason: '核对已发布文件' };
+    const result = await reviewDocument(value.record.id, 'admin', input);
+    expect(result).toMatchObject({ documentId: value.record.id, document: { status, version: 4, currentRevision: { id: value.revision.id } }, replayed: false });
+    expect(mocks.checked).toHaveBeenCalledWith(file);
+    expect(selections.at(-1)!.table).toBe(fileIndex); expect(selected).toEqual([]);
+    expect(inserted.find((entry) => entry.table === documentReviews)?.values).toMatchObject({ documentId: value.record.id, revisionId: value.revision.id, exportId: exported.id, fileId: file.id, fileSha256: file.sha256, decision, dependencies: exported.reference, reviewedBy: 'admin' });
+    expect(updated).toEqual([{ table: documents, values: { status, version: 4, updatedAt: expect.any(Date) } }]);
+    expect(inserted.find((entry) => entry.table === operationAudit && entry.values.action === 'document.review.file')?.values).toMatchObject({ targetId: value.record.id, requestHash: file.sha256, details: { decision, fileSha256: file.sha256 } });
   });
 });

@@ -2,6 +2,8 @@ import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_BLANK_OUTPUT_FIELDS, applyDocumentAdd
   type DocumentProfile, type DocumentRevisionData, type DocumentTemplate, type DocumentValidation } from '@scm/contracts';
 import { documentDigest, documentUsesProfileReference } from './domain.js';
 import { DOCUMENT_HEADER_FIELDS } from './workbook.js';
+import type { ActiveServiceMapping } from '../service-mappings/repository.js';
+import { normalizeServiceMappingCountry } from '../service-mappings/normalization.js';
 
 type PreparationIssue = DocumentValidation['issues'][number];
 export type AutomaticPreparationPlan = Pick<DocumentRevisionData, 'fields' | 'profileReferences' | 'templateReference'> & { confirmAddress: boolean; issues: PreparationIssue[] };
@@ -15,10 +17,30 @@ const addressFields = new Set<string>(DOCUMENT_ADDRESS_FIELDS);
 const headerFields = new Set(Object.keys(DOCUMENT_HEADER_FIELDS));
 const categoryNames = { party: '主体', channel: '渠道', tax: '税务', product: '商品', address: '地址' };
 const fieldNames: Record<string, string> = { service: '渠道服务', customsMode: '报关方式', clearanceMode: '清关方式', taxMode: '税务方式', vat: 'VAT 税号', battery: '含电池', magnetic: '含磁性', liquid: '含液体', powder: '含粉末', dangerous: '危险品', deliveryStation: '交货仓站', deliveryWindow: '送仓时间', remarks: '备注', addressCode: '地址代码', recipientName: '收件人', recipientCompany: '收件公司', addressLine1: '地址第 1 行', addressLine2: '地址第 2 行', addressLine3: '地址第 3 行', city: '城市', state: '州 / 省', postalCode: '邮编', countryCode: '国家代码', phone: '电话', email: '邮箱', currency: '币种' };
+const transportMethodAliases: Record<string, string> = { HY: '海运', KP: '空派', KH: '卡航' };
+const serviceTransportMethod = (value: unknown) => { const name = text(value); return transportMethodAliases[name.toUpperCase()] ?? name; };
+
+/** Every member must resolve to the same explicitly maintained service. */
+export function planDocumentServiceMapping(data: Pick<DocumentRevisionData, 'members' | 'fields'>, mappings: readonly ActiveServiceMapping[]): { service?: string; issues: PreparationIssue[] } {
+  if (!blank(data.fields.service)) return { issues: [] };
+  const missing = (): { issues: PreparationIssue[] } => ({ issues: [{ code: 'DOCUMENT_SERVICE_MAPPING_MISSING', severity: 'error', message: '本票国家与运输方式尚未完整维护服务映射，请维护映射后重新准备，或明确填写本票渠道服务。' }] });
+  if (!data.members.length) return missing();
+  const services = new Set<string>();
+  for (const member of data.members) {
+    const countryCode = normalizeServiceMappingCountry(member.demand.snapshot.country), transportMethod = serviceTransportMethod(member.demand.snapshot.channel);
+    if (!countryCode || !transportMethod) return missing();
+    const matches = mappings.filter((mapping) => mapping.countryCode === countryCode && serviceTransportMethod(mapping.transportMethod) === transportMethod);
+    if (!matches.length || matches.some((mapping) => blank(mapping.service))) return missing();
+    if (matches.length !== 1) return { issues: [{ code: 'DOCUMENT_SERVICE_MAPPING_AMBIGUOUS', severity: 'error', message: '本票国家与运输方式匹配到多份服务映射，请修正映射或明确填写本票渠道服务。' }] };
+    services.add(matches[0]!.service.trim());
+  }
+  if (services.size !== 1) return { issues: [{ code: 'DOCUMENT_SERVICE_MAPPING_CONFLICT', severity: 'error', message: '本票货件对应不同渠道服务，尚未自动填入；请拆分范围或明确填写适用于整票的服务。' }] };
+  return { service: [...services][0]!, issues: [] };
+}
 
 /** A deterministic plan only: no network calls, catalog writes, price inference or snapshots mutated. */
-export function planAutomaticPreparation(data: DocumentRevisionData, profiles: readonly DocumentProfile[], templates: readonly DocumentTemplate[], overrideFields: DocumentRevisionData['fields'] = {}): AutomaticPreparationPlan {
-  const fields = { ...data.fields }, references = structuredClone(data.profileReferences), issues: PreparationIssue[] = [];
+export function planAutomaticPreparation(data: DocumentRevisionData, profiles: readonly DocumentProfile[], templates: readonly DocumentTemplate[], overrideFields: DocumentRevisionData['fields'] = {}, serviceMappings: readonly ActiveServiceMapping[] = []): AutomaticPreparationPlan {
+  const fields = withDocumentInvoiceDefaults(data.fields, data.members), references = structuredClone(data.profileReferences), issues: PreparationIssue[] = [];
   let templateReference = structuredClone(data.templateReference), confirmAddress = false;
   const add = (code: string, message: string, category?: DocumentProfile['category']) => issues.push({ code, message, severity: 'error', ...(category ? { profileCategory: category } : {}) });
   const fill = (key: string, value: unknown) => {
@@ -34,6 +56,9 @@ export function planAutomaticPreparation(data: DocumentRevisionData, profiles: r
   const automaticCurrency = documentTicketCurrency(data.members);
   if (automaticCurrency) fields.currency = automaticCurrency;
   for (const key of DOCUMENT_BLANK_OUTPUT_FIELDS) fields[key] = null;
+  const mappedService = planDocumentServiceMapping({ members: data.members, fields }, serviceMappings);
+  if (mappedService.service) fields.service = mappedService.service;
+  issues.push(...mappedService.issues);
   const automaticHeaders = new Map<string, Map<string, string[]>>();
   const currentReference = (reference: DocumentRevisionData['profileReferences'][number]) => {
     const profile = profiles.find((entry) => entry.id === reference.profileId && entry.category === reference.category);
@@ -67,8 +92,13 @@ export function planAutomaticPreparation(data: DocumentRevisionData, profiles: r
       if (!profile) continue;
       if (!applies(profile)) { add('DOCUMENT_PROFILE_SCOPE_MISMATCH', `已采用的${categoryNames[category]}资料不适用于本票范围。`, category); continue; }
     } else {
-      const matches = profiles.filter((entry) => entry.category === category && entry.status === 'active' && applies(entry)
-        && (category === 'party' ? !blank(entry.data.sid) : category === 'tax' ? !blank(entry.data.sid) || !blank(entry.data.country) || !blank(entry.data.countryCode) : !blank(entry.data.businessChannel ?? entry.data.channel)));
+      const matches = profiles.filter((entry) => {
+        if (entry.category !== category || entry.status !== 'active' || !applies(entry)) return false;
+        if (category === 'party') return !blank(entry.data.sid);
+        if (category === 'tax') return !blank(entry.data.sid) || !blank(entry.data.country) || !blank(entry.data.countryCode);
+        const services = (Array.isArray(entry.data.allowedServices) ? entry.data.allowedServices : [entry.data.service]).map(text).filter(Boolean);
+        return !blank(entry.data.businessChannel ?? entry.data.channel) && (!services.length || !blank(fields.service) && services.includes(text(fields.service)));
+      });
       if (matches.length > 1) { add('DOCUMENT_PROFILE_AMBIGUOUS', `${categoryNames[category]}匹配到多份适用资料，请人工选择。`, category); continue; }
       profile = matches[0];
       if (!profile) continue;
@@ -78,11 +108,6 @@ export function planAutomaticPreparation(data: DocumentRevisionData, profiles: r
     for (const [key, value] of Object.entries(profile.data)) if (headerFields.has(key) && !addressFields.has(key) && !retiredHeaders.has(key) && key !== 'currency' && key !== 'service' && !blank(value)) proposed[key] = text(value);
     if (category === 'channel') {
       const services = [...new Set((Array.isArray(profile.data.allowedServices) ? profile.data.allowedServices : [profile.data.service]).map(text).filter(Boolean))];
-      const explicitService = text(profile.data.service);
-      if (explicitService && (!services.length || services.includes(explicitService))) proposed.service = explicitService;
-      else if (explicitService) { add('DOCUMENT_SERVICE_INVALID', `渠道资料 ${profile.key} 的默认服务不在其维护范围内，请人工修正。`, category); continue; }
-      else if (services.length === 1) proposed.service = services[0]!;
-      else if (services.length > 1 && blank(fields.service)) add('DOCUMENT_SERVICE_AMBIGUOUS', `渠道资料 ${profile.key} 有多个服务，请人工选择。`, category);
       if (fields.service && services.length && !services.includes(fields.service)) { add('DOCUMENT_SERVICE_INVALID', '本票已有服务不在渠道资料维护范围内，已保留本票值。', category); continue; }
     }
     if (newlySelected) references.push(referenceOf(profile));
@@ -147,6 +172,7 @@ export async function prepareDocumentAutomation(id: string, actorId: string, raw
   const { and, eq } = await import('drizzle-orm');
   const { documentProfiles, documentTemplates, documentTemplateVersions } = await import('./schema.js');
   const { documentOperation, lockedDocument, reviseDocumentInTx, serializeProfile } = await import('./service.js');
+  const { getActiveServiceMappingsInTx } = await import('../service-mappings/repository.js');
   return documentOperation(actorId, input.operationId, 'document.automation.prepare', { id, ...input }, async (tx) => {
     const { revision } = await lockedDocument(tx, id, actorId, input.expectedVersion);
     const profileRows = await tx.select().from(documentProfiles).for('share');
@@ -155,7 +181,8 @@ export async function prepareDocumentAutomation(id: string, actorId: string, raw
       .where(eq(documentTemplates.purpose, revision.data.purpose)).for('share');
     const templates: DocumentTemplate[] = templateRows.map(({ template, version }) => ({ id: template.id, purpose: template.purpose as DocumentTemplate['purpose'], name: template.name,
       version: template.version, status: template.status as DocumentTemplate['status'], fileId: version.fileId, sha256: version.sha256, mimeType: version.mimeType, createdBy: template.createdBy, createdAt: template.createdAt.toISOString() }));
-    const plan = planAutomaticPreparation(revision.data, profileRows.map(serializeProfile), templates, input.fields);
+    const serviceMappings = blank(revision.data.fields.service) && blank(input.fields?.service) ? await getActiveServiceMappingsInTx(tx) : [];
+    const plan = planAutomaticPreparation(revision.data, profileRows.map(serializeProfile), templates, input.fields, serviceMappings);
     const result = await reviseDocumentInTx(tx, id, actorId, { ...input, fields: plan.fields, profileReferences: plan.profileReferences, templateReference: plan.templateReference, confirmAddress: plan.confirmAddress });
     return { ...result, issues: plan.issues };
   });

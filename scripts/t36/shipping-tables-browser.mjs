@@ -73,7 +73,7 @@ async function contextFor(state) {
 }
 
 const reportTable = () => page.getByRole('region', { name: '商品及逐箱数量，可横向滚动', exact: true });
-const generateReport = () => page.getByRole('button', { name: '生成发货表 XLSX', exact: true });
+const generateReport = () => page.getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/ });
 const nextPage = () => page.getByRole('button', { name: '下一页', exact: true });
 const previousPage = () => page.getByRole('button', { name: '上一页', exact: true });
 const reportForm = () => page.getByRole('form', { name: '筛选成品表', exact: true });

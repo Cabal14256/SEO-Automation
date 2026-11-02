@@ -176,7 +176,7 @@ async function workerLocksAvailable(tx: BatchTx, scope: Scope) {
   const groupIds = scope.groups.map((row) => row.id), runIds = scope.runs.map((row) => row.id);
   const sync = await byIds(groupIds, (ids) => tx.select({ id: batchSyncRuns.id }).from(batchSyncRuns).where(and(inArray(batchSyncRuns.subBatchId, ids), inArray(batchSyncRuns.status, ['queued', 'running']))));
   const physical = await byIds(groupIds, (ids) => tx.select({ id: physicalSyncRuns.id }).from(physicalSyncRuns).where(and(inArray(physicalSyncRuns.groupId, ids), inArray(physicalSyncRuns.status, ['queued', 'running']))));
-  const automations = await byIds(runIds, (ids) => tx.select({ id: documentAutomationJobs.id }).from(documentAutomationJobs).where(and(inArray(documentAutomationJobs.shippingRunId, ids), isNull(documentAutomationJobs.deletedAt))));
+  const automations = await byIds(runIds, (ids) => tx.select({ id: documentAutomationJobs.id }).from(documentAutomationJobs).where(and(or(inArray(documentAutomationJobs.shippingRunId, ids), sql`EXISTS (SELECT 1 FROM jsonb_array_elements(${documentAutomationJobs.items}) item WHERE item->>'shippingRunId' = ANY(${sql.param(ids)}::text[]))`), isNull(documentAutomationJobs.deletedAt))));
   const keys = [...runIds.map((id) => `shipping-run:${id}`), ...sync.map(({ id }) => `batch-sync-run:${id}`), ...physical.map(({ id }) => `physical-sync-run:${id}`), ...automations.map(({ id }) => `document-automation:${id}`)].sort();
   for (const key of keys) {
     const result = await tx.execute(sql`SELECT pg_try_advisory_xact_lock(hashtextextended(${key},0)) AS locked`);

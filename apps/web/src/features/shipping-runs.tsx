@@ -18,6 +18,7 @@ import { shanghaiToday } from '../components/ui/date-utils';
 import { getReportTicketCodeRanges, getShippingBoxColumns } from './shipping-table-parts';
 import { ShippingLifecycleActions, ShippingRecycleBin, lifecycleLabels } from './shipping-lifecycle';
 import { lifecycleOf, lifecyclePending } from './shipping-lifecycle-api';
+import { previousShippingExport, ShippingExportNotice } from './shipping-export-notice';
 import './shipping-runs.css';
 
 type ShippingDraft = NonNullable<ImportDraftContent['shipping']>;
@@ -100,7 +101,9 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
     refetchInterval: (query) => active && query.state.data?.some((item) => item.status === 'queued' || item.status === 'running') ? 1500 : false });
   const completedExports = exports.data?.filter((item) => item.status === 'completed').map((item) => item.id).join(',');
   useEffect(() => { if (completedExports) void client.invalidateQueries({ queryKey: ['shipping-run-report', id] }); }, [completedExports, client, id]);
-  const ready = run?.status === 'ready' && !lifecyclePending(run) && Boolean(report.data?.confirmations.length) && !report.isFetching && !report.isError && !report.data?.blocked.length;
+  const previousExport = previousShippingExport(exports.data, report.data?.confirmations.map((ref) => ref.groupId) ?? []);
+  const generating = Boolean(exports.data?.some((item) => item.status === 'queued' || item.status === 'running'));
+  const ready = active && !detail.isFetching && !detail.isError && run?.status === 'ready' && !lifecyclePending(run) && !generating && !exports.isPending && Boolean(report.data?.confirmations.length) && !report.isFetching && !report.isError && !report.data?.blocked.length;
   const refresh = () => { void detail.refetch(); void report.refetch(); void exports.refetch(); };
   const retry = () => {
     if (!run) return;
@@ -115,7 +118,7 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
     const references = report.data.confirmations;
     action.run(`shipping-export-${id}-${run.version}-${JSON.stringify(references)}`, async (operationId) => {
       await batchApi.export({ operationId, shippingRunId: id, expectedShippingRunVersion: run.version, groupIds: references.map((ref) => ref.groupId), expectedConfirmations: references, region: 'all' });
-      await client.invalidateQueries({ queryKey: ['batch-exports', 'shipping-run', id] });
+      await Promise.all([client.invalidateQueries({ queryKey: ['batch-exports', 'shipping-run', id] }), client.invalidateQueries({ queryKey: ['shipping-run', id] })]);
     }, '已开始生成本次发货 XLSX。');
   };
   if (detail.isPending) return <p className="list-state" role="status">正在读取本次发货…</p>;
@@ -184,7 +187,8 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
       {detail.data.tickets.map((ticket) => <tr key={ticket.id}><td><strong>{ticket.number || '校验通过后自动编号'}</strong></td><td>{run.origin === 'manual' ? '手工建立' : `第 ${ticket.sourceTicketIndex} 段`} · {ticket.country || '国家待补全'}<small className="mapping-subtext">{ticket.members.length} 个 FBA</small></td><td><div className="shipping-ticket-members">{ticket.members.map((member) => <span key={member.inputOrder}>{member.fba}{member.sid ? ` · sid ${member.sid}` : ''}{member.groupId && <> · <Link to="/shipping" search={{ view: 'batches', groupId: member.groupId }}>处理批次</Link></>}</span>)}</div></td></tr>)}
     </BatchTable>
     {!tableReady && !report.isError && Boolean(report.data?.rows.length) && <p className="mapping-help">当前可预览已就绪的 FBA；全部整理完成后才能生成整次 XLSX。</p>}
-    <div className="shipping-run-actions"><div className="import-selection-actions"><Button type="button" aria-pressed={view === 'products'} onClick={() => setView('products')}>商品与箱数量</Button><Button type="button" aria-pressed={view === 'boxes'} onClick={() => setView('boxes')}>逐箱明细</Button></div><Button type="button" className="shipping-run-generate" variant="primary" icon={FileSpreadsheet} disabled={!ready || action.busy} onClick={generate}>生成本次发货 XLSX</Button></div>
+    <div className="shipping-run-actions"><div className="import-selection-actions"><Button type="button" aria-pressed={view === 'products'} onClick={() => setView('products')}>商品与箱数量</Button><Button type="button" aria-pressed={view === 'boxes'} onClick={() => setView('boxes')}>逐箱明细</Button></div><Button type="button" className="shipping-run-generate" variant="primary" icon={FileSpreadsheet} loading={generating} disabled={!ready || action.busy} onClick={generate}>{previousExport ? '再次生成本次发货 XLSX' : '生成本次发货 XLSX'}</Button></div>
+    <ShippingExportNotice previous={previousExport} frozen={Boolean(run.membershipFrozenAt)} historyUnavailable={exports.isError} />
     {!run.sequence ? <p className="mapping-help">完成货件资料和分票校验后，系统会自动分配票号并同步商品、箱数据。</p> : report.isPending ? <p className="list-state" role="status">正在读取本次发货表…</p> : report.isError ? <QueryError error={report.error} retry={() => void report.refetch()} /> : report.data && <>
       {report.data.rows.length === 0 ? <p className="mapping-help">商品与箱数据整理完成后会在这里显示。</p> : view === 'products' ? <>
         <BatchTable label="本次发货商品表" headers={['完整票号', '店铺 / 国家 / 渠道', 'FBA / 目的仓', 'MSKU / FNSKU', '品名 / SKU', '商品数量', ...boxes.map((order) => `箱 ${order}`), '整票编码范围', '本票商品合计']}>

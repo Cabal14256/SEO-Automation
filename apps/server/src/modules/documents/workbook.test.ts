@@ -72,6 +72,27 @@ function confirmDomainFixture(source: DocumentRevisionData) {
   }
 }
 describe('丰信单票 XLSX', () => {
+  it.each(['TOL3', 'IND9', 'TOL3-43551'])('uses the final address code %s for both B3 and B4 without changing archived recipient details', async (code) => {
+    const source = v2Data(), recipientName = 'Amazon.com Services LLC';
+    Object.assign(source.fields, { addressCode: code, recipientName, recipientCompany: 'Original recipient company', addressLine1: '9240 Fremont Pike' });
+    source.members[0]!.sourceCandidates = { addresses: [{ source: 'getShipmentDetails', snapshotId: randomUUID(), data: {
+      recipientName, recipientCompany: 'Original recipient company', addressLine1: '9240 Fremont Pike', city: 'Perrysburg', state: 'OH', postalCode: '43551-4210', countryCode: 'US', destinationFc: 'TOL3',
+    } }], products: [], issues: [] };
+    const before = structuredClone(source), book = new ExcelJS.Workbook();
+    await book.xlsx.load(await createWorkbook(source, await template()) as never);
+    const sheet = book.worksheets[0]!;
+    expect(sheet.getCell('B3').value).toBe(code); expect(sheet.getCell('B4').value).toBe(code);
+    expect(sheet.getCell('B5').value).toBe('Original recipient company'); expect(sheet.getCell('B6').value).toBe('9240 Fremont Pike');
+    expect(source).toEqual(before);
+  });
+  it('keeps the original recipient when the final address code is missing instead of guessing the destination FC', async () => {
+    const source = v2Data(); source.fields.recipientName = 'Amazon.com Services LLC'; delete source.fields.addressCode;
+    const before = structuredClone(source), book = new ExcelJS.Workbook();
+    await book.xlsx.load(await createWorkbook(source, await template()) as never);
+    expect(book.worksheets[0]!.getCell('B3').value).toBeNull();
+    expect(book.worksheets[0]!.getCell('B4').value).toBe('Amazon.com Services LLC');
+    expect(source).toEqual(before);
+  });
   it('wraps long English and Chinese addresses with explicit line breaks without changing the saved address', async () => {
     const raw = new ExcelJS.Workbook(); await raw.xlsx.load(await template() as never);
     const layout = raw.worksheets[0]!; layout.properties.defaultRowHeight = 14.25;
@@ -146,7 +167,7 @@ describe('丰信单票 XLSX', () => {
     const usd = book.worksheets[0]!, gbp = book.worksheets[1]!;
     expect(usd.getCell('A17').value).toBe('货箱编号'); expect(usd.getCell('G17').value).toBe('产品英文品名'); expect(usd.getCell('F14').value).toBe(first.fields.deliveryWindow);
     expect(usd.model.merges).toContain('B6:D6'); expect(usd.getImages()).toHaveLength(2); expect(gbp.getImages()).toHaveLength(1);
-    expect(usd.getCell('B16').value).toBe(2); expect(usd.getCell('F15').value).toBe(10); expect(usd.getCell('I19').value).toBe(2);
+    expect(usd.getCell('B16').value).toBe(2); expect(usd.getCell('F15').value).toBe(10); expect(usd.getCell('I19').value).toBe(2.3);
     expect(gbp.getCell('F12').value).toBe('英镑'); expect(gbp.getCell('B6').value).toBe('Different GB address'); expect(gbp.getCell('F14').value).toBe(third.fields.deliveryWindow);
     expect(documents).toEqual(before);
   });
@@ -209,10 +230,13 @@ describe('丰信单票 XLSX', () => {
       expect(sheet.getCell(DOCUMENT_HEADER_FIELDS[key]).dataValidation.formulae).toEqual([`"${expected.join(',')}"`]);
       const source = data(1); source.fields[key] = '未支持的选项';
       if (key === 'currency') source.members[0]!.demand.snapshot.country = 'CA';
-      expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ message: key === 'currency' ? expect.stringContaining('币种') : expect.stringContaining(key === 'customsMode' ? '报关方式' : key === 'clearanceMode' ? '清关方式' : key === 'taxMode' ? '交税方式' : key === 'deliveryStation' ? '所在货站' : key) }));
+      if (['battery', 'magnetic', 'liquid', 'powder', 'dangerous'].includes(key)) {
+        expect(validateWorkbookData(source)).toEqual([]);
+        expect(source.fields[key]).toBe('未支持的选项');
+      } else expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ message: key === 'currency' ? expect.stringContaining('币种') : expect.stringContaining(key === 'customsMode' ? '报关方式' : key === 'clearanceMode' ? '清关方式' : key === 'taxMode' ? '交税方式' : '所在货站') }));
     }
   });
-  it('defaults five blank flags for legacy drafts consistently in validation and output without mutating their snapshot', async () => {
+  it('fixes five flags for blank and explicit legacy drafts in validation and output without mutating their snapshot', async () => {
     const source = data(1);
     delete source.fields.battery; source.fields.magnetic = null; source.fields.liquid = ''; source.fields.powder = '  ';
     delete source.fields.dangerous;
@@ -222,12 +246,13 @@ describe('丰信单票 XLSX', () => {
     expect(['F1', 'F2', 'F3', 'F4', 'F5'].map((cell) => book.worksheets[0]!.getCell(cell).value)).toEqual(['否', '否', '否', '否', '否']);
     expect(book.worksheets[0]!.getCell('B1').value).toBeNull();
     expect(source).toEqual(original);
-    source.fields.battery = '是'; source.fields.dangerous = '是'; source.fields.orderNumber = 'MANUAL-ORDER';
+    source.fields.battery = '是'; source.fields.magnetic = '是'; source.fields.liquid = '是'; source.fields.powder = '是'; source.fields.dangerous = '是'; source.fields.orderNumber = 'MANUAL-ORDER';
+    const explicitOriginal = structuredClone(source);
     expect(validateWorkbookData(source)).toEqual([]);
     const positive = new ExcelJS.Workbook(); await positive.xlsx.load(await createWorkbook(source, await template()) as never);
-    expect(positive.worksheets[0]!.getCell('F1').value).toBe('是');
-    expect(positive.worksheets[0]!.getCell('F5').value).toBe('是');
+    expect(['F1', 'F2', 'F3', 'F4', 'F5'].map((cell) => positive.worksheets[0]!.getCell(cell).value)).toEqual(['否', '否', '否', '否', '否']);
     expect(positive.worksheets[0]!.getCell('B1').value).toBeNull();
+    expect(source).toEqual(explicitOriginal);
   });
   it('compresses the complete twelve-box FBA, retaining mixed product rows and exact counts', () => {
     const source = data(); expect(validateWorkbookData(source)).toEqual([]);
@@ -354,7 +379,7 @@ describe('丰信单票 XLSX', () => {
     const book = new ExcelJS.Workbook(); await book.xlsx.load(await createWorkbook(source, await template()) as never);
     expect(expected.map((_, index) => book.worksheets[0]!.getCell(`A${index + 18}`).value)).toEqual(expected);
     expect(book.worksheets[0]!.getCell('B1').value).toBeNull();
-    expect(book.worksheets[0]!.getCell('F5').value).toBe('是');
+    expect(book.worksheets[0]!.getCell('F5').value).toBe('否');
   });
   it('rejects an unsafe whole-invoice quantity even when each product quantity is safe', async () => {
     const source = data(1), member = source.members[0]!;
@@ -529,14 +554,16 @@ describe('丰信 v2 发票规则', () => {
     expect(calculateInvoiceUnitPrice(input)).toBe(expected);
   });
 
-  it.each(['DE', 'US', 'GB'])('merges different products in a complete %s FBA into one range and one stable representative', async (country) => {
+  it.each([
+    ['DE', 2, '欧元', '1600.00'], ['US', 2.3, '美元', '1840.00'], ['GB', 2, '英镑', '1600.00'],
+  ] as const)('merges different products in a complete %s FBA into one range and one stable representative', async (country, unitPrice, currencyLabel, totalValue) => {
     const source = differentProductBoxes(country), before = structuredClone(source);
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
     const projected = projectDocumentLines(source);
     expect(projected.lines).toHaveLength(1);
     expect(projected.lines[0]).toMatchObject({ range: 'FBADEMOBOXTESTU000001-4', count: 4, box: { order: 2 }, product: { sku: 'S1' }, declaredQuantity: '200', actualTotalQuantity: '800' });
     expect(projected.lines[0]!.boxIds).toHaveLength(4);
-    expect(projected).toMatchObject({ boxCount: 4, totalQuantity: '800', totalWeight: '64.80', totalValue: '1600.00' });
+    expect(projected).toMatchObject({ boxCount: 4, totalQuantity: '800', totalWeight: '64.80', totalValue });
     expect(Object.values(projected.perProduct)).toEqual(['200', '200', '200', '200']);
     const result = await createDocumentBundleWorkbook([{ documentId: 'europe', bytes: await createWorkbook(source, await template()) }]);
     const book = new ExcelJS.Workbook(); await book.xlsx.load(result.bytes as never);
@@ -544,6 +571,7 @@ describe('丰信 v2 发票规则', () => {
     expect(sheet.rowCount).toBe(18); expect(sheet.getCell('A18').value).toBe('FBADEMOBOXTESTU000001-4');
     expect(sheet.getCell('J18').value).toBe(200); expect(sheet.getCell('O18').value).toBe('iphone 15 Pro'); expect(sheet.getCell('Q18').value).toBe('https://www.amazon.de/dp/B0TEST0001');
     expect(sheet.getCell('B16').value).toBe(4); expect(sheet.getCell('F15').value).toBe(800); expect(sheet.getImages()).toHaveLength(1);
+    expect(sheet.getCell('I18').value).toBe(unitPrice); expect(sheet.getCell('F12').value).toBe(currencyLabel);
     expect(result.sheets[0]).toMatchObject({ rows: 1, boxes: 4, actualQuantity: 800 });
     expect(source).toEqual(before);
   });
@@ -582,16 +610,16 @@ describe('丰信 v2 发票规则', () => {
     expect(issues.filter((issue) => issue.severity === 'error')).toEqual([]);
     expect(issues.some((issue) => issue.code === 'DECLARATION_PRICE_UNCONFIRMED')).toBe(false);
     expect(projection.lines).toHaveLength(1);
-    expect(projection.lines[0]).toMatchObject({ range: 'FBATESTU000001-12', count: 12, product: { sku: 'S1', quantity: '2' }, actualQuantity: '5', declaredQuantity: '500', declaration: { unitPrice: '2.00', currency: 'USD' } });
+    expect(projection.lines[0]).toMatchObject({ range: 'FBATESTU000001-12', count: 12, product: { sku: 'S1', quantity: '2' }, actualQuantity: '5', declaredQuantity: '500', declaration: { unitPrice: '2.30', currency: 'USD' } });
     expect(projection.lines[0]!.boxIds).toHaveLength(12);
-    expect(projection).toMatchObject({ boxCount: 12, totalQuantity: '60', totalWeight: '15.00', totalValue: '12000.00' });
+    expect(projection).toMatchObject({ boxCount: 12, totalQuantity: '60', totalWeight: '15.00', totalValue: '13800.00' });
     expect(Object.values(projection.perProduct).sort()).toEqual(['24', '36']);
     const request = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Renderer must not retrieve remote data'));
     try {
       const book = new ExcelJS.Workbook(); await book.xlsx.load(await createWorkbook(source, await template()) as never);
       const sheet = book.worksheets[0]!;
       expect(sheet.rowCount).toBe(18); expect(sheet.getCell('A18').value).toBe('FBATESTU000001-12');
-      expect(sheet.getCell('I18').value).toBe(2); expect(sheet.getCell('I18').numFmt).toBe('0.00'); expect(sheet.getCell('J18').value).toBe(500);
+      expect(sheet.getCell('I18').value).toBe(2.3); expect(sheet.getCell('I18').numFmt).toBe('0.00'); expect(sheet.getCell('J18').value).toBe(500);
       expect(sheet.getCell('O18').value).toBe('S1'); expect(sheet.getCell('F15').value).toBe(60); expect(sheet.getCell('B16').value).toBe(12);
       expect(sheet.getImages().map((entry) => [entry.range.tl.nativeCol, entry.range.tl.nativeRow])).toEqual([[15, 17]]);
       expect(request).not.toHaveBeenCalled(); expect(source).toEqual(before);
@@ -646,17 +674,17 @@ describe('丰信 v2 发票规则', () => {
     expect(validateWorkbookData(source)).toContainEqual(expect.objectContaining({ code: 'DECLARATION_REQUIRED', message: expect.stringContaining('material') }));
   });
 
-  it('renders fixed 2.00 despite a historical manual fallback without altering remote facts or actual totals', async () => {
+  it('renders US fixed 2.30 despite a historical manual fallback without altering remote facts or actual totals', async () => {
     const source = withManualSalesPrice(v2Data()); source.productSourceFacts![0]!.salesPrice = null; source.productSourceFacts![0]!.currency = null;
     const facts = structuredClone(source.productSourceFacts), errors = validateWorkbookData(source).filter((issue) => issue.severity === 'error');
     expect(errors).toEqual([]); expect(validateWorkbookData(source).some((issue) => issue.code === 'DOCUMENT_MANUAL_SALES_PRICE_USED')).toBe(false);
     const book = new ExcelJS.Workbook(); await book.xlsx.load(await createWorkbook(source, await template()) as never);
-    expect(book.worksheets[0]!.getCell('I18').value).toBe(2); expect(book.worksheets[0]!.getCell('I18').numFmt).toBe('0.00'); expect(book.worksheets[0]!.getCell('F12').value).toBe('美元'); expect(book.worksheets[0]!.getCell('F15').value).toBe(5);
+    expect(book.worksheets[0]!.getCell('I18').value).toBe(2.3); expect(book.worksheets[0]!.getCell('I18').numFmt).toBe('0.00'); expect(book.worksheets[0]!.getCell('F12').value).toBe('美元'); expect(book.worksheets[0]!.getCell('F15').value).toBe(5);
     expect(source.productSourceFacts).toEqual(facts);
   });
   it('ignores changed Listing prices and currencies when deriving the fixed declaration', () => {
     const source = withManualSalesPrice(v2Data()); source.productSourceFacts![0]!.salesPrice = '20';
-    expect(projectDocumentLines(source).lines[0]!.declaration.unitPrice).toBe('2.00');
+    expect(projectDocumentLines(source).lines[0]!.declaration.unitPrice).toBe('2.30');
     expect(validateWorkbookData(source).some((issue) => issue.code === 'DOCUMENT_MANUAL_SALES_PRICE_USED')).toBe(false);
     source.productSourceFacts![0]!.currency = 'EUR';
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
@@ -669,9 +697,9 @@ describe('丰信 v2 发票规则', () => {
     if (kind === 'identity') source.manualSalesPrices![0]!.fnsku = 'OTHER';
     if (kind === 'price') source.manualSalesPrices![0]!.salesPrice = '0.01';
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
-    expect(projectDocumentLines(source).lines[0]!.declaration.unitPrice).toBe('2.00');
+    expect(projectDocumentLines(source).lines[0]!.declaration.unitPrice).toBe(kind === 'currency' ? '2.00' : '2.30');
   });
-  it.each([null, '', '0', '0.024', '-1', '1e2', '900719925474099100'])('exports fixed 2.00 with source sales price %s despite legacy/manual overrides', async (salesPrice) => {
+  it.each([null, '', '0', '0.024', '-1', '1e2', '900719925474099100'])('exports US fixed 2.30 with source sales price %s despite legacy/manual overrides', async (salesPrice) => {
     const source = v2Data(); source.productSourceFacts![0]!.salesPrice = salesPrice;
     source.productSourceFacts![0]!.unitPrice = '1.25';
     const prefix = `product.${documentProductOverrideKey(12, source.members[0]!.shipment.data.items[0]!)}.`;
@@ -679,7 +707,7 @@ describe('丰信 v2 发票规则', () => {
     const before = structuredClone(source);
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
     const book = new ExcelJS.Workbook(); await book.xlsx.load(await createWorkbook(source, await template()) as never);
-    expect(book.worksheets[0]!.getCell('I18').value).toBe(2); expect(book.worksheets[0]!.getCell('I18').numFmt).toBe('0.00');
+    expect(book.worksheets[0]!.getCell('I18').value).toBe(2.3); expect(book.worksheets[0]!.getCell('I18').numFmt).toBe('0.00');
     expect(source).toEqual(before);
   });
 
@@ -688,20 +716,20 @@ describe('丰信 v2 发票规则', () => {
     if (mode === 'missing') source.productSourceFacts = [];
     else source.productSourceFacts!.push(structuredClone(source.productSourceFacts![0]!));
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
-    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.00', currency: 'USD' });
+    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.30', currency: 'USD' });
   });
 
   it.each([null, '', 'CNY'])('keeps invoice currency with unsupported/missing Listing currency %s', (currency) => {
     const source = v2Data(); source.productSourceFacts![0]!.currency = currency;
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
-    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.00', currency: 'USD' });
+    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.30', currency: 'USD' });
   });
 
   it('uses country-derived invoice currencies and ignores Listing currency and old confirmation fields', () => {
     const source = v2Data(); source.productSourceFacts![0]!.currency = 'EUR';
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
     source.fields.currency = 'EUR';
-    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.00', currency: 'USD' });
+    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.30', currency: 'USD' });
     source.members[0]!.demand.snapshot.country = 'DE';
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
     expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ unitPrice: '2.00', currency: 'EUR' });
@@ -803,18 +831,33 @@ describe('发票固定留空抬头与国家币种', () => {
     const source = v2Data(); source.fields.currency = 'EUR'; const previous = structuredClone(source);
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
     const output = new ExcelJS.Workbook(); await output.xlsx.load(await createWorkbook(source, await template()) as never);
-    expect(output.worksheets[0]!.getCell('F12').value).toBe('美元'); expect(output.worksheets[0]!.getCell('I18').value).toBe(2);
+    expect(output.worksheets[0]!.getCell('F12').value).toBe('美元'); expect(output.worksheets[0]!.getCell('I18').value).toBe(2.3);
     expect(source).toEqual(previous);
   });
 
-  it.each([['US', 'EUR', 'USD', '美元'], ['GB', 'USD', 'GBP', '英镑'], ['DE', 'GBP', 'EUR', '欧元']])('exports fixed pricing in the invoice currency for %s despite archived Listing currency %s', async (country, currency, expectedCurrency, expectedLabel) => {
+  it('does not assume US pricing from a manually supplied USD currency for an unmapped country', () => {
+    const source = v2Data(); source.members[0]!.demand.snapshot.country = 'CA'; source.fields.currency = 'USD';
+    const previous = structuredClone(source), projection = projectDocumentLines(source);
+    expect(projection.lines[0]!.declaration).toMatchObject({ unitPrice: '2.00', currency: 'USD' });
+    expect(projection.totalValue).toBe('1000.00'); expect(source).toEqual(previous);
+  });
+
+  it.each([
+    ['US', 'EUR', 'USD', '美元', '2.30', '1150.00'], [' 美国 ', 'GBP', 'USD', '美元', '2.30', '1150.00'], ['United States', 'EUR', 'USD', '美元', '2.30', '1150.00'],
+    ['GB', 'USD', 'GBP', '英镑', '2.00', '1000.00'], ['UK', 'EUR', 'GBP', '英镑', '2.00', '1000.00'], ['英国', 'USD', 'GBP', '英镑', '2.00', '1000.00'],
+    ['DE', 'GBP', 'EUR', '欧元', '2.00', '1000.00'], ['FR', 'USD', 'EUR', '欧元', '2.00', '1000.00'],
+    ['ES', 'GBP', 'EUR', '欧元', '2.00', '1000.00'], ['IT', 'USD', 'EUR', '欧元', '2.00', '1000.00'],
+  ])('exports fixed pricing in the invoice currency for %s despite archived Listing currency %s', async (country, currency, expectedCurrency, expectedLabel, unitPrice, totalValue) => {
     const source = v2Data(); source.members[0]!.demand.snapshot.country = country!;
     source.productSourceFacts![0]!.currency = currency!; source.fields.currency = currency!;
     const previous = structuredClone(source);
     expect(validateWorkbookData(source).filter((issue) => issue.severity === 'error')).toEqual([]);
-    expect(projectDocumentLines(source).lines[0]!.declaration).toMatchObject({ currency: expectedCurrency, unitPrice: '2.00' });
+    const projection = projectDocumentLines(source);
+    expect(projection.lines[0]!.declaration).toMatchObject({ currency: expectedCurrency, unitPrice });
+    expect(projection.totalValue).toBe(totalValue);
     const output = new ExcelJS.Workbook(); await output.xlsx.load(await createWorkbook(source, await template()) as never);
-    expect(output.worksheets[0]!.getCell('F12').value).toBe(expectedLabel); expect(output.worksheets[0]!.getCell('I18').value).toBe(2);
+    expect(output.worksheets[0]!.getCell('F12').value).toBe(expectedLabel); expect(output.worksheets[0]!.getCell('I18').value).toBe(Number(unitPrice));
+    expect(output.worksheets[0]!.getCell('I18').numFmt).toBe('0.00');
     expect(source).toEqual(previous);
   });
 });

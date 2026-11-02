@@ -1,5 +1,5 @@
 import { Link, Navigate } from '@tanstack/react-router';
-import { Files, Store } from 'lucide-react';
+import { Files, ListChecks, Store } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { User } from '../api';
 import { AppShell } from '../pages';
@@ -20,6 +20,9 @@ export function SettingsLayout({ user, children }: { user: User; children: React
           </Link>
           <Link to="/settings/document-profiles" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
             <Files size={18} aria-hidden="true" /><span>单据资料</span>
+          </Link>
+          <Link to="/settings/service-mappings" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
+            <ListChecks size={18} aria-hidden="true" /><span>发票服务映射</span>
           </Link>
         </nav>
         <div className="settings-content">{children}</div>

@@ -43,9 +43,35 @@ describe('M7 报关与 9810', () => {
     expect(validateCustomsContent(record, context).map((issue) => issue.code)).toEqual(expect.arrayContaining(['CUSTOMS_WEIGHT_REQUIRED', 'CUSTOMS_PRODUCT_CURRENCY', 'CUSTOMS_FREIGHT_AMOUNT']));
   });
   it('splits default groups by country and requires explicit evidence for cross-country grouping', () => {
-    expect(suggestCustomsGroups([{ entity: 'E', country: 'US', declarationMode: '9810', currency: 'USD', boxIds: ['A'] }, { entity: 'E', country: 'FR', declarationMode: '9810', currency: 'USD', boxIds: ['B'] }])).toHaveLength(2);
+    expect(suggestCustomsGroups([{ sid: 12, entity: 'E', country: 'US', declarationMode: '9810', currency: 'USD', boxIds: ['A'] }, { sid: 12, entity: 'E', country: 'FR', declarationMode: '9810', currency: 'USD', boxIds: ['B'] }])).toHaveLength(2);
     const { record, context, data } = fixture(); const foreignMember = structuredClone(record.source.members[0]!); foreignMember.demand.id = randomUUID(); foreignMember.demand.snapshot.country = 'FR'; foreignMember.shipment.data.boxes = [foreignMember.shipment.data.boxes[1]!]; record.source.members[0]!.shipment.data.boxes.splice(1); record.source.members.push(foreignMember); data.countryCodes.push('FR');
     expect(validateCustomsContent(record, context).map((issue) => issue.code)).toContain('CUSTOMS_CROSS_COUNTRY_CONFIRMATION'); data.crossCountryConfirmation = { confirmed: true, reason: '逐组确认的合并依据' }; expect(validateCustomsContent(record, context)).toEqual([]);
+  });
+  it('combines suggestions only within the same shop even when entity and all declaration settings match', () => {
+    const common = { entity: '同一报关主体', country: 'US', declarationMode: '9810', currency: 'USD' };
+    const groups = suggestCustomsGroups([{ ...common, sid: 12, boxIds: ['A'] }, { ...common, sid: 13, boxIds: ['B'] }, { ...common, sid: 12, boxIds: ['C'] }]);
+    expect(groups.map((group) => group.boxIds)).toEqual([['A', 'C'], ['B']]);
+  });
+  it.each(['US', 'FR'])('rejects selected boxes from different shops for %s despite a shared entity and confirmed cross-country evidence', (country) => {
+    const { record, context, data } = fixture(), first = record.source.members[0]!, second = structuredClone(first);
+    second.demand.id = randomUUID(); second.source.demandId = second.demand.id; second.shipment.demandId = second.demand.id;
+    second.demand.snapshot.sid = 13; second.shipment.data.sid = 13; second.demand.snapshot.country = country;
+    second.shipment.data.boxes = first.shipment.data.boxes.splice(1); record.source.members.push(second);
+    data.countryCodes = [...new Set(['US', country])]; data.crossCountryConfirmation = { confirmed: true, reason: '已确认同一主体的跨国合并依据' };
+    expect(validateCustomsContent(record, context)).toEqual([expect.objectContaining({ code: 'CUSTOMS_CROSS_SHOP', severity: 'error' })]);
+    expect(customsPolicy.evaluate(record, context, 'export:customs-package').issues).toContainEqual(expect.objectContaining({ code: 'CUSTOMS_CROSS_SHOP', severity: 'error' }));
+  });
+  it.each([undefined, null, 0, -1, 1.5, Number.NaN, '12'])('rejects selected boxes with a missing or invalid shop ID %s', (sid) => {
+    const { record, context } = fixture(); Object.assign(record.source.members[0]!.demand.snapshot, { sid });
+    expect(validateCustomsContent(record, context)).toContainEqual(expect.objectContaining({ code: 'CUSTOMS_SHOP_SCOPE', severity: 'error' }));
+  });
+  it.each([13, undefined])('validates only the selected shop when unselected source boxes have shop ID %s', (sid) => {
+    const { record, context, data } = fixture(), first = record.source.members[0]!, unselected = structuredClone(first);
+    unselected.demand.id = randomUUID(); unselected.source.demandId = unselected.demand.id; unselected.shipment.demandId = unselected.demand.id;
+    Object.assign(unselected.demand.snapshot, { sid, country: 'FR' }); unselected.shipment.data.boxes = first.shipment.data.boxes.splice(1); record.source.members.push(unselected);
+    record.boxIds = first.shipment.data.boxes.map((box) => box.id);
+    data.lines = data.lines.filter((line) => record.boxIds.includes(line.boxId)); data.boxWeights = data.boxWeights.filter((weight) => record.boxIds.includes(weight.boxId)); data.countryCodes = ['US'];
+    expect(validateCustomsContent(record, context)).toEqual([]);
   });
   it('binds reviews to content and logistics, permits a new export after invalidation, and rejects replayed review hashes', () => {
     const { record, context, data, logistics } = fixture(); const result = exported(record, context); context.exports.push(result); data.review = { exportId: result.id, fileSha256: result.fileSha256!, fingerprint: '' };

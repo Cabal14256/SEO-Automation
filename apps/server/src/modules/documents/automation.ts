@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { fromDrizzle, type PgBoss } from 'pg-boss';
-import { documentAutomationJobSchema, documentCreateInputSchema, documentLingxingPreviewSchema, type DocumentAutomationJob, type DocumentAutomationRetryInput, type DocumentAutomationStartInput, type DocumentAutomationSupplementInput, type DocumentCandidate, type DocumentRevisionData } from '@scm/contracts';
+import { documentAutomationJobSchema, documentAutomationStartInputSchema, documentCreateInputSchema, documentLingxingPreviewSchema, type DocumentAutomationJob, type DocumentAutomationRetryInput, type DocumentAutomationStartInput, type DocumentAutomationSupplementInput, type DocumentCandidate, type DocumentRevisionData } from '@scm/contracts';
 import { db, pool } from '../../db/client.js';
 import { logError } from '../../errors.js';
 import { operationAudit } from '../../db/schema.js';
@@ -17,7 +17,7 @@ import { createDocument, documentCandidatesInTx, documentOperation, getDocument,
 import { applyDocumentLingxing, previewDocumentLingxing } from './lingxing-sync.js';
 import { getDocumentExport, listDocumentExports, requestDocumentExport } from './exports.js';
 import { prepareDocumentAutomation } from './automatic-preparation.js';
-import type { StoredDocumentAutomationItem } from './automation-types.js';
+import { documentAutomationRunIds, type StoredDocumentAutomationItem } from './automation-types.js';
 import { applyDocumentAutomationSupplementInTx, getDocumentAutomationRequirementsInTx } from './automation-supplement.js';
 import { preflightDocumentBundle, publishDocumentBundle } from './document-bundle.js';
 import { DocumentWorkbookError } from './workbook-errors.js';
@@ -47,9 +47,9 @@ export function serializeDocumentAutomation(row: AutomationReadRow): DocumentAut
   const phase = row.mode === 'single_workbook' ? row.bundle?.status === 'completed' ? 'completed' : row.status === 'failed' ? 'failed' : row.bundle?.status === 'running' ? 'generating'
     : summary.counts.queued || summary.counts.running || summary.counts.exporting ? 'preparing' : summary.counts.blocked ? 'needs_input' : 'ready'
     : row.status === 'completed' ? 'completed' : row.status === 'failed' ? 'failed' : row.phase ?? 'preparing';
-  return documentAutomationJobSchema.parse({ id: row.id, shippingRunId: row.shippingRunId, version: row.version,
+  return documentAutomationJobSchema.parse({ id: row.id, shippingRunId: row.shippingRunId, shippingRunIds: documentAutomationRunIds(row), version: row.version,
     status: row.status === 'failed' && !row.retryRequests.length ? 'failed' : summary.status,
-    items: items.map(({ id, demandIds, fbas, documentId, documentVersion, exportId, fileId, stage, status, issues, error, attempt }) => ({ id, demandIds, fbas, documentId, documentVersion, exportId, fileId, stage, status, issues, error, attempt })), counts: summary.counts,
+    items: items.map(({ id, shippingRunId, demandIds, fbas, documentId, documentVersion, exportId, fileId, stage, status, issues, error, attempt }) => ({ id, ...(shippingRunId ? { shippingRunId } : {}), demandIds, fbas, documentId, documentVersion, exportId, fileId, stage, status, issues, error, attempt })), counts: summary.counts,
     mode: row.mode ?? 'legacy', phase, bundle: row.bundle ?? null, supplement: null,
     createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString(), completedAt: row.retryRequests.length ? null : row.completedAt?.toISOString() ?? null, error: row.error });
 }
@@ -59,36 +59,43 @@ async function enqueue(tx: BatchTx, boss: PgBoss, id: string) {
   await tx.update(documentAutomationJobs).set({ queueJobId }).where(eq(documentAutomationJobs.id, id)); return queueJobId;
 }
 async function availableCandidates(tx: BatchTx, actorId: string, input: DocumentAutomationStartInput): Promise<DocumentCandidate[]> {
-  const scope = await documentCandidatesInTx(tx, actorId, { shippingRunId: input.shippingRunId });
-  if (!input.demandIds) return scope.items;
-  const ids = new Set(input.demandIds), result = scope.items.filter((item) => ids.has(item.demandId));
-  if (result.length !== ids.size) throw new BatchError('DOCUMENT_MEMBER_UNAVAILABLE', 422, '所选 FBA 不属于本次发货的有效完整制表确认，请刷新后选择。');
+  const items: DocumentCandidate[] = [];
+  for (const shippingRunId of input.shippingRunIds ?? [input.shippingRunId!]) {
+    const scope = await documentCandidatesInTx(tx, actorId, { shippingRunId });
+    items.push(...scope.items.map((item) => ({ ...item, shippingRunId })));
+  }
+  const scope = { items: [...new Map(items.map((item) => [item.demandId, item])).values()] };
+  const ids = input.demandIds ? new Set(input.demandIds) : null, result = ids ? scope.items.filter((item) => ids.has(item.demandId)) : scope.items;
+  if (ids && result.length !== ids.size) throw new BatchError('DOCUMENT_MEMBER_UNAVAILABLE', 422, '所选 FBA 不属于所选发货表的有效完整制表确认，请刷新后选择。');
+  if (result.length > 500) throw new BatchError('DOCUMENT_MEMBER_LIMIT', 422, '每批最多生成 500 个货件的发票，请缩小勾选范围后重试。');
   return result;
 }
 export async function startDocumentAutomation(boss: PgBoss, actorId: string, input: DocumentAutomationStartInput) {
+  input = documentAutomationStartInputSchema.parse(input);
+  const runIds = input.shippingRunIds ?? [input.shippingRunId!], shippingRunId = runIds[0]!;
   return documentOperation(actorId, input.operationId, 'document.automation.start', input, async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`document-automation-run:${input.shippingRunId}`},0))`);
+    for (const runId of [...runIds].sort()) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`document-automation-run:${runId}`},0))`);
     let items: StoredDocumentAutomationItem[];
     if (input.documentId) {
       const { record, revision } = await lockedDocument(tx, input.documentId, actorId, input.expectedVersion);
-      if (revision.data.shippingRunId !== input.shippingRunId) throw new BatchError('DOCUMENT_SCOPE_MISMATCH', 422, '所选草稿不属于本次发货。');
+      if (revision.data.shippingRunId !== shippingRunId) throw new BatchError('DOCUMENT_SCOPE_MISMATCH', 422, '所选草稿不属于本次发货。');
       if (['cancelled', 'superseded'].includes(record.status)) throw new BatchError('DOCUMENT_READ_ONLY', 409, '该单据已结束，请查看历史或建立更正单据。');
       const existing = await tx.select().from(documentExports).where(sql`${documentExports.reference}->>'documentId' = ${record.id}`);
       if (existing.some((entry) => entry.fileId)) throw new BatchError('DOCUMENT_CORRECTION_REQUIRED', 409, '该票已有生成文件，请查看文件或通过更正单据处理。');
       const item: StoredDocumentAutomationItem = { id: randomUUID(), demandIds: revision.data.members.map((member) => member.demand.id), fbas: revision.data.members.map((member) => member.demand.snapshot.fba),
         documentId: record.id, documentVersion: record.version, exportId: null, fileId: null, stage: 'preview', status: 'queued', issues: [], error: null, attempt: 1, sourceDigest: automationSourceDigest(revision.data.members), operations: {} };
-      items = [item];
+      items = [{ ...item, shippingRunId }];
     } else {
       const candidates = await availableCandidates(tx, actorId, input);
       if (!candidates.length) throw new BatchError('DOCUMENT_MEMBER_UNAVAILABLE', 422, '本次发货尚无可出单的完整 FBA，请先完成制表确认。');
       items = groupAutomationCandidates(candidates).map((group) => candidateItem(group, randomUUID()));
     }
     const ids = new Set(items.flatMap((item) => item.demandIds));
-    const others = await tx.select().from(documentAutomationJobs).where(and(isNull(documentAutomationJobs.deletedAt), eq(documentAutomationJobs.shippingRunId, input.shippingRunId), inArray(documentAutomationJobs.status, ['queued', 'running', 'partial', 'blocked', 'failed'])));
+    const others = await tx.select().from(documentAutomationJobs).where(and(isNull(documentAutomationJobs.deletedAt), inArray(documentAutomationJobs.status, ['queued', 'running', 'partial', 'blocked', 'failed']), or(inArray(documentAutomationJobs.shippingRunId, runIds), sql`EXISTS (SELECT 1 FROM jsonb_array_elements(${documentAutomationJobs.items}) item WHERE item->>'shippingRunId' = ANY(${sql.param(runIds)}::text[]))`)));
     const occupied = others.find((job) => !job.deletedAt && job.items.some((item) => item.status !== 'completed' && item.demandIds.some((id) => ids.has(id))));
     if (occupied) throw new BatchError('DOCUMENT_AUTOMATION_BUSY', 409, '所选 FBA 已有自动出单任务，请继续该任务。', { jobId: occupied.id });
     const summary = automationSummary(items), id = randomUUID();
-    const [row] = await tx.insert(documentAutomationJobs).values({ id, operationId: input.operationId, requestHash: documentDigest(input), shippingRunId: input.shippingRunId,
+    const [row] = await tx.insert(documentAutomationJobs).values({ id, operationId: input.operationId, requestHash: documentDigest(input), shippingRunId,
       status: summary.status, mode: 'single_workbook', phase: 'preparing', fields: input.fields ?? {}, title: input.title ?? null, items, createdBy: actorId,
       completedAt: null }).returning();
     if (summary.counts.queued) await enqueue(tx, boss, id);
@@ -101,7 +108,7 @@ export async function getDocumentAutomation(id: string, actorId: string) {
 }
 export async function listDocumentAutomations(actorId: string, shippingRunId?: string) {
   return db.transaction(async (tx) => { await requireBatchActor(tx, actorId);
-    const rows = await tx.select(automationListColumns).from(documentAutomationJobs).where(and(isNull(documentAutomationJobs.deletedAt), eq(documentAutomationJobs.createdBy, actorId), shippingRunId ? eq(documentAutomationJobs.shippingRunId, shippingRunId) : undefined)).orderBy(desc(documentAutomationJobs.createdAt)).limit(30);
+    const rows = await tx.select(automationListColumns).from(documentAutomationJobs).where(and(isNull(documentAutomationJobs.deletedAt), eq(documentAutomationJobs.createdBy, actorId), shippingRunId ? or(eq(documentAutomationJobs.shippingRunId, shippingRunId), sql`${documentAutomationJobs.items} @> ${JSON.stringify([{ shippingRunId }])}::jsonb`) : undefined)).orderBy(desc(documentAutomationJobs.createdAt)).limit(30);
     return { items: rows.filter((row) => !row.deletedAt).map(serializeDocumentAutomation) }; });
 }
 /** The prepared create input is not ownership: only its committed, exact idempotency result is. */
@@ -110,14 +117,14 @@ async function automationOwnedDraftsInTx(tx: BatchTx, row: Job) {
   for (const item of row.items) {
     const input = item.operations.create?.input, parsed = documentCreateInputSchema.safeParse(input);
     const operationId = automationOperationId(row.id, item.id, 'create');
-    if (!parsed.success || parsed.data.operationId !== operationId || parsed.data.shippingRunId !== row.shippingRunId || parsed.data.purpose !== 'invoice'
+    if (!parsed.success || parsed.data.operationId !== operationId || parsed.data.shippingRunId !== (item.shippingRunId ?? row.shippingRunId) || parsed.data.purpose !== 'invoice'
       || documentDigest([...parsed.data.demandIds].sort()) !== documentDigest([...item.demandIds].sort())) continue;
     const entries = await tx.select().from(batchOperations).where(eq(batchOperations.operationId, operationId));
     const creation = entries.find((entry) => entry.operationId === operationId);
     if (!creation || creation.action !== 'document.create' || creation.actorId !== row.createdBy || creation.requestHash !== documentDigest({ action: 'document.create', input })) continue;
     const initial = creation.result.document as { id?: string; version?: number; currentRevision?: { data?: DocumentRevisionData } } | undefined;
     const data = initial?.currentRevision?.data, documentId = creation.result.documentId;
-    if (typeof documentId !== 'string' || initial?.id !== documentId || !initial.version || !data || data.shippingRunId !== row.shippingRunId || !Array.isArray(data.members)
+    if (typeof documentId !== 'string' || initial?.id !== documentId || !initial.version || !data || data.shippingRunId !== (item.shippingRunId ?? row.shippingRunId) || !Array.isArray(data.members)
       || documentDigest(data.members.map((member) => member.demand.id).sort()) !== documentDigest([...item.demandIds].sort())
       || item.documentId && item.documentId !== documentId) continue;
     owned.push({ item, documentId, createdVersion: initial.version });
@@ -143,7 +150,7 @@ export async function deleteDocumentAutomation(id: string, actorId: string, inpu
       preservedDocumentIds.add(documentId);
       const { record, revision } = await lockedDocument(tx, documentId, actorId);
       if (record.createdBy !== row.createdBy || record.purpose !== 'invoice' || record.status !== 'draft' || record.version !== (item.documentVersion ?? createdVersion)
-        || revision.data.shippingRunId !== row.shippingRunId || documentDigest(revision.data.members.map((member) => member.demand.id).sort()) !== documentDigest([...item.demandIds].sort())) continue;
+        || revision.data.shippingRunId !== (item.shippingRunId ?? row.shippingRunId) || documentDigest(revision.data.members.map((member) => member.demand.id).sort()) !== documentDigest([...item.demandIds].sort())) continue;
       // Even failed/queued exports and another task's adoption retain the document and every claim.
       const exports = await tx.select().from(documentExports).where(sql`${documentExports.reference}->>'documentId' = ${documentId}`);
       if (exports.length) continue;
@@ -237,8 +244,8 @@ function servicesFor(boss: PgBoss, row: Job): AutomationServices {
   const actorId = row.createdBy;
   return {
     current: async (id) => ({ document: (await getDocument(id, actorId)).document, exports: (await listDocumentExports(id, actorId)).items }),
-    existing: (item) => existingDocument(item, actorId, row.shippingRunId),
-    sourceDigest: async (ids) => { const scope = await listDocumentCandidates(actorId, { shippingRunId: row.shippingRunId }); const members = scope.items.filter((item) => ids.includes(item.demandId));
+    existing: (item) => existingDocument(item, actorId, item.shippingRunId ?? row.shippingRunId),
+    sourceDigest: async (ids) => { const source = row.items.find((item) => item.demandIds.length === ids.length && item.demandIds.every((id) => ids.includes(id))); const scope = await listDocumentCandidates(actorId, { shippingRunId: source?.shippingRunId ?? row.shippingRunId }); const members = scope.items.filter((item) => ids.includes(item.demandId));
       if (members.length !== ids.length) throw new BatchError('DOCUMENT_SOURCE_STALE', 409, '部分 FBA 已不在当前有效制表确认中，请核对来源。');
       const issues = members.flatMap((member) => member.blockers).filter((issue) => issue.severity === 'error');
       if (issues.length) throw new BatchError('DOCUMENT_SOURCE_STALE', 409, '当前来源仍有阻塞项，请处理后续跑。', issues);
@@ -266,7 +273,7 @@ export async function resolveAutomationSuccessorInTx(tx: BatchTx, row: Pick<Job,
   const ids = [...new Set(claims.map((claim) => claim.documentId))];
   if (ids.length !== 1 || ids[0] === item.documentId || new Set(claims.map((claim) => claim.demandId)).size !== item.demandIds.length) return;
   const successor = await lockedDocument(tx, ids[0]!, row.createdBy), data = successor.revision.data;
-  if (['cancelled', 'superseded'].includes(successor.record.status) || data.shippingRunId !== row.shippingRunId || data.members.length !== item.demandIds.length || data.members.some((member) => !item.demandIds.includes(member.demand.id))) return;
+  if (['cancelled', 'superseded'].includes(successor.record.status) || data.shippingRunId !== (item.shippingRunId ?? row.shippingRunId) || data.members.length !== item.demandIds.length || data.members.some((member) => !item.demandIds.includes(member.demand.id))) return;
   item.documentId = successor.record.id; item.documentVersion = successor.record.version; item.sourceDigest = automationSourceDigest(data.members);
   item.stage = 'preview'; item.exportId = null; item.fileId = null;
 }
@@ -285,7 +292,7 @@ async function consumeRetries(row: Job) {
       resetAutomationRetry(item, Boolean(resumeExact));
       if (item.documentId && !resumeExact) await resolveAutomationSuccessorInTx(tx, row, item);
       if (!item.documentId && !resumeExact) {
-        const candidates = (await documentCandidatesInTx(tx, row.createdBy, { shippingRunId: row.shippingRunId })).items.filter((candidate) => item.demandIds.includes(candidate.demandId));
+        const candidates = (await documentCandidatesInTx(tx, row.createdBy, { shippingRunId: item.shippingRunId ?? row.shippingRunId })).items.filter((candidate) => item.demandIds.includes(candidate.demandId));
         if (candidates.length === item.demandIds.length) item.sourceDigest = automationSourceDigest(candidates.map(memberFromCandidate));
       }
     }
@@ -300,14 +307,14 @@ export async function executeDocumentAutomation(boss: PgBoss, id: string) {
     locked = lock.rows[0]?.locked === true; if (!locked) return;
     const [row] = await db.select().from(documentAutomationJobs).where(eq(documentAutomationJobs.id, id));
     if (!row || row.deletedAt || !activeStatuses.includes(row.status) && !row.retryRequests.length) return;
-    await db.transaction(async (tx) => { await requireBatchActor(tx, row.createdBy); await assertLifecycleActiveInTx(tx, 'run', row.shippingRunId); });
+    await db.transaction(async (tx) => { await requireBatchActor(tx, row.createdBy); for (const runId of documentAutomationRunIds(row).sort()) await assertLifecycleActiveInTx(tx, 'run', runId); });
     await db.update(documentAutomationJobs).set({ leaseUntil: leaseTime(), status: 'running', updatedAt: new Date() }).where(eq(documentAutomationJobs.id, id));
     heartbeat = setInterval(() => void db.update(documentAutomationJobs).set({ leaseUntil: leaseTime() }).where(eq(documentAutomationJobs.id, id)).catch((error) => logError('Automatic invoice lease refresh failed', error)), 30_000); heartbeat.unref();
     const services = servicesFor(boss, row);
     await consumeRetries(row);
     let processed = 0;
     for (const item of [...row.items].sort((left, right) => Number(left.status === 'exporting') - Number(right.status === 'exporting'))) {
-      await db.transaction((tx) => assertLifecycleActiveInTx(tx, 'run', row.shippingRunId));
+      await db.transaction(async (tx) => { for (const runId of documentAutomationRunIds(row).sort()) await assertLifecycleActiveInTx(tx, 'run', runId); });
       if (item.status === 'blocked' || item.status === 'completed' || item.status === 'ready') continue;
       try { await advanceAutomationItem(row, item, services, () => save(row)); }
       catch (error) { const status = error && typeof error === 'object' && 'status' in error ? Number(error.status) : 0;

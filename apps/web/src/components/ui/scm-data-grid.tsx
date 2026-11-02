@@ -448,8 +448,19 @@ export function ScmDataGrid<Row>(props: Props<Row>) {
     const previous = appliedRecords.current;
     if (previous.length === records.length && previous.every((record, index) => record.__key === records[index]?.__key)) {
       const changes: RecordValue[] = [], indexes: number[] = [];
+      const checks: { index: number; field: string; checked: boolean }[] = [];
       records.forEach((record, index) => { if (columns.some((_, col) => ['c', 'd', 'e', 's', 'b', 'i', 'v'].some((prefix) => record[`${prefix}${col}`] !== previous[index]?.[`${prefix}${col}`]))) { changes.push(record); indexes.push(index); } });
+      columns.forEach((column, col) => {
+        if (!column.getChecked) return;
+        records.forEach((record, index) => {
+          const field = `c${col}`, checked = Boolean(record[field]);
+          if (checked !== Boolean(previous[index]?.[field])) checks.push({ index, field, checked });
+        });
+      });
       if (changes.length) table.current.updateRecords(changes, indexes);
+      // Incremental record updates retain VTable's checkbox cache. Sync external
+      // selections through the record API, which does not emit business toggles.
+      for (const { index, field, checked } of checks) table.current.setCellCheckboxStateByRecordIndex(index, field, checked);
     } else table.current.setRecords(records);
     appliedRecords.current = records; refitFrozen.current();
   }, [records, columns, editVersion]);

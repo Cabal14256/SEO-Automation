@@ -18,6 +18,7 @@ import { getExport, getShipmentReport, listExports, publishReportFile, requestRe
 
 const querySchema = z.object({ shippingRunId: z.uuid().optional(), month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(), weekStartDate: z.iso.date().optional(), weeklyBatchId: z.uuid().optional(), subBatchId: z.uuid().optional(), sid: z.coerce.number().int().positive().optional(), country: z.string().trim().min(1).max(120).optional(), channel: z.string().trim().min(1).max(120).optional(), region: z.enum(['all', 'US', 'EU']).default('all'), q: z.string().trim().max(200).optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(50) });
 type Variables = { actorId: string };
+const exportHistoryQuerySchema = querySchema.extend({ groupIds: z.string().transform((value) => value.split(',')).pipe(z.array(z.uuid()).min(1).max(1000)).optional() });
 export function createReportRoutes(getBoss: () => PgBoss | null) {
   const routes = new Hono<{ Variables: Variables }>();
   routes.use('*', async (c, next) => {
@@ -32,7 +33,7 @@ export function createReportRoutes(getBoss: () => PgBoss | null) {
   });
   routes.use('*', bodyLimit({ maxSize: 10 * 1024 * 1024 + 64 * 1024, onError: (c) => c.json({ error: { code: 'FILE_TOO_LARGE', message: '补录文件不能超过10 MiB。' } }, 413) }));
   routes.get('/', async (c) => { const query = querySchema.safeParse(c.req.query()); if (!query.success) throw new BatchError('VALIDATION_ERROR', 422, '报表筛选条件无效。'); return c.json(await getShipmentReport(c.get('actorId'), query.data)); });
-  routes.get('/exports', async (c) => { const query = querySchema.safeParse(c.req.query()); if (!query.success) throw new BatchError('VALIDATION_ERROR', 422, '历史筛选条件无效。'); return c.json(await listExports(query.data)); });
+  routes.get('/exports', async (c) => { const query = exportHistoryQuerySchema.safeParse(c.req.query()); if (!query.success) throw new BatchError('VALIDATION_ERROR', 422, '历史筛选条件无效。'); return c.json(await listExports(query.data)); });
   routes.get('/exports/:id', async (c) => { const id = z.uuid().parse(c.req.param('id')); return c.json(await getExport(id)); });
   routes.post('/exports', async (c) => {
     const input = reportExportInputSchema.safeParse(await c.req.json().catch(() => null)); if (!input.success) throw new BatchError('VALIDATION_ERROR', 422, '请重新预览并选择确认范围。');

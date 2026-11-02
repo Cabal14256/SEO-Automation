@@ -28,7 +28,7 @@ const codes = boxes.map((box, index) => ({ id: uid(), groupId, demandId, boxId: 
 const member = { source: { weekStartDate: week, groupId, groupVersion: 1, m2ConfirmationId: m2, demandId, demandVersion: 1, shipmentRevisionId: shipmentId, physicalConfirmationId: null, m3Version: null, sourceFingerprint: null }, demand, shipment, codes, physical: null };
 const sourceFact = (item, price, unitPrice, cartonQuantity) => ({ sid: 101, msku: item.msku, fnsku: item.fnsku, sku: item.sku, salesPrice: price, currency: 'USD', unitPrice, cartonQuantity, sourceFileId: uid(), sourceSha256: 'a'.repeat(64), fetchedAt: now });
 const facts = [sourceFact(first, '19.99', '4.00', '500'), sourceFact(fallback, '12.345', '2.47', null)];
-const productData = { englishName: 'Screen protector', chineseName: '手机膜', material: 'Glass', hsCode: '700719', use: 'Protect phone screen', brand: 'TECH', model: 'TEST', unit: 'piece', salesLink: 'https://example.invalid/product' };
+const productData = { englishName: 'Screen protector', chineseName: '手机膜', material: 'Glass', hsCode: '700719', use: 'Protect phone screen', brand: 'TECH', model: 'TEST', unit: 'piece', salesLink: 'https://example.invalid/product', exportHsCode: '3926909090', brandType: '境内自主品牌', exportPreference: '不享惠', firstLegalUnit: '千克', firstLegalUnitRate: '0.025', secondLegalUnit: '平方米', secondLegalUnitRate: '0.01', quarantineCode: 'N：出口商品检验', productNetWeightGrams: '25', productGrossWeightGrams: '30', cartonGrossWeightKg: '15' };
 const profiles = [first, fallback].map((item) => ({ category: 'product', profileId: uid(), version: 1, data: { sid: 101, ...item, ...productData, unitPrice: '99.00', currency: 'EUR', unitPriceConfirmed: 'false' } }));
 const prefix = 'product.' + createHash('sha256').update(JSON.stringify([101, first.msku, first.fnsku, first.sku])).digest('hex') + '.';
 function record(title, version = 'v2') {
@@ -111,25 +111,35 @@ try {
   const adjustments = wizard().locator('.document-product-adjustments'); await openAdjustment('A-FIRST');
   await expect(adjustments.locator('.document-product-adjustment')).toHaveCount(2);
   const editor = adjustments.locator('.document-product-adjustment').filter({ hasText: 'A-FIRST' });
-  await expect(editor.getByLabel('A-FIRST 自动申报单价', { exact: true })).toContainText('2.00 USD');
+  await expect(editor.getByLabel('A-FIRST 自动申报单价', { exact: true })).toContainText('2.30 USD');
   await expect(editor.getByLabel('申报单价', { exact: true })).toHaveCount(0); await expect(editor.getByLabel('币种', { exact: true })).toHaveCount(0); await expect(adjustments.getByRole('checkbox')).toHaveCount(0); await expect(editor).not.toContainText('88'); await expect(editor).not.toContainText('99.00');
-  await expect(editor).toContainText('申报单价固定为每件 2.00'); await expect(editor).toContainText('无需补充商品售价'); note();
+  await expect(editor).toContainText('本票申报单价为每件 2.30 USD'); await expect(editor).toContainText('无需补充商品售价'); note();
 
   step = 'fixed-unit-price-ignores-listing-currency-and-missing-sales-price';
   main.currentRevision.data.productSourceFacts[0].currency = 'EUR'; main.currentRevision.data.productSourceFacts[0].unitPrice = null;
   main.currentRevision.data.productSourceFacts[1].salesPrice = null; main.currentRevision.data.productSourceFacts[1].unitPrice = null;
   await open(main.id); await openAdjustment('A-FIRST');
-  await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'A-FIRST' })).toContainText('2.00 USD');
+  await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'A-FIRST' })).toContainText('2.30 USD');
   await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'A-FIRST' }).getByLabel('人工补充售价（USD）', { exact: true })).toHaveCount(0);
   await openAdjustment('C-FALLBACK');
   await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'C-FALLBACK' }).getByLabel('人工补充售价（USD）', { exact: true })).toHaveCount(0);
-  await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'C-FALLBACK' })).toContainText('2.00 USD');
+  await expect(wizard().locator('.document-product-adjustment').filter({ hasText: 'C-FALLBACK' })).toContainText('2.30 USD');
   main.currentRevision.data.productSourceFacts = structuredClone(facts); note();
 
   step = 'preview-has-fixed-price-and-permission-guidance-without-price-confirmation';
   await open(main.id); permissionFailure = true; const panel = wizard().locator('.document-lingxing');
   await panel.getByRole('button', { name: '查询领星资料', exact: true }).click(); await expect(panel).toContainText('Listing 售价查询未获授权'); await expect(panel).toContainText('需开通权限：Listing 查询');
-  await expect(panel.getByRole('checkbox')).toHaveCount(0); await expect(panel).toContainText('固定申报单价 2.00 USD'); await expect(panel).not.toContainText('× 20%'); await expect(panel).toContainText('箱内其他商品 · 不输出申报资料');
+  await expect(panel.getByRole('checkbox')).toHaveCount(0); await expect(panel).toContainText('固定申报单价 2.30 USD'); await expect(panel).not.toContainText('× 20%'); await expect(panel).toContainText('箱内其他商品 · 不输出申报资料');
+  await panel.locator('.document-lingxing-product').first().locator('summary').click();
+  for (const label of ['中国出口 HS 编码', '进口国清关 HS 编码', '第一法定单位换算率', '第二法定单位', '领星检疫相关原始值', '单件产品净重（g）', '装货外箱实重（kg）']) await expect(panel.getByText(label, { exact: true }).first()).toBeVisible();
+  await expect(panel).toContainText('3926909090'); await expect(panel).toContainText('N：出口商品检验');
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    await panel.getByText('中国出口 HS 编码', { exact: true }).first().scrollIntoViewIfNeeded();
+    await page.screenshot({ path: resolve(evidence, `customs-field-preview-${width}.png`) });
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await panel.getByRole('button', { name: '采用领星资料补齐空项', exact: true }).click(); await expect.poll(() => calls.apply.length).toBe(1); assert.equal(calls.apply[0].confirmPrices, false); note();
 
   step = 'legacy-draft-can-query-and-upgrade-without-confirming-old-prices';

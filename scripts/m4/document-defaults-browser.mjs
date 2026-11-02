@@ -122,6 +122,27 @@ try {
   let context;
 
   if (!screenshotsOnly) {
+  step = 'legacy-draft-recipient-follows-address-code-without-changing-source-evidence';
+  const recipient = fixture();
+  setLingxingAddress(recipient, { ...completeAddress, addressCode: 'TOL3', recipientName: 'Amazon.com Services LLC' });
+  Object.assign(recipient.document.currentRevision.data.fields, { addressCode: ' TOL3 ', recipientName: 'Amazon.com Services LLC' });
+  const recipientSource = JSON.stringify(recipient.document.currentRevision.data.members);
+  context = await setup(recipient); await open(recipient);
+  await expect(addressField('地址代码')).toHaveValue('TOL3'); await expect(addressField('收件人')).toHaveValue('TOL3');
+  assert.equal(recipient.document.currentRevision.data.fields.recipientName, 'Amazon.com Services LLC'); assert.equal(recipient.revisions.length, 0);
+  if (!(await addressField('收件人').isVisible())) await addressSection().getByLabel('修改地址 / 更换来源', { exact: true }).click();
+  await addressSection().getByText('原始来源地址（仅供核对）', { exact: true }).click();
+  await expect(addressSection().locator('.document-address-source')).toContainText('收件人：Amazon.com Services LLC');
+  await expect(addressField('收件人')).toHaveJSProperty('readOnly', true);
+  await addressField('地址代码').fill('IND9'); await expect(addressField('收件人')).toHaveValue('IND9');
+  await revealInBody(addressField('地址代码')); await screenshot('document-address-recipient-synced-1440.png');
+  await addressField('地址代码').fill('TOL3'); await expect(addressField('收件人')).toHaveValue('TOL3');
+  await save().click(); await expect(save()).toBeDisabled();
+  assert.equal(recipient.revisions[0].fields.addressCode, 'TOL3'); assert.equal(recipient.revisions[0].fields.recipientName, 'TOL3');
+  assert.equal(JSON.stringify(recipient.document.currentRevision.data.members), recipientSource);
+  await reload(); await expect(addressField('地址代码')).toHaveValue('TOL3'); await expect(addressField('收件人')).toHaveValue('TOL3');
+  assert.equal(JSON.stringify(recipient.document.currentRevision.data.members), recipientSource); await context.close(); note();
+
   step = 'retired-order-reference-and-trade-terms-are-hidden-and-saved-as-empty';
   const retired = fixture({ retired: true }); context = await setup(retired); await open(retired);
   for (const label of ['订单编号', '参考号', '贸易条款']) await expect(wizard().getByLabel(label, { exact: true })).toHaveCount(0);
@@ -156,7 +177,7 @@ try {
   await expect(addressSection().getByRole('button', { name: /管理地址簿|保存到地址簿|在地址簿补全/ })).toHaveCount(0);
   await expect(addressField('地址来源')).toContainText('领星');
   await addressSection().getByRole('button', { name: '采用地址', exact: true }).click();
-  for (const [key, label] of Object.entries(addressLabels)) await expect(addressField(label)).toHaveValue(completeAddress[key] || '');
+  for (const [key, label] of Object.entries(addressLabels)) await expect(addressField(label)).toHaveValue(key === 'recipientName' ? completeAddress.addressCode : completeAddress[key] || '');
   await expect(addressField('已核对并确认本票采用的完整收件地址')).not.toBeChecked(); await expect(addressField('地址核对 / 冲突处理原因')).toHaveValue('');
   await expect(addressSection().getByRole('status', { name: '地址确认状态', exact: true })).toHaveText('待核对确认'); assert.equal(unique.revisions.length, 0);
   await addressField('地址核对 / 冲突处理原因').fill('Explicitly checked Lingxing source address'); await addressField('已核对并确认本票采用的完整收件地址').check(); await save().click(); await expect(save()).toBeDisabled();
@@ -167,7 +188,7 @@ try {
     const state = fixture({ emptyAddress: true }); state.document.currentRevision.data.members[0].sourceCandidates.addresses = [];
     state.profiles = kind === 'unique' ? [profile()] : kind === 'ambiguous' ? [profile(), profile({ city: 'Another Matching City' })] : [profile({ postalCode: '' })];
     context = await setup(state); await open(state); await expect.poll(() => state.profileReads).toBe(1); await expect(addressField('地址来源')).toBeEnabled();
-    await expect(addressField('城市')).toHaveValue(''); await expect(addressField('收件人')).toHaveValue(''); await expect(addressSection()).toContainText('当前货件尚无领星地址');
+    await expect(addressField('城市')).toHaveValue(''); await expect(addressField('收件人')).toHaveValue(''); await expect(addressField('收件人')).toHaveJSProperty('readOnly', false); await expect(addressSection()).toContainText('当前货件尚无领星地址');
     await addressField('地址来源').click(); await expect(page.getByRole('option')).toHaveCount(1); await page.keyboard.press('Escape');
     assert.equal(state.revisions.length, 0); await context.close();
   }

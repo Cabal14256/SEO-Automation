@@ -66,8 +66,8 @@ export function QueryError({ error, retry }: { error: unknown; retry: () => void
 }
 
 export async function downloadBlob(action: Promise<Blob>, filename: string) {
-  const url = URL.createObjectURL(await action);
-  const anchor = document.createElement('a'); anchor.href = url; anchor.download = filename; document.body.append(anchor); anchor.click(); anchor.remove();
+  const blob = await action, url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a'); anchor.href = url; anchor.download = blob instanceof File && blob.name ? blob.name : filename; document.body.append(anchor); anchor.click(); anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 

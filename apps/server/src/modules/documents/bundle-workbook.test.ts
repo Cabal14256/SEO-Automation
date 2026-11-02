@@ -7,7 +7,7 @@ const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AA
 async function invoice(id: string, rows = 1, overrides: Record<string, ExcelJS.CellValue> = {}) {
   const book = new ExcelJS.Workbook(), sheet = book.addWorksheet('清关单');
   for (let row = 1; row <= 16; row++) { sheet.mergeCells(`B${row}:D${row}`); sheet.mergeCells(`F${row}:H${row}`); }
-  sheet.getCell('B4').value = 'Receiver'; sheet.getCell('B6').value = '10 Road'; sheet.getCell('B12').value = 'US'; sheet.getCell('F12').value = '美元';
+  sheet.getCell('B3').value = 'ADDR-001'; sheet.getCell('B4').value = 'ADDR-001'; sheet.getCell('B6').value = '10 Road'; sheet.getCell('B12').value = 'US'; sheet.getCell('F12').value = '美元';
   sheet.getCell('B16').value = rows; sheet.getCell('F15').value = rows * 5;
   for (const [cell, value] of Object.entries(overrides)) sheet.getCell(cell).value = value;
   DOCUMENT_MAIN_HEADERS.forEach((label, index) => { sheet.getCell(17, index + 1).value = label; });
@@ -111,6 +111,12 @@ describe('one real XLSX for a complete invoice batch', () => {
     await expect(createDocumentBundleWorkbook([{ ...input, expectedHeaders: { B1: null, F12: '美元' } }])).rejects.toThrow('建立更正单据');
     const wrongCurrency = await invoice('B', 1, { F12: '英镑' });
     await expect(createDocumentBundleWorkbook([{ ...wrongCurrency, expectedHeaders: { B1: null, F12: '美元' } }])).rejects.toThrow('建立更正单据');
+  });
+  it('requires a correction before reusing a historical recipient that differs from the final address code', async () => {
+    const input = await invoice('A', 1, { B4: 'Amazon.com Services LLC' });
+    await expect(createDocumentBundleWorkbook([{ ...input, expectedHeaders: { B3: 'ADDR-001', B4: 'ADDR-001' } }])).rejects.toThrow('建立更正单据');
+    const written = (await load(input.bytes)).worksheets[0]!;
+    expect(written.getCell('B3').value).toBe('ADDR-001'); expect(written.getCell('B4').value).toBe('Amazon.com Services LLC');
   });
   it('rejects incomplete scope, formulas or unrecognized source columns instead of publishing a partial-looking workbook', async () => {
     const input = await invoice('A'); await expect(createDocumentBundleWorkbook([input, input])).rejects.toThrow('重复单据');

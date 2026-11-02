@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
-import { DOCUMENT_INVOICE_UNIT_PRICE, withDocumentInvoiceDefaults, type DocumentExportReference, type DocumentRevisionData } from '@scm/contracts';
+import { DOCUMENT_INVOICE_PRICING_RULE, documentInvoicePrice, withDocumentInvoiceDefaults, type DocumentExportReference, type DocumentRevisionData } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { fileIndex, operationAudit } from '../../db/schema.js';
 import { BatchError, freezeGroupForExport, requireBatchActor, type BatchTx } from '../batches/service.js';
@@ -8,8 +8,8 @@ import { publishReportFile } from '../batches/report-service.js';
 import { checkedFileBytes } from '../imports/service.js';
 import { documentAutomationJobs, documentInvoiceBundles } from './automation-schema.js';
 import { automationOperationId } from './automation-engine.js';
-import type { BundleSelection, BundleWorkbookInput } from './bundle-workbook.js';
-import { createDocumentBundleArchive, documentBundleInvoiceBytes } from './bundle-archive.js';
+import type { BundleSelection } from './bundle-workbook.js';
+import { createDocumentBundleArchive, documentBundleInvoiceBytes, type BundleArchiveInput } from './bundle-archive.js';
 import { documentDigest } from './domain.js';
 import { documentExports, documents } from './schema.js';
 import { lockedDocument, validateDocumentInTx } from './service.js';
@@ -20,7 +20,7 @@ type File = typeof fileIndex.$inferSelect;
 type Source = { itemId: string; documentId: string; version: number; reference: DocumentExportReference; data: DocumentRevisionData; file: File;
   existingExportId: string | null; selections?: BundleSelection[] };
 const bundleName = (id: string) => `整批发票-${id.slice(0, 8)}.zip`;
-const scopeKey = (items: StoredDocumentAutomationItem[]) => documentDigest(items.map((item) => [item.id, item.documentId, item.documentVersion]).sort());
+const scopeKey = (items: StoredDocumentAutomationItem[]) => documentDigest(items.map((item) => [item.id, item.shippingRunId ?? null, item.documentId, item.documentVersion]).sort());
 function assertReference(reference: DocumentExportReference, record: { status: string; currentRevisionId: string | null }, revision: { id: string; version: number; data: DocumentRevisionData }) {
   const template = revision.data.templateReference;
   if (['cancelled', 'superseded'].includes(record.status) || record.currentRevisionId !== reference.revisionId || revision.id !== reference.revisionId || revision.version !== reference.revisionVersion
@@ -100,6 +100,7 @@ export async function preflightDocumentBundle(job: Job): Promise<{ sources: Sour
       if (!['ready', 'completed'].includes(item.status) || !item.documentId || item.documentVersion === null) continue;
       try {
         const { record, revision } = await lockedDocument(tx, item.documentId, job.createdBy, item.documentVersion);
+        if (item.shippingRunId && revision.data.shippingRunId !== item.shippingRunId) throw new BatchError('DOCUMENT_SCOPE_MISMATCH', 422, '发票不属于任务中指定的发货表。');
         if (revision.data.generationRulesVersion !== 'v2') throw new BatchError('DOCUMENT_GENERATION_UPGRADE_REQUIRED', 422, '本票使用旧版发票规则；请通过更正建立采用当前规则的新单据，历史文件保持原样。');
         const validation = await validateDocumentInTx(tx, item.documentId, job.createdBy, item.documentVersion);
         const blockers = validation.issues.filter((issue) => issue.severity === 'error');
@@ -108,14 +109,14 @@ export async function preflightDocumentBundle(job: Job): Promise<{ sources: Sour
         const template = revision.data.templateReference;
         if (!template) throw new BatchError('DOCUMENT_TEMPLATE_REQUIRED', 422, '请选择本票有效模板。');
         const reference: DocumentExportReference = { documentId: record.id, revisionId: revision.id, revisionVersion: revision.version, templateId: template.templateId,
-          templateVersion: template.version, templateSha256: template.sha256, sources: revision.data.members.map((member) => member.source), generationRulesVersion: revision.data.generationRulesVersion, pricingRule: 'fixed-2', bundleJobId: job.id };
+          templateVersion: template.version, templateSha256: template.sha256, sources: revision.data.members.map((member) => member.source), generationRulesVersion: revision.data.generationRulesVersion, pricingRule: DOCUMENT_INVOICE_PRICING_RULE, bundleJobId: job.id };
         const exports = await tx.select().from(documentExports).where(sql`${documentExports.reference}->>'documentId' = ${record.id}`).orderBy(desc(documentExports.createdAt)).for('share');
         const existing = exports.find((entry) => entry.fileId && entry.status === 'completed');
         if (exports.some((entry) => ['queued', 'running'].includes(entry.status))) throw new BatchError('DOCUMENT_EXPORT_BUSY', 409, '本票已有生成任务，请等待结束后整批续跑。');
         let fileId = template.fileId, selections: BundleSelection[] | undefined;
         if (existing?.fileId) {
           if (existing.reference.generationRulesVersion !== 'v2') throw new BatchError('DOCUMENT_GENERATION_UPGRADE_REQUIRED', 422, '已有文件使用旧版发票规则，请建立更正后再生成整批文件；不会修改旧文件。');
-          if (existing.reference.pricingRule !== 'fixed-2') throw new BatchError('DOCUMENT_PRICING_UPGRADE_REQUIRED', 422, '已有文件使用历史申报价格规则，请建立更正后按每件 2 元生成整批文件。');
+          if (existing.reference.pricingRule !== DOCUMENT_INVOICE_PRICING_RULE) throw new BatchError('DOCUMENT_PRICING_UPGRADE_REQUIRED', 422, '已有文件使用历史申报价格规则，请建立更正后按美国每件 2.30 美元、欧元站点每件 2.00 欧元、英国每件 2.00 英镑的规则生成整批文件。');
           assertReference(existing.reference, record, revision); fileId = existing.fileId;
           if (existing.reference.bundleJobId) {
             const old = await assertDocumentBundleValidInTx(tx, existing.reference.bundleJobId, job.createdBy, { historicalExport: true });
@@ -142,15 +143,15 @@ export async function preflightDocumentBundle(job: Job): Promise<{ sources: Sour
 
 export async function publishDocumentBundle(job: Job, sources: Source[]) {
   if (!sources.length || sources.length !== job.items.length || job.items.some((item) => item.status !== 'ready')) throw new BatchError('VALIDATION_BLOCKED', 422, '整批所有货件须先完成资料检查，暂不生成文件。');
-  const cache = new Map<string, Buffer>(), inputs: BundleWorkbookInput[] = [];
+  const generatedAt = new Date(), cache = new Map<string, Buffer>(), inputs: BundleArchiveInput[] = [];
   const { createWorkbook, DOCUMENT_HEADER_FIELDS } = await import('./workbook.js');
   for (const source of sources) {
     let bytes = cache.get(source.file.id); if (!bytes) { bytes = await checkedFileBytes(source.file); cache.set(source.file.id, bytes); }
     const fields = withDocumentInvoiceDefaults(source.data.fields, source.data.members);
     const expectedHeaders = Object.fromEntries(Object.entries(DOCUMENT_HEADER_FIELDS).map(([key, address]) => [address, key === 'currency' ? ({ USD: '美元', EUR: '欧元', GBP: '英镑' } as Record<string, string>)[fields.currency ?? ''] ?? null : fields[key] ?? null]));
-    inputs.push({ documentId: source.documentId, bytes: source.existingExportId ? bytes : await createWorkbook(source.data, bytes, automationOperationId(job.id, source.itemId, 'bundle-export')), selections: source.selections, expectedHeaders, expectedUnitPrice: Number(DOCUMENT_INVOICE_UNIT_PRICE) });
+    inputs.push({ documentId: source.documentId, invoiceData: source.data, bytes: source.existingExportId ? bytes : await createWorkbook(source.data, bytes, automationOperationId(job.id, source.itemId, 'bundle-export')), selections: source.selections, expectedHeaders, expectedUnitPrice: Number(documentInvoicePrice(source.data).unitPrice) });
   }
-  const workbook = await createDocumentBundleArchive(inputs), originalName = bundleName(job.id);
+  const workbook = await createDocumentBundleArchive(inputs, generatedAt), originalName = bundleName(job.id);
   for (const source of sources) {
     const sheet = workbook.sheets.find((sheet) => sheet.documentIds.includes(source.documentId));
     if (!sheet?.fileName || !sheet.fileSha256) throw new BatchError('FILE_UNAVAILABLE', 503, '整批压缩包缺少本票文件名或哈希映射，文件未发布。');

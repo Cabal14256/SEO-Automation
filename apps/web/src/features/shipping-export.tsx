@@ -8,6 +8,7 @@ import { Button, IconButton } from '../components/ui/button';
 import { batchApi } from './batch-api';
 import { BatchTable, downloadBlob, QueryError, timestamp, useBatchAction } from './batch-shared';
 import { ImportDialog } from './import-dialog';
+import { ShippingExportNotice, usePreviousShippingExport } from './shipping-export-notice';
 import './batch-reports.css';
 
 const maxSelectedGroups = 500;
@@ -42,6 +43,7 @@ export function useShippingExport({ active, scopeKey, filters, subBatchId, pendi
   const [selectionNotice, setSelectionNotice] = useState('');
   const [historyOpen, setHistoryOpen] = useState(false);
   const action = useBatchAction();
+  const selectedRefs = selection.scope === scope ? [...selection.references.values()].sort((left, right) => left.groupId.localeCompare(right.groupId)) : [];
   const query = useQuery({
     queryKey: ['batch-reports', 'shipping-export', scope],
     // 资格按身份范围读取完整确认引用，搜索范围由父表可见行及版本匹配限定。
@@ -58,9 +60,11 @@ export function useShippingExport({ active, scopeKey, filters, subBatchId, pendi
     refetchInterval: (result) => active && historyOpen && result.state.data?.some((record) => record.status === 'queued' || record.status === 'running') ? 1500 : false,
   });
   const availableReferences = new Map(query.data?.confirmations.map((reference) => [reference.groupId, reference]));
-  const selectedRefs = selection.scope === scope ? [...selection.references.values()].sort((left, right) => left.groupId.localeCompare(right.groupId)) : [];
+  const previousGeneration = usePreviousShippingExport(selectedRefs.map((ref) => ref.groupId), active);
+  const previousExport = previousGeneration.previous;
+  const frozenSelection = Boolean(visibleRows?.some((row) => row.groupId && selection.references.has(row.groupId) && row.status === 'frozen'));
   const disabled = !active || pendingFilters || query.isFetching || query.isPending || query.isError || action.busy;
-  const canExport = !disabled && selectedRefs.length > 0 && selectedRefs.every((reference) => sameReference(reference, availableReferences.get(reference.groupId)) && matchesVisibleRows(reference, visibleRows));
+  const canExport = !disabled && !previousGeneration.history.isPending && selectedRefs.length > 0 && selectedRefs.every((reference) => sameReference(reference, availableReferences.get(reference.groupId)) && matchesVisibleRows(reference, visibleRows));
   const isSelected = (groupId: string) => selection.scope === scope && selection.references.has(groupId);
 
   useEffect(() => {
@@ -118,12 +122,12 @@ export function useShippingExport({ active, scopeKey, filters, subBatchId, pendi
     }, '导出任务已受理。请在“批次导出记录”中查看进度并下载。');
   };
   const controls = <>
-    <Button type="button" icon={FileSpreadsheet} loading={action.pendingKey?.startsWith('["export",')} variant="primary" disabled={!canExport} onClick={generateExport}>生成所选批次 XLSX</Button>
+    <Button type="button" icon={FileSpreadsheet} loading={action.pendingKey?.startsWith('["export",')} variant="primary" disabled={!canExport} onClick={generateExport}>{previousExport ? '再次生成所选批次 XLSX' : '生成所选批次 XLSX'}</Button>
     <Button type="button" icon={History} disabled={!active} onClick={() => setHistoryOpen(true)}>批次导出记录</Button>
     <Button type="button" variant="text" disabled={!active || selectedRefs.length === 0 || action.busy} onClick={clearSelection}>清空已选批次</Button>
     <span className="batch-report-total" role="status">已选 {selectedRefs.length} 个导出批次</span>
   </>;
-  const feedback = <>{selectionNotice && <p className="form-note error-note" role="alert">{selectionNotice}</p>}{!historyOpen && action.feedback}</>;
+  const feedback = <>{selectionNotice && <p className="form-note error-note" role="alert">{selectionNotice}</p>}{selectedRefs.length > 0 && <ShippingExportNotice previous={previousExport} frozen={frozenSelection} historyUnavailable={previousGeneration.history.isError} />}{!historyOpen && action.feedback}</>;
   const history = createPortal(<ImportDialog open={active && historyOpen} title="批次导出记录" close={() => setHistoryOpen(false)} wide>
     <div className="batch-report-history-heading"><p className="mapping-help">保存数据版本及文件；失败与过期结果单独显示，历史下载保留原内容。</p><IconButton type="button" icon={RefreshCw} label="刷新历史" loading={exports.isFetching} disabled={!active} onClick={() => void exports.refetch()} /></div>
     {action.feedback}

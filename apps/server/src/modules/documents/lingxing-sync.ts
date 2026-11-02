@@ -11,7 +11,7 @@ import { checkedFileBytes } from '../imports/service.js';
 import { createLingxingReadClient, LingxingReadError, type LingxingReadAttempt, type LingxingReadClient, type LingxingReadResult } from '../lingxing/read-client.js';
 import { documentDigest, documentUsesProfileReference } from './domain.js';
 import { downloadLingxingImage } from './lingxing-image.js';
-import { mapLingxingInvoiceProduct, mapLingxingStockSubjects, matchLingxingFbaProduct, matchLingxingListingProduct } from './lingxing-mapping.js';
+import { LINGXING_CUSTOMS_PRODUCT_FIELDS, mapLingxingInvoiceProduct, mapLingxingStockSubjects, matchLingxingFbaProduct, matchLingxingListingProduct } from './lingxing-mapping.js';
 import { documentExports, documentProfiles, documentTemplates, documentTemplateVersions } from './schema.js';
 import { appendDocumentRevisionInTx, documentOperation, lockedDocument, writeDocumentProfileInTx } from './service.js';
 import { calculateInvoiceUnitPrice, documentProductOverrideKey, reviseDocumentProductFields } from './workbook.js';
@@ -56,7 +56,7 @@ export function aggregateLingxingFields(products: ProductSuggestion[]): Record<s
   if (currencies.length && currencies.every((currency) => currency === currencies[0]) && ['USD', 'EUR', 'GBP'].includes(currencies[0]!)) fields.currency = currencies[0]!;
   return fields;
 }
-const productFields = new Set(['englishName', 'chineseName', 'salesPrice', 'cartonQuantity', 'unitPrice', 'unitPriceSource', 'unitPriceSourceLabel', 'unitPriceKind', 'priceCandidates', 'material', 'hsCode', 'use', 'brand', 'model', 'salesLink', 'unit', 'currency', 'imageBase64', 'imageExtension', 'battery', 'magnetic', 'liquid', 'powder', 'dangerous']);
+const productFields = new Set(['englishName', 'chineseName', 'salesPrice', 'cartonQuantity', 'unitPrice', 'unitPriceSource', 'unitPriceSourceLabel', 'unitPriceKind', 'priceCandidates', 'material', 'hsCode', 'use', 'brand', 'model', 'salesLink', 'unit', 'currency', 'imageBase64', 'imageExtension', 'battery', 'magnetic', 'liquid', 'powder', 'dangerous', ...LINGXING_CUSTOMS_PRODUCT_FIELDS]);
 const addressFields = new Set(['recipientName', 'recipientCompany', 'addressLine1', 'addressLine2', 'addressLine3', 'city', 'state', 'postalCode', 'countryCode', 'phone', 'email', 'addressCode']);
 /** Only empty values are filled. A review may confirm only the exact candidate
  * price/currency pair; it cannot confirm an unrelated existing manual price. */

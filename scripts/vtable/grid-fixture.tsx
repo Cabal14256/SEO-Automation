@@ -52,6 +52,8 @@ function UtilityFixture() {
 function Fixture() {
   const [rows, setRows] = useState(initial), [pending, setPending] = useState(false), [saved, setSaved] = useState(''), [large, setLarge] = useState<[number, number]>([0, 0]), [mounted, setMounted] = useState(true), [locked, setLocked] = useState(false);
   const [revealStatus, setRevealStatus] = useState('idle');
+  const [selectionFilter, setSelectionFilter] = useState(false);
+  const [checkboxEvents, setCheckboxEvents] = useState<Array<{ id: string; checked: boolean }>>([]);
   const ref = useRef<GridHandle>(null);
   const abortableReveal = useRef<AbortController | null>(null);
   const outsideFocus = useRef<HTMLInputElement>(null);
@@ -59,7 +61,7 @@ function Fixture() {
     { key: 'name', title: '商品', width: 180, getValue: (row) => row.name },
     { key: 'po', title: 'PO', width: 220, getValue: (row) => row.po, editable: () => true, editLabel: (row) => row.name + ' PO' },
     { key: 'weight', title: '毛重 KG', width: 120, align: 'right', getValue: (row) => row.weight, editable: () => true, editLabel: (row) => row.name + ' 毛重', inputMode: 'decimal' },
-    { key: 'selection', title: '选择', width: 70, getValue: () => '', getChecked: (row) => row.checked, onToggle: (row, checked) => setRows((current) => current.map((item) => item.id === row.id ? { ...item, checked } : item)) },
+    { key: 'selection', title: '选择', width: 70, getValue: () => '', getChecked: (row) => row.checked, onToggle: (row, checked) => { setCheckboxEvents((current) => [...current, { id: row.id, checked }]); setRows((current) => current.map((item) => item.id === row.id ? { ...item, checked } : item)); } },
   ];
   const bigRows = useMemo(() => Array.from({ length: large[0] }, (_, index) => ({ id: String(index), index })), [large]);
   const bigColumns = useMemo<GridColumn<{ id: string; index: number }>[]>(() => Array.from({ length: large[1] }, (_, index) => ({ key: String(index), title: index === 0 ? '货件' : '箱 ' + index, width: index === 0 ? 180 : 82, align: index === 0 ? 'left' : 'right', getValue: (row) => index === 0 ? 'FBA-' + row.id.padStart(6, '0') : (row.index + index) % 100 })), [large]);
@@ -76,10 +78,16 @@ function Fixture() {
       <button onClick={() => { abortableReveal.current?.abort(); outsideFocus.current?.focus(); }}>撤销定位并切换焦点</button>
       <button onClick={async () => { const edit = await ref.current?.finishEdit(); const next = edit ? rows.map((row) => row.id === edit.rowKey ? { ...row, [edit.columnKey]: edit.value } : row) : rows; setSaved(JSON.stringify(next)); }}>保存夹具</button>
       <button onClick={() => ref.current?.cancelEdit()}>取消单元格</button><button onClick={() => setLocked((value) => !value)}>切换编辑锁定</button>
+      <button onClick={() => setRows((current) => current.map((row) => ({ ...row, checked: true })))}>全选夹具货件</button>
+      <button onClick={() => setRows((current) => current.map((row) => ({ ...row, checked: false })))}>清空夹具货件</button>
+      <button onClick={() => setRows((current) => current.map((row) => ({ ...row, checked: !row.checked })))}>反选夹具货件</button>
+      <button onClick={() => setRows((current) => current.map((row) => ({ ...row, po: `外部更新:${row.id}` })))}>刷新夹具同键数据</button>
+      <button onClick={() => setSelectionFilter((value) => !value)}>切换夹具货件筛选</button>
       <button onClick={() => setLarge([10000, 50])}>一万行五十列</button><button onClick={() => setLarge([50000, 100])}>五万行一百列</button>
       <button onClick={() => setMounted((value) => !value)}>切换网格挂载</button>
     </div><label>网格外部焦点<input ref={outsideFocus} aria-label="网格外部焦点" /></label><output data-reveal-status>{revealStatus}</output><output data-pending>{String(pending)}</output><output data-saved>{saved}</output>
-    <fieldset disabled={locked} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}><ScmDataGrid label="编辑夹具" rows={rows} columns={columns} getRowKey={(row) => row.id} gridRef={ref} onPendingEditChange={setPending} onEdit={(edit) => setRows((current) => current.map((row) => row.id === edit.rowKey ? { ...row, [edit.columnKey]: edit.value } : row))} renderDetails={(row) => <p>{row.name} · {row.po} · {row.weight} · {row.checked ? '已选' : '未选'}</p>} /></fieldset>
+    <output data-checkbox-state style={{ display: 'block', overflowWrap: 'anywhere' }}>{JSON.stringify({ selected: rows.filter((row) => row.checked).map((row) => row.id), events: checkboxEvents, filtered: selectionFilter, po: rows.map((row) => row.po) })}</output>
+    <fieldset disabled={locked} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}><ScmDataGrid label="编辑夹具" rows={selectionFilter ? rows.filter((row) => row.id === 'b') : rows} columns={columns} getRowKey={(row) => row.id} gridRef={ref} onPendingEditChange={setPending} onEdit={(edit) => setRows((current) => current.map((row) => row.id === edit.rowKey ? { ...row, [edit.columnKey]: edit.value } : row))} renderDetails={(row) => <p>{row.name} · {row.po} · {row.weight} · {row.checked ? '已选' : '未选'}</p>} /></fieldset>
     <GridTableScope><BatchTable label="辅助表夹具" headers={['名称', '操作']}>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td><button onClick={() => setSaved(row.id)}>操作 {row.name}</button></td></tr>)}</BatchTable></GridTableScope>
     <GridTableScope><BatchTable label="结构单元格夹具" headers={['店铺', 'MSKU', 'FNSKU', '品名', 'SKU', '箱1', '箱2', '内部编码']}><tr key="structural"><ShippingShopCell shop="技术店铺" country="美国" channel="SEA" /><ShippingProductCells msku="M-STRUCT" fnsku="F-STRUCT" sku="S-STRUCT" productName="结构商品" separate /><ShippingBoxQuantityCells columns={[1, 2]} boxes={[{ boxOrder: 1, quantity: 12 }, { boxOrder: 2, quantity: 34 }]} /><ShippingCodesCell codes={['A1', 'A2']} /></tr></BatchTable></GridTableScope>
     <ScmDataGrid label="详情浮窗夹具" rows={rows} columns={[

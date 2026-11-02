@@ -66,6 +66,8 @@
     "imports:auto:browser": "node scripts/t29/import-auto-parse-browser.mjs",
     "imports:pipeline:test": "node --test scripts/t33/online-import-pipeline.test.mjs",
     "settings:browser": "node scripts/t26/settings-browser.mjs",
+    "settings:service-mappings:browser": "node scripts/settings/service-mappings-browser.mjs",
+    "settings:service-mappings:verify": "node scripts/settings/service-mappings-db.mjs",
     "seller-dialogs:browser": "node scripts/t30/seller-dialogs-browser.mjs",
     "batches:workspace:browser": "node scripts/t26/batches-workspace-browser.mjs",
     "batches:workspace:verify": "node scripts/t26/batches-workspace-integration.mjs",

@@ -73,11 +73,12 @@ export const batchApi = {
     for (const key of ['sid', 'country', 'channel'] as const) if (input[key] !== undefined) params.set(key, String(input[key]));
     return reportResponseSchema.parse(await request(`${base}/batch-reports?${params}`));
   },
-  exports: async (input: { subBatchId?: string; month?: string; shippingRunId?: string }) => {
+  exports: async (input: { subBatchId?: string; month?: string; shippingRunId?: string; groupIds?: string[] }) => {
     const params = new URLSearchParams();
     if (input.subBatchId) params.set('subBatchId', input.subBatchId);
     if (input.month) params.set('month', input.month);
     if (input.shippingRunId) params.set('shippingRunId', input.shippingRunId);
+    if (input.groupIds?.length) params.set('groupIds', input.groupIds.join(','));
     const value = await request(`${base}/batch-reports/exports?${params}`);
     if (!object(value) || !Array.isArray(value.items)) throw new ApiError('无法识别导出历史。', 0);
     return value.items.map((item): ReportExportRecord => reportExportRecordSchema.parse(item));

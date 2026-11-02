@@ -11,11 +11,12 @@ describe('explicit invoice address adoption and confirmation', () => {
     expect(documentProductCurrency(' EUR ', 'USD')).toBe('EUR');
     expect(documentProductCurrency('CNY', 'USD')).toBe('CNY');
   });
-  it('defaults all five blank flags while keeping explicit values', () => {
+  it('fixes all five flags to no without changing unrelated fields or the saved source', () => {
     expect(withDocumentDefaults({ battery: null, magnetic: '', liquid: '  ', dangerous: null })).toEqual({ battery: '否', magnetic: '否', liquid: '否', powder: '否', dangerous: '否' });
     expect(withDocumentDefaults({}).dangerous).toBe('否');
     const fields = { battery: '是', magnetic: '否', liquid: '是', powder: '否', dangerous: '是', remarks: 'Reviewed' };
-    expect(withDocumentDefaults(fields)).toEqual(fields);
+    expect(withDocumentDefaults(fields)).toEqual({ battery: '否', magnetic: '否', liquid: '否', powder: '否', dangerous: '否', remarks: 'Reviewed' });
+    expect(fields).toEqual({ battery: '是', magnetic: '否', liquid: '是', powder: '否', dangerous: '是', remarks: 'Reviewed' });
     expect(withDocumentDefaults(fields)).not.toBe(fields);
   });
 

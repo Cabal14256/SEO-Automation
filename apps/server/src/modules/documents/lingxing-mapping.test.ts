@@ -15,6 +15,15 @@ const local = () => ({
   product_logistics_relation: [{ US_clearance_price: '12.340000', US_clearance_price_currency: 'USD', US_bg_import_hs_code: '4202924000',
     UK_clearance_price: '9.00', UK_clearance_price_currency: 'GBP', UK_bg_import_hs_code: '4202929000' }],
 });
+const customsLocal = () => {
+  const product = local();
+  return { ...product, bg_export_hs_code: '3926909090', cg_box_pcs: 480, cg_product_net_weight: '012.3400', cg_product_gross_weight: 16.5, cg_box_weight: '21.2500',
+    declaration: { ...product.declaration, customs_declaration_origin_produce: ' 中国 ', customs_declaration_inlands_source: ' 深圳特区 ', other_declare_element: ' 0|0|屏幕保护|EPU ', customs_declaration_exempt: ' 照章征税 ',
+      production_and_sales_enterprise_name: ' 测试生产企业 ', production_and_sales_enterprise_code: ' 0012345678 ', customs_declaration_first_unit: ' 千克 ', customs_declaration_first_unit_rate: 0.76,
+      customs_declaration_second_unit: ' 平方米 ', customs_declaration_second_unit_rate: '002.5000', customs_declaration_extra_quarantine_code: 'N：出口商品检验' },
+    clearance: { ...product.clearance, customs_clearance_brand_type: 2 as unknown, customs_clearance_preferential: '1' as unknown },
+  };
+};
 
 describe('current invoice sales price and standard carton mapping', () => {
   const listing = () => ({ sid: 17, seller_sku: 'MSKU-1', fnsku: 'FNSKU-1', local_sku: 'SKU-1', price: '12.375', listing_price: '1', list_price: '99', currency_code: 'USD', is_delete: 0 });
@@ -47,6 +56,52 @@ describe('current invoice sales price and standard carton mapping', () => {
 });
 
 describe('Lingxing declaration candidate mapping', () => {
+  it('keeps Chinese export fields distinct from destination import HS, invoice data and carton tare weight', () => {
+    const product = customsLocal(), original = structuredClone(product), mapped = mapLingxingProduct(identity, fba, product);
+    expect(mapped.data).toMatchObject({ hsCode: '4202924000', exportHsCode: '3926909090', originCountry: '中国', domesticSource: '深圳特区', declarationElements: '0|0|屏幕保护|EPU', taxExemption: '照章征税',
+      productionSalesName: '测试生产企业', productionSalesCode: '0012345678', firstLegalUnit: '千克', firstLegalUnitRate: '0.76', secondLegalUnit: '平方米', secondLegalUnitRate: '2.5', quarantineCode: 'N：出口商品检验',
+      brandType: '境内自主品牌', exportPreference: '不享惠', productNetWeightGrams: '12.34', productGrossWeightGrams: '16.5', cartonGrossWeightKg: '21.25', unit: 'PCS', unitPrice: '12.34', currency: 'USD' });
+    for (const key of ['ciqCode', 'emptyCartonWeight', 'emptyCartonWeightKg', 'cartonTareWeightKg', 'sellerName', 'sellerCode']) expect(mapped.data).not.toHaveProperty(key);
+    expect(mapped.issues).toEqual([]); expect(product).toEqual(original);
+    const invoice = mapLingxingInvoiceProduct(identity, fba, product, { sid: 17, seller_sku: 'MSKU-1', fnsku: 'FNSKU-1', local_sku: 'SKU-1', price: '12.375', currency_code: 'USD', is_delete: 0 });
+    expect(invoice.data).toMatchObject({ salesPrice: '12.375', unitPrice: '2.48', currency: 'USD', cartonQuantity: '480', hsCode: '4202924000', exportHsCode: '3926909090', productNetWeightGrams: '12.34', firstLegalUnit: '千克', unit: 'PCS' });
+    expect(invoice.data).not.toHaveProperty('priceCandidates'); expect(invoice.issues).toEqual([]);
+  });
+
+  it.each([[1, '无品牌'], ['2', '境内自主品牌'], [3, '境内收购品牌'], ['4', '境外品牌（贴牌生产）'], [5, '境外品牌（其他）']])('maps official brand type %s to %s without treating the API code as a customs declaration code', (code, label) => {
+    const product = customsLocal(); product.clearance.customs_clearance_brand_type = code;
+    expect(mapLingxingProduct(identity, fba, product).data.brandType).toBe(label);
+  });
+
+  it.each([[1, '不享惠'], ['2', '享惠'], [3, '不确定享惠情况']])('maps official export preference %s to %s', (code, label) => {
+    const product = customsLocal(); product.clearance.customs_clearance_preferential = code;
+    expect(mapLingxingProduct(identity, fba, product).data.exportPreference).toBe(label);
+  });
+
+  it.each([0, 6, '99', '2.0', true, {}, Number.NaN])('leaves unsupported declaration enums %s unresolved and explains them in Chinese', (value) => {
+    const product = customsLocal(); product.clearance.customs_clearance_brand_type = value; product.clearance.customs_clearance_preferential = value;
+    const mapped = mapLingxingProduct(identity, fba, product);
+    expect(mapped.data).not.toHaveProperty('brandType'); expect(mapped.data).not.toHaveProperty('exportPreference');
+    expect(mapped.issues).toEqual(expect.arrayContaining([expect.stringContaining('品牌类型编码无效'), expect.stringContaining('出口享惠情况编码无效')]));
+  });
+
+  it.each([undefined, null, '', 0, '0.000', -1, '-0.5', '1e3', 'Infinity', Infinity, Number.NaN, true, {}])('never invents a unit conversion or weight from missing or invalid value %s', (value) => {
+    const product = customsLocal();
+    Object.assign(product, { cg_product_net_weight: value, cg_product_gross_weight: value, cg_box_weight: value });
+    Object.assign(product.declaration, { customs_declaration_first_unit_rate: value, customs_declaration_second_unit_rate: value });
+    const mapped = mapLingxingProduct(identity, fba, product);
+    for (const key of ['firstLegalUnitRate', 'secondLegalUnitRate', 'productNetWeightGrams', 'productGrossWeightGrams', 'cartonGrossWeightKg']) expect(mapped.data).not.toHaveProperty(key);
+    expect(mapped.data).toMatchObject({ firstLegalUnit: '千克', secondLegalUnit: '平方米', unit: 'PCS' });
+  });
+
+  it('does not fill missing customs fields from invoice fields, and retains quarantine text without guessing a CIQ suffix', () => {
+    const product = local();
+    const mapped = mapLingxingProduct(identity, fba, { ...product, bg_export_hs_code: '', declaration: { ...product.declaration, customs_declaration_extra_quarantine_code: '007' } });
+    for (const key of ['exportHsCode', 'originCountry', 'domesticSource', 'declarationElements', 'taxExemption', 'productionSalesName', 'productionSalesCode', 'firstLegalUnit', 'firstLegalUnitRate', 'secondLegalUnit', 'secondLegalUnitRate', 'brandType', 'exportPreference', 'productNetWeightGrams', 'productGrossWeightGrams', 'cartonGrossWeightKg', 'ciqCode']) expect(mapped.data).not.toHaveProperty(key);
+    expect(mapped.data).toMatchObject({ hsCode: '4202924000', quarantineCode: '007', unit: 'PCS' });
+    expect(mapped.issues).toEqual([]);
+  });
+
   it('filters fuzzy search results by the complete case-sensitive identity', () => {
     expect(matchLingxingFbaProduct(identity, fba)).toBe(true);
     for (const key of ['sid', 'msku', 'fnsku', 'sku'] as const) expect(matchLingxingFbaProduct(identity, { ...fba, [key]: key === 'sid' ? 18 : `${fba[key]}-other` })).toBe(false);

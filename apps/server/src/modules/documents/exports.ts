@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { fromDrizzle, type PgBoss } from 'pg-boss';
 import type { z } from 'zod';
-import { documentOperationInputSchema, type DocumentExport, type DocumentExportReference, type DocumentRevisionData } from '@scm/contracts';
+import { DOCUMENT_INVOICE_PRICING_RULE, documentBoxes, documentOperationInputSchema, type DocumentExport, type DocumentExportReference, type DocumentRevisionData } from '@scm/contracts';
 import { db, pool } from '../../db/client.js';
 import { fileIndex, operationAudit } from '../../db/schema.js';
 import { logError } from '../../errors.js';
@@ -13,6 +13,7 @@ import { documentDigest, documentExportRulesIssue } from './domain.js';
 import { documentDependencyValidityInTx, documentOperation, lockedDocument, serializeDocument, validateDocumentInTx } from './service.js';
 import { documentExports, documents } from './schema.js';
 import { documentExportFileSha256 } from './export-file.js';
+import { documentInvoiceFileName } from './invoice-file-name.js';
 
 export const DOCUMENT_EXPORT_QUEUE = 'document-invoice-export';
 export function serializeDocumentExport(row: typeof documentExports.$inferSelect, validity = { valid: row.status === 'completed', invalidReason: row.status === 'completed' ? null : '文件尚未成功发布。' } as { valid: boolean; invalidReason: string | null }, fileSha256: string | null = null): DocumentExport { return { id: row.id, status: row.status as DocumentExport['status'], reference: row.reference, fileId: row.fileId, fileSha256: documentExportFileSha256(row.reference, fileSha256), error: row.error, createdAt: row.createdAt.toISOString(), completedAt: row.completedAt?.toISOString() ?? null, ...validity }; }
@@ -24,7 +25,7 @@ export async function requestDocumentExport(boss: PgBoss, id: string, actorId: s
     const validation = await validateDocumentInTx(tx, id, actorId, input.expectedVersion);
     if (!validation.valid) throw new BatchError('VALIDATION_BLOCKED', 422, '发票仍有阻塞项，不能生成待复核文件。', validation.issues);
     const template = revision.data.templateReference!;
-    const reference: DocumentExportReference = { documentId: id, revisionId: revision.id, revisionVersion: revision.version, templateId: template.templateId, templateVersion: template.version, templateSha256: template.sha256, sources: revision.data.members.map((member) => member.source), generationRulesVersion: revision.data.generationRulesVersion, pricingRule: 'fixed-2' };
+    const reference: DocumentExportReference = { documentId: id, revisionId: revision.id, revisionVersion: revision.version, templateId: template.templateId, templateVersion: template.version, templateSha256: template.sha256, sources: revision.data.members.map((member) => member.source), generationRulesVersion: revision.data.generationRulesVersion, pricingRule: DOCUMENT_INVOICE_PRICING_RULE };
     const [running] = await tx.select().from(documentExports).where(and(sql`${documentExports.reference}->>'documentId' = ${id}`, inArray(documentExports.status, ['queued', 'running']))).limit(1);
     if (running) throw new BatchError('DOCUMENT_EXPORT_BUSY', 409, '当前发票正在生成，请等待任务完成或失败后再重试。');
     const exportId = randomUUID();
@@ -63,9 +64,11 @@ export async function executeDocumentExport(id: string, options: { createWorkboo
       return { data: revision.data, templateBytes };
     });
     if (!prepared) return;
+    const generatedAt = new Date();
     const createWorkbook = options.createWorkbook ?? (await import('./workbook.js')).createWorkbook;
     const bytes = await createWorkbook(prepared.data, prepared.templateBytes, id);
-    await publishReportFile({ bytes, originalName: `${prepared.data.title}-${id.slice(0, 8)}.xlsx`, mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', createdBy: row.createdBy }, async (file) => {
+    const boxCount = new Set(prepared.data.members.flatMap((member) => documentBoxes(member, prepared.data.fields).map((box) => box.boxId))).size;
+    await publishReportFile({ bytes, originalName: documentInvoiceFileName(prepared.data, boxCount, generatedAt), mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', createdBy: row.createdBy }, async (file) => {
       await db.transaction(async (tx) => {
         const { record, revision } = await lockedDocument(tx, row.reference.documentId, row.createdBy);
         const [current] = await tx.select().from(documentExports).where(eq(documentExports.id, id)).for('update');

@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import ExcelJS from 'exceljs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { documentAutomationJobSchema, documentAutomationSupplementInputSchema, documentAutomationSupplementSchema, type Document, type DocumentProfile, type DocumentRevisionData, type DocumentTemplate } from '@scm/contracts';
 import { applyDocumentAutomationSupplementInTx, buildDocumentAutomationRequirements, getDocumentAutomationRequirementsInTx, planDocumentAutomationSupplement, type DocumentAutomationSupplementTicket } from './automation-supplement.js';
-import { documentProductOverrideKey } from './workbook.js';
+import { createWorkbook, DOCUMENT_HEADER_FIELDS, DOCUMENT_HEADER_LABELS, DOCUMENT_MAIN_HEADERS, documentProductOverrideKey, validateWorkbookData } from './workbook.js';
+import { validateDocumentData } from './domain.js';
 
 const service = vi.hoisted(() => ({ lockedDocument: vi.fn(), reviseDocumentInTx: vi.fn(), serializeDocument: vi.fn(), serializeProfile: vi.fn(), DocumentError: class extends Error { constructor(public code: string, public status: number, message: string) { super(message); } } }));
 vi.mock('./service.js', () => service);
@@ -32,8 +34,43 @@ const descriptors = (tickets: DocumentAutomationSupplementTicket[], profiles: Do
 function field(tickets: DocumentAutomationSupplementTicket[], key: string, profiles: DocumentProfile[] = [], templates: DocumentTemplate[] = []) { return descriptors(tickets, profiles, templates).find((entry) => entry.targets.some((target) => target.fieldKey === key))!; }
 function missingSellingPrice(value: DocumentAutomationSupplementTicket, salesPrice: string | null = null) { const fact = data(value).productSourceFacts![0]!; fact.salesPrice = salesPrice; fact.unitPrice = null; }
 const sellingPriceFields = (tickets: DocumentAutomationSupplementTicket[]) => descriptors(tickets).filter((entry) => entry.targets[0]!.fieldKey.startsWith('@sellingPrice.'));
+function completeDeclarations(value: DocumentAutomationSupplementTicket, currentTemplate: DocumentTemplate) {
+  const key = `product.${documentProductOverrideKey(101, product)}.`;
+  for (const [name, entry] of Object.entries({ englishName: 'Glass cover', chineseName: '玻璃保护片', material: 'Glass', hsCode: '700719', use: 'Screen protection', brand: 'TEST', model: 'T1', salesLink: 'https://example.invalid/product' })) fields(value)[key + name] = entry;
+  data(value).templateReference = { templateId: currentTemplate.id, version: currentTemplate.version, sha256: currentTemplate.sha256, fileId: currentTemplate.fileId };
+}
 
 describe('central automatic document requirements', () => {
+  it('keeps mapped services ready despite incompatible generic channel service lists', () => {
+    const value = ticket(), currentTemplate = template(), channels = [profile('channel', { businessChannel: 'HY', allowedServices: ['旧服务A'] }), profile('channel', { businessChannel: 'HY', allowedServices: ['旧服务B'] })];
+    fields(value).service = '国家运输方式映射服务'; completeDeclarations(value, currentTemplate);
+    const before = structuredClone(value), requirements = buildDocumentAutomationRequirements([value], channels, [currentTemplate]);
+    expect(requirements.descriptors).toEqual([]);
+    expect(requirements.issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(value).toEqual(before);
+  });
+  it('offers free service text when no channel was explicitly referenced and keeps selected profile service limits explicit', () => {
+    const value = ticket(), channels = [profile('channel', { businessChannel: 'HY', allowedServices: ['旧服务'] })];
+    fields(value).service = '';
+    const serviceField = field([value], 'service', channels);
+    expect(serviceField.kind).toBe('text'); expect(serviceField.options).toBeUndefined();
+    const result = planDocumentAutomationSupplement([value], channels, [], input([value], [{ id: serviceField.id, value: '真实手写服务' }]));
+    expect(result[0]!.fields.service).toBe('真实手写服务');
+    data(value).profileReferences = [{ category: 'channel', profileId: channels[0]!.id, version: 1, data: structuredClone(channels[0]!.data) }];
+    const constrained = field([value], 'service', channels);
+    expect(constrained.kind).toBe('select'); expect(constrained.options).toEqual([{ value: '旧服务', label: '旧服务' }]);
+    expect(() => planDocumentAutomationSupplement([value], channels, [], input([value], [{ id: constrained.id, value: '真实手写服务' }]))).toThrow('不是当前可采用的选项');
+  });
+  it('requires a separate service choice after explicitly replacing a stale channel profile with a single allowed service', () => {
+    const value = ticket(), current = profile('channel', { businessChannel: 'HY', service: '默认旧服务', allowedServices: ['唯一服务'] });
+    fields(value).service = '';
+    data(value).profileReferences = [{ category: 'channel', profileId: current.id, version: 1, data: { businessChannel: 'HY', allowedServices: ['原服务'] } }];
+    current.version = 2;
+    const choose = field([value], '@profile.channel', [current]);
+    const revisions = planDocumentAutomationSupplement([value], [current], [], input([value], [{ id: choose.id, value: `${current.id}:2` }]));
+    expect(revisions[0]!.fields.service).toBe('');
+    expect(revisions[0]!.profileReferences[0]!.version).toBe(2);
+  });
   it('requires a pending B3 code together with explicit human address confirmation', () => {
     const value = ticket(); Object.assign(fields(value), { addressCode: '', addressCodeStatus: 'needs_review', addressCodeReason: 'Special warehouse needs verification', addressConfirmed: 'false' });
     expect(field([value], 'addressCode').required).toBe(true);
@@ -87,13 +124,13 @@ describe('central automatic document requirements', () => {
     expect(descriptors([value], profiles).some((entry) => entry.targets.some((target) => target.fieldKey === '@profile.address' || target.fieldKey === 'addressConfirmed'))).toBe(false);
   });
   it('offers current scoped profile and template versions rather than silently choosing ambiguous records', () => {
-    const value = ticket(), channels = [profile('channel', { businessChannel: 'HY', allowedServices: ['A'] }), profile('channel', { businessChannel: 'HY', allowedServices: ['B'] })], templates = [template(), template()];
+    const value = ticket(), channels = [profile('channel', { businessChannel: 'HY', allowedServices: [], service: 'A' }), profile('channel', { businessChannel: 'HY', allowedServices: [], service: 'B' })], templates = [template(), template()];
     const requirements = buildDocumentAutomationRequirements([value], channels, templates); expect(documentAutomationSupplementSchema.safeParse(requirements).success).toBe(true);
     const channel = field([value], '@profile.channel', channels, templates), templateField = field([value], '@template', channels, templates);
     expect(channel.options).toHaveLength(2); expect(templateField.options).toHaveLength(2);
     fields(value).service = '';
     const result = planDocumentAutomationSupplement([value], channels, templates, input([value], [{ id: field([value], '@profile.channel', channels, templates).id, value: `${channels[1]!.id}:1` }, { id: templateField.id, value: `${templates[1]!.id}:1` }]));
-    expect(result[0]!.profileReferences.map((entry) => entry.profileId)).toContain(channels[1]!.id); expect(result[0]!.fields.service).toBe('B'); expect(result[0]!.templateReference?.templateId).toBe(templates[1]!.id);
+    expect(result[0]!.profileReferences.map((entry) => entry.profileId)).toContain(channels[1]!.id); expect(result[0]!.fields.service).toBe(''); expect(result[0]!.templateReference?.templateId).toBe(templates[1]!.id);
   });
   it('keeps fixed pricing independent of Listing currency without fabricating source inputs', () => {
     const value = ticket(); data(value).productSourceFacts![0]!.currency = 'EUR'; fields(value).currency = 'EUR'; value.item.issues = [{ code: 'DOCUMENT_SOURCE_STALE', severity: 'error', message: '来源已变化' }];
@@ -148,6 +185,27 @@ describe('central supplement transaction boundary', () => {
     service.reviseDocumentInTx.mockImplementation(async (_tx, id, _actor, revision) => ({ document: { ...tickets.find((entry) => entry.document.id === id)!.document, version: revision.expectedVersion + 1 } }));
   }
   beforeEach(() => { vi.clearAllMocks(); });
+  it('saves an unrestricted hand-written service once, clears the missing form and writes that service to the generated invoice', async () => {
+    const value = ticket(), currentTemplate = template(), channels = [profile('channel', { businessChannel: 'HY', allowedServices: ['旧服务A'] }), profile('channel', { businessChannel: 'HY', allowedServices: ['旧服务B'] })];
+    fields(value).service = ''; completeDeclarations(value, currentTemplate); state([value], channels, [currentTemplate]);
+    service.reviseDocumentInTx.mockImplementation(async (_tx, _id, _actor, revision) => {
+      value.document.version = revision.expectedVersion + 1;
+      value.document.currentRevision = { ...value.document.currentRevision, version: value.document.version, data: { ...data(value), fields: revision.fields, profileReferences: revision.profileReferences, templateReference: revision.templateReference } };
+      return { document: value.document };
+    });
+    const requested = field([value], 'service', channels, [currentTemplate]);
+    await applyDocumentAutomationSupplementInTx(tx as never, 'admin', { shippingRunId: runId, items: [value.item] }, input([value], [{ id: requested.id, value: '英国空派自税递延' }]));
+    const after = await getDocumentAutomationRequirementsInTx(tx as never, 'admin', { shippingRunId: runId, items: [value.item] });
+    expect(after.descriptors).toEqual([]); expect(after.issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(validateDocumentData(data(value)).filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(validateWorkbookData(data(value)).filter((issue) => issue.severity === 'error')).toEqual([]);
+    const raw = new ExcelJS.Workbook(), sheet = raw.addWorksheet('发票');
+    DOCUMENT_MAIN_HEADERS.forEach((label, index) => { sheet.getCell(17, index + 1).value = label; });
+    DOCUMENT_HEADER_LABELS.forEach(([left, right], index) => { sheet.getCell(index + 1, 1).value = left; sheet.getCell(index + 1, 5).value = right; });
+    const generated = new ExcelJS.Workbook(); await generated.xlsx.load(await createWorkbook(data(value), Buffer.from(await raw.xlsx.writeBuffer())) as never);
+    expect(generated.worksheets[0]!.getCell(DOCUMENT_HEADER_FIELDS.service).value).toBe('英国空派自税递延');
+    expect(data(value).profileReferences.some((entry) => entry.category === 'channel')).toBe(false);
+  });
   it('returns current saved versions even for a ticket without an editable requirement', async () => {
     const value = ticket(); value.item.documentVersion = 1; state([value]);
     const result = await getDocumentAutomationRequirementsInTx(tx as never, 'admin', { shippingRunId: runId, items: [value.item] }); expect(result.documentVersions).toEqual({ [value.document.id]: 2 }); expect(service.lockedDocument).toHaveBeenCalledWith(tx, value.document.id, 'admin', undefined);

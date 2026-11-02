@@ -34,6 +34,7 @@ export function withDocumentAddressCodeResolution(data: DocumentRevisionData, re
     addressCodeSourceDigest: createHash('sha256').update(JSON.stringify([...result.sourceSnapshotIds].sort())).digest('hex'),
     addressCodeReferenceSha256: result.source === 'freight_reference' || result.sourceRows.length ? result.catalogSha256 ?? '' : '', addressCodeReferenceRows: result.sourceRows.join(','),
   };
+  if (result.status === 'resolved') fields.recipientName = result.code;
   if (result.status === 'needs_review') fields.addressConfirmed = 'false';
   return { ...data, fields };
 }

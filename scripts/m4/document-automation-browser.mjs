@@ -7,11 +7,11 @@ import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
-import { documentCandidateListSchema, documentSchema, documentBoxFieldKey, withDocumentInvoiceDefaults,
+import { DOCUMENT_DEFAULT_FLAGS, documentCandidateListSchema, documentSchema, documentBoxFieldKey, withDocumentInvoiceDefaults,
   documentAutomationJobSchema, documentAutomationStartInputSchema, documentAutomationRetryInputSchema, documentAutomationSupplementInputSchema } from '../../packages/contracts/dist/index.js';
 import { documentProductOverrideKey } from '../../apps/server/dist/modules/documents/workbook.js';
 import { chooseOption } from '../shared/ui-controls.mjs';
-import { findGridRow, grid } from '../shared/grid.mjs';
+import { closeGridDetails, findGridRow, grid, selectGridRow } from '../shared/grid.mjs';
 import { openRowMenu } from './grid-helpers.mjs';
 
 // A local in-memory automation service. Its worker state can advance while the
@@ -67,8 +67,15 @@ function fixture() {
   first.codes.push({ ...first.codes[0], id: uid(), boxId: extra.id, code: 'A2', sequence: 2 }); first.boxSource.push({ ...structuredClone(first.boxSource[0]), boxId: extra.id, code: 'A2', order: 2, raw: { ...first.boxSource[0].raw, weight: '11' }, values: { ...first.boxSource[0].values, weight: '11.00' } });
   candidates[0].shipment = structuredClone(first.shipment); candidates[0].codes = structuredClone(first.codes); candidates[0].boxSource = structuredClone(first.boxSource);
   documentCandidateListSchema.parse({ items: candidates, total: 2, shippingRunId: run.id }); records.forEach((record) => documentSchema.parse(record));
-  return { run, candidates, template, profiles, records, job: null, startInputs: [], retryInputs: [], supplementInputs: [], acceptedSupplements: [], supplementLedger: new Map(), supplementModes: [], holdSupplement: false, releaseSupplement: null, bundleGenerations: 0, sourceSnapshot: JSON.stringify(records.map((record) => record.currentRevision.data.members)),
+  return { run, runs: [run], candidates, candidateReads: [], candidateFailures: new Map(), duplicateCandidates: false, template, profiles, records, job: null, startInputs: [], retryInputs: [], supplementInputs: [], acceptedSupplements: [], supplementLedger: new Map(), supplementModes: [], holdSupplement: false, releaseSupplement: null, bundleGenerations: 0, sourceSnapshot: JSON.stringify(records.map((record) => record.currentRevision.data.members)),
     starts: new Map(), retries: new Map(), retryModes: [], retryAccepted: 0, showExisting: false, startMode: 'ready', holdStart: false, releaseStart: null, holdRetry: false, releaseRetry: null, holdJobRead: false, releaseJobRead: null, jobReadModes: [], jobReads: 0, listReads: 0, downloads: 0 };
+}
+function multiRunFixture() {
+  const state = fixture(), second = { ...state.run, id: uid(), sequence: 2, numberingDate: '2026-10-26' };
+  state.runs.push(second); state.duplicateCandidates = true;
+  Object.assign(state.candidates[1], { shippingRunId: second.id, shippingRunSequence: second.sequence });
+  Object.assign(state.records[1].currentRevision.data, { shippingRunId: second.id, shippingRunSequence: second.sequence });
+  return state;
 }
 function syncJob(state, phase) {
   const job = state.job, counts = { total: job.items.length, queued: 0, running: 0, ready: 0, exporting: 0, completed: 0, blocked: 0 };
@@ -81,7 +88,7 @@ function createJob(state, input) {
   if (existing) assert.equal(input.expectedVersion, existing.version);
   const ids = existing?.currentRevision.data.members.map((member) => member.demand.id) ?? input.demandIds;
   const selected = state.candidates.filter((candidate) => !ids || ids.includes(candidate.demandId));
-  state.job = documentAutomationJobSchema.parse({ id: uid(), mode: 'single_workbook', shippingRunId: state.run.id, version: 1, status: 'queued', phase: 'preparing', bundle: null, supplement: { descriptors: [], issues: [] },
+  state.job = documentAutomationJobSchema.parse({ id: uid(), mode: 'single_workbook', shippingRunId: input.shippingRunId ?? input.shippingRunIds?.[0] ?? state.run.id, ...(input.shippingRunIds ? { shippingRunIds: input.shippingRunIds } : {}), version: 1, status: 'queued', phase: 'preparing', bundle: null, supplement: { descriptors: [], issues: [] },
     items: selected.map((candidate) => ({ id: uid(), demandIds: [candidate.demandId], fbas: [candidate.demand.snapshot.fba], documentId: existing?.id ?? null, documentVersion: existing?.version ?? null,
       exportId: null, fileId: null, stage: existing ? 'preview' : 'create', status: 'queued', issues: [], error: null, attempt: 1 })),
     counts: { total: selected.length, queued: selected.length, running: 0, ready: 0, exporting: 0, completed: 0, blocked: 0 }, createdAt: now, updatedAt: now, completedAt: null, error: null }); return state.job;
@@ -165,8 +172,16 @@ async function setup(state) {
     const json = (value, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
     if (method !== 'GET') writes.push({ method, path, input: request.postDataJSON() });
     if (path === '/api/v1/session') return json({ user: { id: 'automation-browser', name: 'Batch workbook fixture', email: 'automation@fixture.invalid', role: 'admin' } });
-    if (path === '/api/v1/shipping-runs') return json({ items: [state.run] });
-    if (path === '/api/v1/documents/candidates') return json({ items: state.candidates, total: state.candidates.length, shippingRunId: state.run.id });
+    if (path === '/api/v1/shipping-runs') return json({ items: state.runs });
+    if (path === '/api/v1/documents/candidates') {
+      const runId = url.searchParams.get('shippingRunId'); state.candidateReads.push(runId);
+      assert(state.runs.some((run) => run.id === runId), 'Candidate reads must be scoped to a chosen shipping run');
+      const failures = state.candidateFailures.get(runId);
+      if (failures?.shift() === '503') return json({ error: { code: 'FIXTURE_CANDIDATES_FAILED', message: '技术夹具：其中一个发货次读取失败，请重试。' } }, 503);
+      const selected = state.candidates.filter((candidate) => candidate.shippingRunId === runId);
+      const items = state.duplicateCandidates && selected.length ? [...selected, selected[0]] : selected;
+      return json({ items, total: items.length, shippingRunId: runId });
+    }
     if (path === '/api/v1/documents/field-options') return json({ services: ['TECH SERVICE'] });
     if (path === '/api/v1/document-profiles') return json({ items: state.profiles });
     if (path === '/api/v1/document-templates') return json({ items: [state.template] });
@@ -174,7 +189,8 @@ async function setup(state) {
     const base = '/api/v1/documents/automations';
     if (path === base && method === 'GET') { state.listReads += 1; return json({ items: state.job ? [state.job] : [] }); }
     if (path === base && method === 'POST') {
-      const input = documentAutomationStartInputSchema.parse(request.postDataJSON()); state.startInputs.push(input); assert.equal(input.shippingRunId, state.run.id);
+      const input = documentAutomationStartInputSchema.parse(request.postDataJSON()); state.startInputs.push(input);
+      assert.deepEqual(new Set(input.shippingRunIds ?? [input.shippingRunId]), new Set(state.runs.map((run) => run.id)));
       if (state.startMode === 'busy' || state.startMode === 'busy-no-id') return json({ error: { code: 'DOCUMENT_AUTOMATION_BUSY', message: state.startMode === 'busy' ? '所选 FBA 已有自动出单任务，请继续该任务。' : '自动出单正在处理，请等待本轮检查结束后重试。', ...(state.startMode === 'busy' ? { details: { jobId: state.job.id } } : {}) } }, 409);
       let job = state.starts.get(input.operationId); const replayed = Boolean(job); if (!job) { job = createJob(state, input); state.starts.set(input.operationId, job); }
       if (state.holdStart) await new Promise((release) => { state.releaseStart = () => { state.holdStart = false; release(); }; releases.push(state.releaseStart); });
@@ -247,13 +263,25 @@ const field = (id) => requirementForm().locator('[data-automation-field^="' + id
 const saveButton = () => jobDialog().getByRole('button', { name: '保存并统一检查', exact: true });
 const downloadButton = () => dashboard().getByRole('button', { name: /下载.*(整批|XLSX|ZIP)/ });
 const generateButton = () => jobDialog().getByRole('button', { name: '生成发票文件', exact: true });
+const runPicker = () => page.getByRole('dialog', { name: '选择发货次', exact: true });
+const runLabel = (run) => `${run.month} 第 ${run.sequence ?? '待分配'} 次 · ${run.numberingDate}`;
+async function selectRuns(state, ids, { leaveOpen = false } = {}) {
+  await wizard().getByLabel('发货次', { exact: true }).click();
+  await runPicker().getByRole('textbox', { name: '搜索月份、发货次或日期…', exact: true }).fill('');
+  for (const run of state.runs) await runPicker().getByRole('checkbox', { name: runLabel(run), exact: true }).setChecked(ids.includes(run.id));
+  if (!leaveOpen) await runPicker().getByRole('button', { name: '完成选择', exact: true }).click();
+}
 async function openNew(state) {
   await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 60_000 }); await page.getByRole('button', { name: '制作发票', exact: true }).click();
-  await chooseOption(wizard().getByLabel('发货次', { exact: true }), state.run.id); await wizard().getByRole('button', { name: '读取货件', exact: true }).click();
+  await selectRuns(state, [state.run.id]); await wizard().getByRole('button', { name: '读取货件', exact: true }).click();
 }
 async function toPrefill(state) {
   await nextSourceButton().click(); await expect(wizard().getByRole('heading', { name: '出单资料', exact: true })).toBeVisible();
   assert.equal(state.startInputs.length, 0, 'Advancing to optional details must not create an automation task'); await expect(startButton()).toBeEnabled();
+  for (const label of ['含电池', '含磁性', '含液体', '含粉末', '危险品']) {
+    const control = wizard().getByLabel(label, { exact: true });
+    await expect(control).toHaveAttribute('data-value', '否'); await expect(control).toBeDisabled();
+  }
 }
 async function start(state) { await openNew(state); await wizard().getByLabel('选择当前列表', { exact: true }).check(); await toPrefill(state); await startButton().click(); await expect(dashboard()).toBeVisible(); }
 async function openJob() {
@@ -321,13 +349,100 @@ try {
   await expect.poll(async () => { try { return (await fetch(baseURL)).status; } catch { return 0; } }, { timeout: 30_000 }).toBe(200);
   browser = await chromium.launch({ headless: true, channel: process.env.IMPORT_BROWSER_CHANNEL || 'chrome' });
 
+  step = 'multiple-shipping-runs-merge-deduplicate-and-preserve-selection-through-search-and-scope-changes';
+  const multi = multiRunFixture(); let context = await setup(multi);
+  await page.goto('/shipping?view=documents', { waitUntil: 'domcontentloaded', timeout: 60_000 }); await page.getByRole('button', { name: '制作发票', exact: true }).click();
+  await selectRuns(multi, multi.runs.map((run) => run.id), { leaveOpen: true });
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1000 }); await expect(runPicker()).toBeInViewport();
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    await screenshot('document-multi-run-picker-' + width + '.png');
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const runSearch = runPicker().getByRole('textbox', { name: '搜索月份、发货次或日期…', exact: true });
+  await runSearch.fill(multi.runs[1].numberingDate); await expect(runPicker().getByRole('checkbox')).toHaveCount(1);
+  await expect(runPicker().getByRole('checkbox')).toBeChecked(); await runSearch.fill('');
+  await expect(runPicker().getByRole('checkbox')).toHaveCount(2); await runPicker().getByRole('button', { name: '完成选择', exact: true }).click();
+  await wizard().getByRole('button', { name: '读取货件', exact: true }).click();
+  await expect(grid(wizard(), '本次发货的可选货件')).toHaveAttribute('data-row-count', '2');
+  await expect(wizard()).toContainText('已汇总 2 个发货次 · 2 个货件 · 已选 0 个 FBA');
+  assert.deepEqual(new Set(multi.candidateReads), new Set(multi.runs.map((run) => run.id)));
+  await wizard().getByLabel('选择当前列表', { exact: true }).check();
+  await wizard().getByLabel('查找货件', { exact: true }).click();
+  const shipmentPicker = page.getByRole('dialog', { name: '选择货件', exact: true });
+  const shipmentSearch = shipmentPicker.getByRole('textbox', { name: '搜索 FBA、店铺、目的仓或制表组…', exact: true });
+  await shipmentSearch.fill('FBAAUTO001'); await expect(shipmentPicker.getByRole('checkbox')).toHaveCount(1);
+  await shipmentPicker.getByRole('checkbox').uncheck(); await shipmentSearch.fill('');
+  await expect(shipmentPicker.getByRole('checkbox', { name: /^FBAAUTO002/ })).toBeChecked(); await expect(shipmentPicker.getByRole('checkbox', { name: /^FBAAUTO001/ })).not.toBeChecked();
+  await shipmentPicker.getByRole('checkbox', { name: /^FBAAUTO001/ }).check(); await shipmentPicker.getByRole('button', { name: '完成选择', exact: true }).click();
+  await selectRuns(multi, [multi.runs[1].id]); await expect(nextSourceButton()).toBeDisabled();
+  await wizard().getByRole('button', { name: '读取货件', exact: true }).click();
+  await expect(grid(wizard(), '本次发货的可选货件')).toHaveAttribute('data-row-count', '1');
+  await expect(wizard()).toContainText('已汇总 1 个发货次 · 1 个货件 · 已选 1 个 FBA');
+  await wizard().getByRole('button', { name: '读取货件', exact: true }).click();
+  await expect(wizard()).toContainText('已汇总 1 个发货次 · 1 个货件 · 已选 1 个 FBA'); await expect(nextSourceButton()).toBeEnabled();
+  await selectRuns(multi, multi.runs.map((run) => run.id)); await wizard().getByRole('button', { name: '读取货件', exact: true }).click();
+  await expect(wizard()).toContainText('已汇总 2 个发货次 · 2 个货件 · 已选 1 个 FBA');
+  await wizard().getByLabel('选择当前列表', { exact: true }).check();
+  for (let index = 0; index < 2; index++) {
+    const row = await selectGridRow(wizard(), '本次发货的可选货件', index); await expect(row.getByRole('checkbox')).toBeChecked();
+    await closeGridDetails(wizard(), '本次发货的可选货件');
+  }
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  await screenshot('document-multi-run-candidates-1440.png'); note();
+
+  step = 'one-cross-run-start-submits-every-selected-shipment-and-downloads-one-bundle';
+  await toPrefill(multi);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await wizard().getByLabel('危险品', { exact: true }).evaluate((control) => control.scrollIntoView({ block: 'center' }));
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    await screenshot('document-fixed-no-flags-' + width + '.png');
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 }); await startButton().click(); await expect(dashboard()).toBeVisible();
+  assert.equal(multi.startInputs.length, 1); assert.equal(multi.startInputs[0].shippingRunId, undefined);
+  assert.deepEqual(new Set(multi.startInputs[0].shippingRunIds), new Set(multi.runs.map((run) => run.id)));
+  assert.deepEqual(new Set(multi.startInputs[0].demandIds), new Set(multi.candidates.map((candidate) => candidate.demandId)));
+  for (const key of DOCUMENT_DEFAULT_FLAGS) assert.equal(multi.startInputs[0].fields[key], '否');
+  assert.equal(multi.job.items.length, 2); ready(multi); beginBundle(multi); finishBundle(multi);
+  await expect(downloadButton()).toBeEnabled(); const multiDownload = page.waitForEvent('download'); await downloadButton().click(); await multiDownload;
+  assert.equal(multi.downloads, 1); assert.equal(multi.bundleGenerations, 1); assert.equal(multi.job.bundle.fileCount, 2); await context.close(); note();
+
+  step = 'one-failed-run-blocks-the-whole-selection-until-a-successful-retry';
+  const failedRun = multiRunFixture(); failedRun.candidateFailures.set(failedRun.runs[1].id, ['503', '503']); context = await setup(failedRun);
+  await openNew(failedRun); await wizard().getByLabel('选择当前列表', { exact: true }).check();
+  await selectRuns(failedRun, failedRun.runs.map((run) => run.id)); await wizard().getByRole('button', { name: '读取货件', exact: true }).click();
+  await expect(wizard()).toContainText('其中一个发货次读取失败，请重试。'); await expect(nextSourceButton()).toBeDisabled();
+  await expect(wizard().getByLabel('查找货件', { exact: true })).toBeDisabled(); assert.equal(failedRun.startInputs.length, 0);
+  await selectRuns(failedRun, [failedRun.run.id]); await wizard().getByRole('button', { name: '读取货件', exact: true }).click();
+  await expect(wizard()).toContainText('已汇总 1 个发货次 · 1 个货件 · 已选 1 个 FBA'); await expect(nextSourceButton()).toBeEnabled();
+  await selectRuns(failedRun, failedRun.runs.map((run) => run.id)); await wizard().getByRole('button', { name: '读取货件', exact: true }).click();
+  await expect(wizard()).toContainText('其中一个发货次读取失败，请重试。'); await expect(nextSourceButton()).toBeDisabled();
+  await wizard().getByRole('button', { name: '重试', exact: true }).click();
+  await expect(grid(wizard(), '本次发货的可选货件')).toHaveAttribute('data-row-count', '2');
+  await expect(wizard()).toContainText('已汇总 2 个发货次 · 2 个货件 · 已选 1 个 FBA');
+  await wizard().getByLabel('选择当前列表', { exact: true }).check(); await expect(nextSourceButton()).toBeEnabled();
+  assert.equal(failedRun.candidateReads.filter((id) => id === failedRun.runs[1].id).length, 3); await context.close(); note();
+
+  step = 'more-than-500-selected-shipments-explains-the-limit-and-blocks-submission';
+  const oversized = fixture(), originalCandidate = oversized.candidates[0];
+  oversized.candidates = Array.from({ length: 501 }, (_, index) => {
+    const candidate = structuredClone(originalCandidate), demandId = uid(); candidate.demandId = demandId; candidate.demand.id = demandId; candidate.shipment.demandId = demandId;
+    candidate.demand.snapshot.fba = 'FBALIMIT' + String(index + 1).padStart(4, '0'); candidate.shipment.data.fba = candidate.demand.snapshot.fba;
+    return candidate;
+  });
+  context = await setup(oversized); await openNew(oversized); await wizard().getByLabel('选择当前列表', { exact: true }).check();
+  await expect(wizard()).toContainText('单次最多支持 500 个货件，当前已选 501 个。'); await expect(nextSourceButton()).toBeDisabled();
+  assert.equal(oversized.startInputs.length, 0); await context.close(); note();
+
   step = 'one-start-covers-all-selected-shipments-and-synchronous-guard-blocks-double-clicks';
-  const first = fixture(); first.holdStart = true; let context = await setup(first); await openNew(first); await expect(nextSourceButton()).toBeDisabled(); await expect(startButton()).toHaveCount(0);
+  const first = fixture(); first.holdStart = true; context = await setup(first); await openNew(first); await expect(nextSourceButton()).toBeDisabled(); await expect(startButton()).toHaveCount(0);
   await wizard().getByLabel('选择当前列表', { exact: true }).check(); await toPrefill(first);
   await expect(wizard().getByLabel('任务名称（可选）', { exact: true })).toHaveValue(''); await expect(wizard().getByLabel('渠道服务', { exact: true })).toHaveAttribute('data-value', '');
   await startButton().evaluate((node) => { node.click(); node.click(); });
   await expect.poll(() => first.startInputs.length).toBe(1); await expect(startButton()).toBeDisabled(); assert.deepEqual(new Set(first.startInputs[0].demandIds), new Set(first.candidates.map((candidate) => candidate.demandId)));
   assert.equal(first.startInputs[0].title, undefined); assert.equal(first.startInputs[0].fields?.service, undefined, 'Empty optional details still allow an explicit final start');
+  for (const key of DOCUMENT_DEFAULT_FLAGS) assert.equal(first.startInputs[0].fields[key], '否');
   first.releaseStart(); await expect(dashboard()).toBeVisible(); assert.equal(first.job.mode, 'single_workbook'); await noOutput(first); note();
 
   step = 'one-ready-range-and-one-blocked-range-cannot-create-or-download-any-workbook';

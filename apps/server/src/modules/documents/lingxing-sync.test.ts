@@ -225,16 +225,49 @@ describe('saved preview actor/version/scope and replay boundaries', () => {
     expect(saved.productSourceFacts).toEqual([{ ...identity, salesPrice: null, currency: null, unitPrice: null, cartonQuantity: null, sourceFileId: source.id, sourceSha256: source.sha256, fetchedAt }]);
     expect(data.productSourceFacts[0]!.salesPrice).toBe('100'); expect(mocks.write).not.toHaveBeenCalled();
   });
+  it('applies verified archived customs candidates into a versioned product profile without overwriting HS, invoice prices or exporter headers', async () => {
+    const id = randomUUID(), preview = makePreview(id), data = revision(), profileId = randomUUID();
+    const priorSource = { system: 'manual-check', reason: '保留旧来源依据' };
+    const existingData = { ...identity, englishName: 'Manual product', exportHsCode: '9503008900', hsCode: '4202924000', salesPrice: '50', unitPrice: '10.00', currency: 'USD', unitPriceConfirmed: true, originCountry: '', firstLegalUnitRate: null, _lingxingSources: [priorSource] };
+    const product = { id: profileId, category: 'product', key: 'reviewed-product', version: 3, status: 'active', data: existingData };
+    const party = { category: 'party' as const, profileId: randomUUID(), version: 1, data: { companyName: '人工确认出口企业', companyCode: 'EXPORTER-CODE' } };
+    data.fields = { sellerName: '人工确认出口企业', sellerCode: 'EXPORTER-CODE', currency: 'USD', addressSelectionMode: 'manual' };
+    data.profileReferences = [{ category: 'product', profileId, version: product.version, data: existingData }, party, { category: 'channel', profileId: randomUUID(), version: 1, data: {} }];
+    data.templateReference = { templateId: randomUUID(), fileId: randomUUID(), version: 1, sha256: 'c'.repeat(64) };
+    const customs = { exportHsCode: '3926909090', originCountry: '中国', domesticSource: '深圳特区', declarationElements: '0|0|屏幕保护|EPU', taxExemption: '照章征税', productionSalesName: '领星生产销售企业', productionSalesCode: 'PRODUCTION-CODE',
+      firstLegalUnit: '千克', firstLegalUnitRate: '0.76', secondLegalUnit: '平方米', secondLegalUnitRate: '2.5', quarantineCode: 'N：出口商品检验', brandType: '境内自主品牌', exportPreference: '不享惠', productNetWeightGrams: '12.34', productGrossWeightGrams: '16.5', cartonGrossWeightKg: '21.25' };
+    preview.products = [suggestion({ ...customs, englishName: 'Remote product', hsCode: '4202929000', salesPrice: '20', unitPrice: '4.00', currency: 'USD', cartonQuantity: '480' })];
+    preview.fields = { productionSalesCode: customs.productionSalesCode, sellerName: customs.productionSalesName, sellerCode: customs.productionSalesCode };
+    preview.parties = [{ subjectName: customs.productionSalesName, subjectId: customs.productionSalesCode }];
+    const original = structuredClone(data), source = { id: preview.sourceFileId, sha256: 'a'.repeat(64) }, fetchedAt = '2026-10-24T00:00:00.000Z';
+    const archive = { actorId: 'admin', documentId: id, operationId: preview.operationId, revisionDigest: documentDigest(data), fetchedAt,
+      suggestions: { products: preview.products, fields: preview.fields, parties: preview.parties, issues: preview.issues } };
+    mocks.locked.mockResolvedValue({ record: { version: 1, status: 'draft' }, revision: { data } });
+    mocks.select.mockReturnValueOnce(query([])).mockReturnValueOnce(query([])).mockReturnValueOnce(query([{ actorId: 'admin', action: 'document.lingxing.preview', result: { preview } }])).mockReturnValueOnce(query([source])).mockReturnValueOnce(query([product]));
+    mocks.checked.mockResolvedValue(Buffer.from(JSON.stringify(archive))); mocks.append.mockResolvedValue({});
+    mocks.write.mockImplementation(async (_tx, _actor, input) => ({ id: profileId, version: 4, data: input.data }));
+    const input = { operationId: randomUUID(), expectedVersion: 1, previewOperationId: preview.operationId, reason: '采用经核对的报关字段', confirmPrices: false };
+    const result = await applyDocumentLingxing(id, 'admin', input);
+    expect(result.appliedProducts).toBe(1); expect(mocks.checked).toHaveBeenCalledWith(source); expect(mocks.write).toHaveBeenCalledOnce();
+    const written = mocks.write.mock.calls[0]![2];
+    expect(written).toMatchObject({ category: 'product', key: product.key, expectedVersion: 3, reason: input.reason, data: { ...customs, exportHsCode: existingData.exportHsCode, hsCode: existingData.hsCode, englishName: existingData.englishName, salesPrice: '50', unitPrice: '10.00', currency: 'USD', unitPriceConfirmed: true } });
+    expect(written.data._lingxingSources).toEqual([priorSource, { system: 'lingxing', sourceFileId: source.id, sourceSha256: source.sha256, previewOperationId: preview.operationId, documentId: id, documentVersion: 1, fetchedAt, identity }]);
+    const saved = mocks.append.mock.calls[0]![3] as DocumentRevisionData;
+    expect(saved.profileReferences.find((reference) => reference.profileId === profileId)).toEqual({ category: 'product', profileId, version: 4, data: written.data });
+    expect(saved.profileReferences.find((reference) => reference.category === 'party')).toEqual(party); expect(saved.fields).toEqual(original.fields);
+    expect(saved.productSourceFacts).toEqual([{ ...identity, salesPrice: '20', currency: 'USD', unitPrice: '4.00', cartonQuantity: '480', sourceFileId: source.id, sourceSha256: source.sha256, fetchedAt }]);
+    expect(data).toEqual(original);
+  });
   it.each(['retired', 'updated'])('applies only the representative declaration while preserving a hidden %s reference and all source facts', async (state) => {
     const id = randomUUID(), preview = makePreview(id), data = revision(), hidden = { ...identity, msku: 'M2', fnsku: 'F2', sku: 'S2' };
     const items = [{ ...identity, quantity: '1' }, { ...hidden, quantity: '2' }];
     data.members[0]!.shipment.data.items = items as typeof data.members[number]['shipment']['data']['items'];
     data.members[0]!.shipment.data.boxes[0]!.items = items as typeof data.members[number]['shipment']['data']['boxes'][number]['items'];
-    const hiddenReference = { category: 'product' as const, profileId: randomUUID(), version: 1, data: { ...hidden, englishName: 'Old hidden product' } };
+    const hiddenReference = { category: 'product' as const, profileId: randomUUID(), version: 1, data: { ...hidden, englishName: 'Old hidden product', exportHsCode: '9503008900', originCountry: '中国', productionSalesCode: 'OLD-PRODUCTION' } };
     data.profileReferences = [{ category: 'channel', profileId: randomUUID(), version: 1, data: {} }, hiddenReference];
     data.templateReference = { templateId: randomUUID(), fileId: randomUUID(), version: 1, sha256: 'c'.repeat(64) };
-    preview.products = [suggestion({ englishName: 'Representative', salesPrice: '10', unitPrice: '2.00', currency: 'USD', cartonQuantity: '500' }),
-      suggestion({ englishName: 'New hidden product', salesPrice: '15', unitPrice: '3.00', currency: 'USD', cartonQuantity: '300' }, hidden)];
+    preview.products = [suggestion({ englishName: 'Representative', exportHsCode: '3926909090', salesPrice: '10', unitPrice: '2.00', currency: 'USD', cartonQuantity: '500' }),
+      suggestion({ englishName: 'New hidden product', exportHsCode: '4202920000', originCountry: '中国', productionSalesCode: 'NEW-PRODUCTION', firstLegalUnit: '千克', firstLegalUnitRate: '0.012', quarantineCode: 'N：出口商品检验', salesPrice: '15', unitPrice: '3.00', currency: 'USD', cartonQuantity: '300' }, hidden)];
     const source = { id: preview.sourceFileId, sha256: 'a'.repeat(64) }, fetchedAt = '2026-10-24T00:00:00.000Z';
     const archive = { actorId: 'admin', documentId: id, operationId: preview.operationId, revisionDigest: documentDigest(data), fetchedAt,
       suggestions: { products: preview.products, fields: preview.fields, parties: preview.parties, issues: preview.issues } };
@@ -245,11 +278,13 @@ describe('saved preview actor/version/scope and replay boundaries', () => {
     mocks.write.mockImplementation(async (_tx, _actor, input) => ({ id: randomUUID(), version: 1, data: input.data }));
     const result = await applyDocumentLingxing(id, 'admin', { operationId: randomUUID(), expectedVersion: 1, previewOperationId: preview.operationId, reason: 'Refresh source', confirmPrices: false });
     expect(result.appliedProducts).toBe(1); expect(mocks.write).toHaveBeenCalledOnce();
-    expect(mocks.write.mock.calls[0]![2].data).toMatchObject({ ...identity, englishName: 'Representative' });
+    expect(mocks.write.mock.calls[0]![2].data).toMatchObject({ ...identity, englishName: 'Representative', exportHsCode: '3926909090' });
     const saved = mocks.append.mock.calls[0]![3] as DocumentRevisionData;
     expect(saved.productSourceFacts).toHaveLength(2);
     expect(saved.productSourceFacts!.map((fact) => [fact.msku, fact.salesPrice, fact.unitPrice])).toEqual([['M', '10', '2.00'], ['M2', '15', '3.00']]);
     expect(saved.profileReferences.find((reference) => reference.profileId === hiddenReference.profileId)).toEqual(hiddenReference);
+    expect(JSON.parse((await mocks.checked.mock.results[0]!.value).toString('utf8')).suggestions.products[1]).toMatchObject({ ...hidden, data: { exportHsCode: '4202920000', productionSalesCode: 'NEW-PRODUCTION', firstLegalUnitRate: '0.012', quarantineCode: 'N：出口商品检验' } });
+    expect(saved.productSourceFacts!.find((fact) => fact.msku === hidden.msku)).toMatchObject({ sourceFileId: source.id, sourceSha256: source.sha256 });
   });
   it('rejects stale versions, missing identities and additional products', () => {
     const id = randomUUID(), preview = makePreview(id);

@@ -25,13 +25,16 @@ export const DOCUMENT_FIELD_OPTIONS = {
   taxMode: ['包税', '不包税', '自主税号', '自税递延'],
   deliveryStation: ['交货仓库', '深圳坂田仓库', '义乌仓库'],
   currency: ['USD', 'EUR', 'GBP'],
-  battery: ['否', '是'],
-  magnetic: ['否', '是'],
-  liquid: ['否', '是'],
-  powder: ['否', '是'],
-  dangerous: ['否', '是'],
+  battery: ['否'],
+  magnetic: ['否'],
+  liquid: ['否'],
+  powder: ['否'],
+  dangerous: ['否'],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
-export const documentFieldOptionsSchema = z.object({ services: z.array(z.string()) }).strict();
+export const documentFieldOptionsSchema = z.object({
+  services: z.array(z.string()),
+  lingxing: z.object({ status: z.enum(['available', 'unavailable']), message: z.string().optional() }).strict().optional(),
+}).strict();
 export type DocumentFieldOptions = z.infer<typeof documentFieldOptionsSchema>;
 
 // Shared by invoice preflight and the editor's live missing-field navigation.
@@ -161,7 +164,8 @@ export const documentCandidateListSchema = z.object({ items: z.array(documentCan
 export const documentSchema = z.object({ id: z.uuid(), purpose: documentPurposeSchema, status: documentStatusSchema, version: z.number().int().positive(), currentRevision: documentRevisionSchema, createdBy: z.string(), createdAt: z.iso.datetime(), updatedAt: z.iso.datetime() });
 export const documentProfileSchema = z.object({ id: z.uuid(), category: documentProfileCategorySchema, key: z.string(), version: z.number().int().positive(), status: z.enum(['active', 'retired']), data: z.record(z.string(), z.unknown()), createdBy: z.string(), createdAt: z.iso.datetime() });
 export const documentTemplateSchema = z.object({ id: z.uuid(), purpose: documentPurposeSchema, name: z.string(), version: z.number().int().positive(), mimeType: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/), fileId: z.uuid(), status: z.enum(['active', 'retired']), createdBy: z.string(), createdAt: z.iso.datetime() });
-export const documentExportReferenceSchema = z.object({ documentId: z.uuid(), revisionId: z.uuid(), revisionVersion: z.number().int().positive(), templateId: z.uuid(), templateVersion: z.number().int().positive(), templateSha256: z.string().regex(/^[a-f0-9]{64}$/), sources: z.array(documentSourceReferenceSchema).min(1), generationRulesVersion: documentGenerationRulesVersionSchema.optional(), pricingRule: z.literal('fixed-2').optional(), bundleJobId: z.uuid().optional(), invoiceFileName: z.string().min(1).max(200).optional(), invoiceFileSha256: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
+export const DOCUMENT_INVOICE_PRICING_RULE = 'fixed-country/v1';
+export const documentExportReferenceSchema = z.object({ documentId: z.uuid(), revisionId: z.uuid(), revisionVersion: z.number().int().positive(), templateId: z.uuid(), templateVersion: z.number().int().positive(), templateSha256: z.string().regex(/^[a-f0-9]{64}$/), sources: z.array(documentSourceReferenceSchema).min(1), generationRulesVersion: documentGenerationRulesVersionSchema.optional(), pricingRule: z.enum(['fixed-2', DOCUMENT_INVOICE_PRICING_RULE]).optional(), bundleJobId: z.uuid().optional(), invoiceFileName: z.string().min(1).max(200).optional(), invoiceFileSha256: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
 export const documentExportSchema = z.object({ id: z.uuid(), status: documentExportStatusSchema, reference: documentExportReferenceSchema, fileId: z.uuid().nullable(), fileSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(), error: z.string().nullable(), createdAt: z.iso.datetime(), completedAt: z.iso.datetime().nullable(), valid: z.boolean(), invalidReason: z.string().nullable() });
 export const documentValidationSchema = z.object({ documentId: z.uuid(), version: z.number().int().positive(), valid: z.boolean(), issues: z.array(documentValidationIssueSchema), checkedAt: z.iso.datetime() });
 
@@ -182,20 +186,23 @@ export const documentAutomationBundleSchema = z.object({
   fileCount: z.number().int().positive().nullable().optional(),
 }).strict();
 export const documentAutomationItemSchema = z.object({
-  id: z.uuid(), demandIds: z.array(z.uuid()).min(1).max(500), fbas: z.array(z.string()).min(1),
+  id: z.uuid(), shippingRunId: z.uuid().optional(), demandIds: z.array(z.uuid()).min(1).max(500), fbas: z.array(z.string()).min(1),
   documentId: z.uuid().nullable(), documentVersion: z.number().int().positive().nullable(), exportId: z.uuid().nullable(), fileId: z.uuid().nullable(),
   stage: z.enum(['create', 'preview', 'apply', 'prepare', 'validate', 'ready', 'export', 'done']), status: z.enum(['queued', 'running', 'ready', 'exporting', 'completed', 'blocked']),
   issues: z.array(documentValidationIssueSchema), error: documentAutomationErrorSchema.nullable(), attempt: z.number().int().positive(),
 }).strict();
 export const documentAutomationJobSchema = z.object({
-  id: z.uuid(), shippingRunId: z.uuid(), version: z.number().int().positive(),
+  id: z.uuid(), shippingRunId: z.uuid(), shippingRunIds: z.array(z.uuid()).min(1).max(500).optional(), version: z.number().int().positive(),
   status: z.enum(['queued', 'running', 'completed', 'partial', 'blocked', 'failed']), items: z.array(documentAutomationItemSchema), counts: documentAutomationCountsSchema,
   phase: z.enum(['preparing', 'needs_input', 'ready', 'generating', 'completed', 'failed']).default('preparing'),
   mode: z.enum(['single_workbook', 'legacy']).default('legacy'),
   bundle: documentAutomationBundleSchema.nullable().default(null), supplement: documentAutomationSupplementSchema.nullable().default(null),
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(), completedAt: z.iso.datetime().nullable(), error: documentAutomationErrorSchema.nullable(),
 }).strict();
-export const documentAutomationStartInputSchema = z.object({ operationId: z.uuid(), shippingRunId: z.uuid(), demandIds: z.array(z.uuid()).min(1).max(500).optional(), documentId: z.uuid().optional(), expectedVersion: z.number().int().positive().optional(), fields: documentFieldsSchema.optional(), title: z.string().trim().min(1).max(200).optional() }).strict().superRefine((value, context) => {
+export const documentAutomationStartInputSchema = z.object({ operationId: z.uuid(), shippingRunId: z.uuid().optional(), shippingRunIds: z.array(z.uuid()).min(1).max(500).optional(), demandIds: z.array(z.uuid()).min(1).max(500).optional(), documentId: z.uuid().optional(), expectedVersion: z.number().int().positive().optional(), fields: documentFieldsSchema.optional(), title: z.string().trim().min(1).max(200).optional() }).strict().superRefine((value, context) => {
+  if (Boolean(value.shippingRunId) === Boolean(value.shippingRunIds)) context.addIssue({ code: 'custom', path: ['shippingRunIds'], message: '请指定单个发货表或多个发货表。' });
+  if (value.shippingRunIds && new Set(value.shippingRunIds).size !== value.shippingRunIds.length) context.addIssue({ code: 'custom', path: ['shippingRunIds'], message: '发货表范围不能重复。' });
+  if (value.documentId && !value.shippingRunId) context.addIssue({ code: 'custom', path: ['shippingRunId'], message: '继续已有草稿须指定其所属的单个发货表。' });
   if (value.demandIds && new Set(value.demandIds).size !== value.demandIds.length) context.addIssue({ code: 'custom', path: ['demandIds'], message: '自动出单货件范围不能重复。' });
   if (Boolean(value.documentId) !== (value.expectedVersion !== undefined)) context.addIssue({ code: 'custom', path: ['expectedVersion'], message: '继续已有草稿须同时指定单据编号和预期版本。' });
   if (value.documentId && value.demandIds) context.addIssue({ code: 'custom', path: ['demandIds'], message: '继续已有草稿时不能另外指定货件范围。' });
@@ -328,9 +335,10 @@ export function documentEffectiveSalesPrice(data: DocumentRevisionData, sid: num
 }
 
 export const DOCUMENT_DEFAULT_FLAGS = ['battery', 'magnetic', 'liquid', 'powder', 'dangerous'] as const;
+/** Current invoice flags are fixed; retain the source fields for historical evidence. */
 export function withDocumentDefaults(fields: Readonly<Record<string, string | null>>): Record<string, string | null> {
   const result = { ...fields };
-  for (const key of DOCUMENT_DEFAULT_FLAGS) if (!result[key]?.trim()) result[key] = '否';
+  for (const key of DOCUMENT_DEFAULT_FLAGS) result[key] = '否';
   return result;
 }
 
@@ -352,15 +360,19 @@ export function documentTicketCurrency(members: ReadonlyArray<Pick<DocumentMembe
   return currencies.length && currencies.every((currency) => currency && currency === currencies[0]) ? currencies[0] : undefined;
 }
 export const DOCUMENT_INVOICE_UNIT_PRICE = '2.00';
-/** Current invoice declarations use a fixed amount in the ticket's currency. */
+/** US invoices use USD 2.30; European invoices retain EUR/GBP 2.00. Other destinations keep the existing default. */
 export function documentInvoicePrice(data: Pick<DocumentRevisionData, 'members' | 'fields'>): { unitPrice: string; currency: string } {
-  return { unitPrice: DOCUMENT_INVOICE_UNIT_PRICE, currency: documentTicketCurrency(data.members) ?? data.fields.currency?.trim() ?? '' };
+  const usInvoice = data.members.length > 0 && data.members.every((member) => documentCountryCode(member.demand.snapshot.country) === 'US');
+  return { unitPrice: usInvoice ? '2.30' : DOCUMENT_INVOICE_UNIT_PRICE, currency: documentTicketCurrency(data.members) ?? data.fields.currency?.trim() ?? '' };
 }
 export function withDocumentInvoiceDefaults(fields: Readonly<Record<string, string | null>>, members: ReadonlyArray<Pick<DocumentMemberSnapshot, 'demand'>>): Record<string, string | null> {
   const result = withDocumentDefaults(fields);
   for (const key of DOCUMENT_BLANK_OUTPUT_FIELDS) result[key] = null;
   const currency = documentTicketCurrency(members);
   if (currency) result.currency = currency;
+  // Fengxin expects the invoice recipient to repeat the adopted address-book code.
+  const addressCode = result.addressCode?.trim();
+  if (addressCode) { result.addressCode = addressCode; result.recipientName = addressCode; }
   return result;
 }
 type DocumentAddressMember = Pick<DocumentMemberSnapshot, 'demand'> & Partial<Pick<DocumentMemberSnapshot, 'sourceCandidates'>>;

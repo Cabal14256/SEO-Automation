@@ -10,6 +10,7 @@ export * from '../modules/documents/profile-import-schema.js';
 export * from '../modules/documents/reference-schema.js';
 export * from '../modules/documents/automation-schema.js';
 export * from '../modules/workflow/schema.js';
+export * from '../modules/service-mappings/schema.js';
 import type { DemandSnapshot, ImportCommitResult, ImportCounts, ImportIssue, ImportNormalizedRow, ImportPreviewPayload, ImportRawCell, ImportSellerConfirmation, ImportSheet, ImportSourceLocation } from '@scm/contracts';
 
 const at = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });

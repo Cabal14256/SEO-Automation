@@ -201,7 +201,7 @@ try {
 
   await page.goto(`/batches/${ids.batch}?groupId=${ids.group}&tab=reports`);
   await checkShippingNavigation(page);
-  const generate = page.getByRole('button', { name: '生成发货表 XLSX', exact: true, includeHidden: true });
+  const generate = page.getByRole('button', { name: /^(?:再次)?生成发货表 XLSX$/, includeHidden: true });
   await expect(generate).toHaveText('生成发货表 XLSX');
   const reportTable = page.getByRole('region', { name: '商品及逐箱数量，可横向滚动', exact: true });
   await page.getByRole('button', { name: '下一页', exact: true }).click();

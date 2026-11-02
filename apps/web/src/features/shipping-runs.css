@@ -3,7 +3,8 @@
 .shipping-run-history > .panel-heading > div:first-child { flex: 1 1 18rem; }
 .shipping-run-history > .panel-heading > .import-selection-actions { flex: 0 0 auto; margin: 0; }
 .shipping-run-history > .panel-heading > .import-selection-actions button { white-space: nowrap; }
-.shipping-run-process { display: grid; gap: 1rem; margin-block: 1.25rem; }
+.shipping-run-process { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 1rem; margin-block: 1.25rem; }
+.shipping-run-process > * { min-width: 0; }
 .shipping-run-process h3 { margin: 0; }
 .shipping-run-process > .panel-heading { flex-wrap: wrap; gap: .75rem; }
 .shipping-run-progress { padding: 1rem; border: 1px solid var(--color-line); border-radius: 12px; background: var(--color-canvas); }

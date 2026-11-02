@@ -7,12 +7,12 @@ import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect } from '@playwright/test';
-import { documentBoxFieldKey, documentRevisionInputSchema, documentSchema, withDocumentDefaults as documentFlagDefaults } from '../../packages/contracts/dist/index.js';
+import { documentBoxFieldKey, documentRevisionInputSchema, documentSchema, withDocumentInvoiceDefaults as documentInvoiceDefaults } from '../../packages/contracts/dist/index.js';
 import { chooseOption, readOptions } from '../shared/ui-controls.mjs';
 import { closeGridDetails, grid, gridRowCount, findGridRow } from '../shared/grid.mjs';
 import { editGridCell, setColumnVisible, visibleColumnKeys } from './grid-helpers.mjs';
 
-const withDocumentDefaults = (fields = {}) => documentFlagDefaults({ orderNumber: null, reference: null, tradeTerms: null, currency: 'USD', ...fields });
+const withDocumentDefaults = (fields = {}, members = []) => documentInvoiceDefaults({ orderNumber: null, reference: null, tradeTerms: null, currency: 'USD', ...fields }, members);
 
 // All requests are handled by local fixtures. Revision responses update this
 // process's memory only; no real account, database, parser, or service is used.
@@ -57,7 +57,7 @@ function fixture({ unicodeIdentity = false } = {}) {
         data: { purpose: 'invoice', weekStartDate: week, title, generationRulesVersion: 'v2', productSourceFacts: structuredClone(productSourceFacts), members: structuredClone(members), profileReferences: structuredClone(references),
           templateReference: { templateId: template.id, version: 1, sha256: template.sha256, fileId: template.fileId },
           fields: withDocumentDefaults({ service: 'TECH SERVICE', customsMode: '9810', clearanceMode: '一般贸易清关', taxMode: '包税', deliveryStation: '交货仓库', currency: 'USD',
-            ...address, addressConfirmed: 'true', addressConfirmationReason: 'Fixture address explicitly checked', addressSelectionMode: 'manual', addressAdoptionVersion: 'explicit/v1', addressSourceLabel: 'Technical source' }) } } });
+            ...address, addressConfirmed: 'true', addressConfirmationReason: 'Fixture address explicitly checked', addressSelectionMode: 'manual', addressAdoptionVersion: 'explicit/v1', addressSourceLabel: 'Technical source' }, members) } } });
   };
   const complete = makeRecord('Complete details fixture'), incomplete = makeRecord('Missing details fixture'), unconfirmed = makeRecord('Unconfirmed address fixture'), conflicted = makeRecord('Conflicting address fixture');
   incomplete.currentRevision.data.fields.service = ''; incomplete.currentRevision.data.fields.city = ''; incomplete.currentRevision.data.fields.addressConfirmed = 'false';
@@ -204,7 +204,7 @@ try {
     if (await product.getAttribute('open') === null) await product.locator(':scope > summary').click();
     const material = product.getByLabel('材质', { exact: true }); await expect(material).toBeEnabled(); await material.fill('HTTP fixture material');
     const price = product.getByLabel(identity.msku + ' 自动申报单价', { exact: true });
-    await expect(price).toContainText('固定申报单价（每件）'); await expect(price).toContainText('2.00 USD');
+    await expect(price).toContainText('固定申报单价（每件）'); await expect(price).toContainText('2.30 USD');
     await expect(price).toContainText('无需补充商品售价'); await expect(price.getByRole('textbox')).toHaveCount(0);
     await expect(wizard().getByLabel(/人工补充售价|售价补充依据/)).toHaveCount(0);
     const firstBox = data.members[0].boxSource[0]; await (await boxField('A1', '长（CM）')).fill('42.25');
@@ -213,16 +213,18 @@ try {
     assert.equal(plainHttp.accepted[0].fields[documentBoxFieldKey(firstBox.boxId, 'length')], '42.25');
     assert.equal(plainHttp.accepted[0].manualSalesPrices, undefined);
     await expect(material).toHaveValue('HTTP fixture material'); await expect(await boxField('A1', '长（CM）')).toHaveValue('42.25');
-    await expect(price).toContainText('2.00 USD');
+    await expect(price).toContainText('2.30 USD');
     assert.equal(JSON.stringify(data.members), plainHttp.sourceSnapshot); noGeneration(plainHttp); await plainContext.close(); note();
   }
 
   step = 'unchanged-next-enters-generation-without-saving-validating-or-exporting';
-  const state = fixture(); let context = await setup(state); await open(state.complete);
+  const state = fixture(); assert.equal(state.complete.currentRevision.data.fields.recipientName, address.addressCode);
+  let context = await setup(state); await open(state.complete);
   await expect(completion().getByRole('button')).toHaveCount(4); await expect(completion()).not.toContainText('正在读取商品');
   await wizard().locator(':scope > .import-dialog-body').evaluate((node) => { node.scrollTop = 0; }); await modalFrame(); await screenshot('document-details-overview-390.png');
   await expect(save()).toBeDisabled(); await expect(next()).toHaveText('下一步'); await next().click(); await currentStage('校验与生成');
-  assert.equal(state.attempts.length, 0); noGeneration(state); await footer().getByRole('button', { name: '上一步', exact: true }).click(); await currentStage('单票资料'); note();
+  assert.equal(state.attempts.length, 0); noGeneration(state); assert.equal(JSON.stringify(state.complete.currentRevision.data.members), state.sourceSnapshot);
+  await footer().getByRole('button', { name: '上一步', exact: true }).click(); await currentStage('单票资料'); note();
 
   step = 'dirty-navigation-cannot-skip-save-and-source-navigation-preserves-input';
   await wizard().getByLabel('草稿名称', { exact: true }).fill('UNSAVED-NAV-GUARD');
@@ -342,13 +344,17 @@ try {
   step = 'confirmed-address-collapses-and-editing-invalidates-confirmation-without-collapsing';
   const editingAddress = fixture(); context = await setup(editingAddress); await open(editingAddress.complete);
   await expect(addressStatus()).toHaveText('已确认'); await expect(addressEditor()).not.toHaveAttribute('open', ''); await expect(addressSection().getByLabel('城市', { exact: true })).not.toBeVisible();
-  await expect(addressSection().getByLabel('本票最终地址', { exact: true })).toContainText('Technical Receiver');
+  const adoptedAddress = editingAddress.complete.currentRevision.data.fields;
+  assert.equal(adoptedAddress.recipientName, adoptedAddress.addressCode);
+  await expect(addressSection().getByLabel('本票最终地址', { exact: true })).toContainText(adoptedAddress.recipientName);
   await addressEditor().locator(':scope > summary').click(); await addressSection().getByLabel('城市', { exact: true }).fill('Edited Technical City');
   await expect(addressEditor()).toHaveAttribute('open', ''); await expect(addressStatus()).toHaveText('待核对确认');
   await expect(addressSection().getByLabel('已核对并确认本票采用的完整收件地址', { exact: true })).not.toBeChecked(); await expect(addressSection().getByLabel('地址核对 / 冲突处理原因', { exact: true })).toHaveValue('');
   await addressSection().getByLabel('地址核对 / 冲突处理原因', { exact: true }).fill('Checked the edited technical address');
   await addressSection().getByLabel('已核对并确认本票采用的完整收件地址', { exact: true }).check(); await expect(addressEditor()).toHaveAttribute('open', '');
   await save().click(); await expect(save()).toBeDisabled(); await expect(addressStatus()).toHaveText('已确认'); await expect(addressEditor()).not.toHaveAttribute('open', '');
+  assert.equal(JSON.stringify(editingAddress.complete.currentRevision.data.members), editingAddress.sourceSnapshot);
+  assert(editingAddress.complete.currentRevision.data.members.every((member) => member.sourceCandidates.addresses.every((candidate) => candidate.data.recipientName === address.recipientName)));
   await screenshot('document-details-address-summary-390.png'); await context.close(); note();
 
   step = 'missing-unconfirmed-and-conflicting-addresses-stay-expanded-until-resolved';

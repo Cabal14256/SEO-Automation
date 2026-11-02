@@ -21,7 +21,7 @@ beforeEach(() => { mocks.catalog.mockReset().mockResolvedValue(null); mocks.sour
 describe('saved invoice B3 adoption and validation', () => {
   it('uses archived FC rather than the demand input and records provenance without changing streets', async () => {
     const data = fixture(), before = structuredClone(data), next = await applyDocumentAddressCodeDefaults(data);
-    expect(next.fields).toMatchObject({ ...address, addressCode: 'TEST1', addressCodeStatus: 'resolved', addressCodeSource: 'lingxing_fc', addressCodeRuleVersion: 'lingxing-fc/v1' });
+    expect(next.fields).toMatchObject({ ...address, recipientName: 'TEST1', addressCode: 'TEST1', addressCodeStatus: 'resolved', addressCodeSource: 'lingxing_fc', addressCodeRuleVersion: 'lingxing-fc/v1' });
     expect(next.fields.addressCodeSourceDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(next.members).toEqual(data.members); expect(data).toEqual(before);
     expect(validateDocumentAddressCode(next, null)).toEqual([]);
@@ -30,7 +30,7 @@ describe('saved invoice B3 adoption and validation', () => {
   it('pins special mappings to a verified reference hash and exact source rows', async () => {
     const data = fixture(), reference = catalog(); mocks.catalog.mockResolvedValue(reference);
     const next = await applyDocumentAddressCodeDefaults(data);
-    expect(next.fields).toMatchObject({ ...address, addressCode: 'TEST1-12345', addressCodeSource: 'freight_reference', addressCodeReferenceSha256: reference.sha256, addressCodeReferenceRows: '3' });
+    expect(next.fields).toMatchObject({ ...address, recipientName: 'TEST1-12345', addressCode: 'TEST1-12345', addressCodeSource: 'freight_reference', addressCodeReferenceSha256: reference.sha256, addressCodeReferenceRows: '3' });
     expect(validateDocumentAddressCode(next, reference)).toEqual([]);
     expect(validateDocumentAddressCode(next, { ...reference, sha256: 'b'.repeat(64) })).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_ADDRESS_CODE_STALE' }));
     expect(validateDocumentAddressCode(next, null)).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_ADDRESS_CODE_STALE' }));
@@ -38,7 +38,7 @@ describe('saved invoice B3 adoption and validation', () => {
   it('does not export a guessed FC when a special reference address does not match', async () => {
     const data = fixture(); data.fields.postalCode = '99999'; mocks.catalog.mockResolvedValue(catalog());
     const next = await applyDocumentAddressCodeDefaults(data);
-    expect(next.fields).toMatchObject({ addressCode: '', addressCodeStatus: 'needs_review', addressConfirmed: 'false', postalCode: '99999' });
+    expect(next.fields).toMatchObject({ addressCode: '', recipientName: address.recipientName, addressCodeStatus: 'needs_review', addressConfirmed: 'false', postalCode: '99999' });
     expect(validateDocumentAddressCode(next, catalog())).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_ADDRESS_CODE_UNRESOLVED' }));
   });
   it('requires a saved reference adoption even when its code equals the old FC value', async () => {
@@ -59,7 +59,7 @@ describe('saved invoice B3 adoption and validation', () => {
     expect(next.fields).toMatchObject({ addressCode: 'CARRIER-CODE', addressCodeStatus: 'needs_review', addressConfirmed: 'false' });
     next.fields.addressConfirmed = 'true';
     const confirmed = await applyDocumentAddressCodeDefaults(next);
-    expect(confirmed.fields).toMatchObject({ addressCode: 'CARRIER-CODE', addressCodeStatus: 'resolved', addressCodeSource: 'manual', addressConfirmed: 'true' });
+    expect(confirmed.fields).toMatchObject({ addressCode: 'CARRIER-CODE', recipientName: 'CARRIER-CODE', addressCodeStatus: 'resolved', addressCodeSource: 'manual', addressConfirmed: 'true' });
     expect(validateDocumentAddressCode(confirmed, null)).toEqual([]);
   });
   it('replaces client-supplied automatic provenance with the server resolution', async () => {
