@@ -70,6 +70,22 @@ export function normalizeShipment(input: NormalizeShipmentInput): ShipmentData {
   const items = rows(detail.itemList).map((row) => product(row, 'quantity', false));
   if (!items.length) add('EMPTY_PRODUCTS', '货件详情没有商品明细。');
   const listItems = rows(input.listing.item_list);
+  // Fill only an absent box SKU, using a unique detail identity corroborated by
+  // the listing. Never mutate the archived payload or overwrite a supplied SKU.
+  const pair = (row: Record<string, unknown>) => JSON.stringify([text(row.msku), text(row.fnsku)]);
+  const detailRows = rows(detail.itemList);
+  const packingItems = rows(matchingGroups[0]!.shipmentPackingList).flatMap((box) => rows(box.productList));
+  const boxProduct = (row: Record<string, unknown>) => {
+    if (text(row.sku) || !text(row.msku) || !text(row.fnsku)) return row;
+    const key = pair(row);
+    const candidates = detailRows.filter((item) => pair(item) === key);
+    const listingCandidates = listItems.filter((item) => pair(item) === key);
+    if (candidates.length !== 1 || listingCandidates.length !== 1) return row;
+    const sku = text(candidates[0]!.sku);
+    if (!sku || text(listingCandidates[0]!.sku) !== sku) return row;
+    if (packingItems.some((item) => pair(item) === key && text(item.sku) !== null && text(item.sku) !== sku)) return row;
+    return { ...row, sku };
+  };
   const listByIdentity = new Map<string, Record<string, unknown>>();
   for (const row of listItems) {
     const key = identity({ msku: text(row.msku) ?? '', fnsku: text(row.fnsku) ?? '', sku: text(row.sku) ?? '' });
@@ -114,7 +130,7 @@ export function normalizeShipment(input: NormalizeShipmentInput): ShipmentData {
     if (localBoxId && localSeen.has(localBoxId)) add('BOX_ORDER_REQUIRED', '货件内箱序重复，请人工确认顺序。');
     if (localBoxId) localSeen.add(localBoxId);
     if (text(row.box_name) && text(row.boxName) && text(row.box_name) !== text(row.boxName)) add('BOX_NAME_CONFLICT', 'box_name 与 boxName 不一致，原值保存在快照。');
-    const boxItems = rows(row.productList).map((entry) => product(entry, 'quantityInBox', false));
+    const boxItems = rows(row.productList).map((entry) => product(boxProduct(entry), 'quantityInBox', false));
     if (!boxItems.length) add('EMPTY_BOX', '箱子没有商品明细。');
     const duplicate = new Set<string>();
     for (const item of boxItems) { const key = identity(item); if (duplicate.has(key)) add('DUPLICATE_BOX_PRODUCT', '同箱完整商品身份重复，未静默合并。'); duplicate.add(key); }

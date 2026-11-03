@@ -15,6 +15,49 @@ function fixture() {
   };
 }
 describe('shipment normalization', () => {
+  it('fills absent box SKUs from unique, corroborated detail identities without changing the raw response', () => {
+    const input = fixture();
+    for (const box of input.packing.data.shipmentList[1]!.shipmentPackingList) for (const item of box.productList) item.sku = '';
+    const before = structuredClone(input);
+    const data = normalizeShipment(input);
+    expect(data.boxes.flatMap((box) => box.items).map((item) => item.sku)).toEqual(['SKU', 'SKU', 'SKU']);
+    expect(data.issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(input).toEqual(before);
+  });
+  it.each(['duplicate-detail', 'duplicate-list', 'conflicting-detail', 'conflicting-list', 'conflicting-box', 'missing-msku', 'missing-fnsku', 'missing-detail-sku', 'missing-list-product'] as const)('keeps missing box SKUs blocked for %s', (scenario) => {
+    const input = fixture();
+    const details = input.details.data.shipmentList[0]!.itemList;
+    const listing = input.listing.item_list;
+    const boxes = input.packing.data.shipmentList[1]!.shipmentPackingList;
+    const item = boxes[0]!.productList[0]!; item.sku = '';
+    if (scenario === 'duplicate-detail') details.push({ ...details[0]! });
+    if (scenario === 'duplicate-list') listing.push({ ...listing[0]! });
+    if (scenario === 'conflicting-detail') details.push({ ...details[0]!, sku: 'OTHER' });
+    if (scenario === 'conflicting-list') listing[0]!.sku = 'OTHER';
+    if (scenario === 'conflicting-box') boxes[1]!.productList[0]!.sku = 'OTHER';
+    if (scenario === 'missing-msku') item.msku = '';
+    if (scenario === 'missing-fnsku') item.fnsku = '';
+    if (scenario === 'missing-detail-sku') details[0]!.sku = '';
+    if (scenario === 'missing-list-product') listing.shift();
+    const data = normalizeShipment(input);
+    expect(data.boxes[0]!.items[0]!.sku).toBe('');
+    expect(data.issues.some((issue) => issue.code === 'MISSING_PRODUCT_IDENTITY')).toBe(true);
+  });
+  it('preserves supplied box SKUs and reports identity conflicts', () => {
+    const input = fixture(); input.packing.data.shipmentList[1]!.shipmentPackingList[0]!.productList[0]!.sku = 'OTHER';
+    const data = normalizeShipment(input);
+    expect(data.boxes[0]!.items[0]!.sku).toBe('OTHER');
+    expect(data.issues.some((issue) => issue.code === 'UNKNOWN_BOX_PRODUCT')).toBe(true);
+  });
+  it.each([null, undefined, '   '])('fills a missing SKU (%s) but still blocks a real quantity mismatch', (sku) => {
+    const input = fixture();
+    const item: Record<string, unknown> = input.packing.data.shipmentList[1]!.shipmentPackingList[0]!.productList[0]!;
+    item.sku = sku; item.quantityInBox = 1;
+    const data = normalizeShipment(input);
+    expect(data.boxes[0]!.items[0]!.sku).toBe('SKU');
+    expect(data.issues.some((issue) => issue.code === 'MISSING_PRODUCT_IDENTITY')).toBe(false);
+    expect(data.issues.some((issue) => issue.code === 'PACKED_QUANTITY_CONFLICT')).toBe(true);
+  });
   it.each([undefined, 'WORKING', 'SHIPPED', 'IN_TRANSIT', 'DELIVERED', 'CHECKED_IN', 'RECEIVING', 'CANCELLED', 'ERROR', 'UNKNOWN'])('does not warn about receiving differences before completion (%s)', (status) => {
     const input = fixture(); input.listing.shipment_status = status;
     const before = structuredClone(input), data = normalizeShipment(input);
