@@ -1,6 +1,7 @@
 import { DOCUMENT_ADDRESS_FIELDS, DOCUMENT_BLANK_OUTPUT_FIELDS, applyDocumentAddress, documentCountryCode, documentRevisionInputSchema, documentTicketCurrency, hasCompleteDocumentAddress, hasDocumentAddressConflict, resolveDocumentLingxingAddress, withDocumentInvoiceDefaults,
   type DocumentProfile, type DocumentRevisionData, type DocumentTemplate, type DocumentValidation } from '@scm/contracts';
 import { documentDigest, documentUsesProfileReference } from './domain.js';
+import { resolveUnchangedProductProfile } from './product-profile.js';
 import { DOCUMENT_HEADER_FIELDS } from './workbook.js';
 import type { ActiveServiceMapping } from '../service-mappings/repository.js';
 import { normalizeServiceMappingCountry } from '../service-mappings/normalization.js';
@@ -63,6 +64,8 @@ export function planAutomaticPreparation(data: DocumentRevisionData, profiles: r
   const currentReference = (reference: DocumentRevisionData['profileReferences'][number]) => {
     const profile = profiles.find((entry) => entry.id === reference.profileId && entry.category === reference.category);
     if (!profile || profile.status !== 'active' || profile.version !== reference.version || documentDigest(profile.data) !== documentDigest(reference.data)) {
+      const unchanged = resolveUnchangedProductProfile(reference, profiles);
+      if (unchanged) { Object.assign(reference, referenceOf(unchanged)); return unchanged; }
       add('DOCUMENT_PROFILE_STALE', `已采用的${categoryNames[reference.category]}资料版本已变化或不可用，请明确采用当前版本后重试。`, reference.category); return undefined;
     }
     return profile;

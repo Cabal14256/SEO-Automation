@@ -258,6 +258,46 @@ describe('saved preview actor/version/scope and replay boundaries', () => {
     expect(saved.productSourceFacts).toEqual([{ ...identity, salesPrice: '20', currency: 'USD', unitPrice: '4.00', cartonQuantity: '480', sourceFileId: source.id, sourceSha256: source.sha256, fetchedAt }]);
     expect(data).toEqual(original);
   });
+  it.each(['unreferenced', 'current', 'metadata-only stale'])('reuses an unchanged %s product profile while archiving the latest source facts', async (state) => {
+    const id = randomUUID(), preview = makePreview(id), data = revision(), profileId = randomUUID();
+    const declaration = { ...identity, englishName: 'Reviewed product', hsCode: '700719', salesPrice: '50', unitPrice: '10.00', currency: 'USD', unitPriceConfirmed: true };
+    const product = { id: profileId, category: 'product', key: 'reviewed-product', version: 4, status: 'active', data: { ...declaration, _lingxingSources: [{ sourceFileId: randomUUID() }] } };
+    data.profileReferences = [{ category: 'channel', profileId: randomUUID(), version: 1, data: {} }];
+    if (state !== 'unreferenced') data.profileReferences.push({ category: 'product', profileId, version: state === 'current' ? product.version : 2,
+      data: state === 'current' ? structuredClone(product.data) : { ...declaration, _lingxingSources: [{ sourceFileId: randomUUID() }] } });
+    data.templateReference = { templateId: randomUUID(), fileId: randomUUID(), version: 1, sha256: 'c'.repeat(64) };
+    preview.products = [suggestion({ englishName: 'Remote product', hsCode: '700719', salesPrice: '20', unitPrice: '4.00', currency: 'USD' })];
+    const original = structuredClone(data), source = { id: preview.sourceFileId, sha256: 'a'.repeat(64) }, fetchedAt = '2026-11-03T09:00:00.000Z';
+    const archive = { actorId: 'admin', documentId: id, operationId: preview.operationId, revisionDigest: documentDigest(data), fetchedAt,
+      suggestions: { products: preview.products, fields: preview.fields, parties: preview.parties, issues: preview.issues } };
+    mocks.locked.mockResolvedValue({ record: { version: 1, status: 'draft' }, revision: { data } });
+    mocks.select.mockReturnValueOnce(query([])).mockReturnValueOnce(query([])).mockReturnValueOnce(query([{ actorId: 'admin', action: 'document.lingxing.preview', result: { preview } }]))
+      .mockReturnValueOnce(query([source])).mockReturnValueOnce(query([product]));
+    mocks.checked.mockResolvedValue(Buffer.from(JSON.stringify(archive))); mocks.append.mockResolvedValue({});
+    const result = await applyDocumentLingxing(id, 'admin', { operationId: randomUUID(), expectedVersion: 1, previewOperationId: preview.operationId, reason: 'Refresh unchanged product', confirmPrices: false });
+    expect(result.appliedProducts).toBe(1); expect(mocks.write).not.toHaveBeenCalled(); expect(mocks.checked).toHaveBeenCalledWith(source);
+    const saved = mocks.append.mock.calls[0]![3] as DocumentRevisionData;
+    expect(saved.profileReferences.find((reference) => reference.profileId === profileId)).toEqual({ category: 'product', profileId, version: 4, data: product.data });
+    expect(saved.productSourceFacts).toEqual([{ ...identity, salesPrice: '20', unitPrice: '4.00', currency: 'USD', cartonQuantity: null, sourceFileId: source.id, sourceSha256: source.sha256, fetchedAt }]);
+    expect(data).toEqual(original);
+  });
+  it.each(['changed declaration', 'retired profile', 'ambiguous identity'])('keeps a stale %s blocked before applying a new Lingxing preview', async (state) => {
+    const id = randomUUID(), preview = makePreview(id), data = revision(), profileId = randomUUID();
+    const declaration = { ...identity, englishName: 'Reviewed product', hsCode: '700719', unitPriceConfirmed: false };
+    const product = { id: profileId, category: 'product', key: 'reviewed-product', version: 4, status: state === 'retired profile' ? 'retired' : 'active',
+      data: { ...declaration, ...(state === 'changed declaration' ? { hsCode: '392690' } : {}), _lingxingSources: [{ sourceFileId: randomUUID() }] } };
+    data.profileReferences = [{ category: 'product', profileId, version: 2, data: { ...declaration } }];
+    const source = { id: preview.sourceFileId, sha256: 'a'.repeat(64) }, fetchedAt = '2026-11-03T09:00:00.000Z';
+    const archive = { actorId: 'admin', documentId: id, operationId: preview.operationId, revisionDigest: documentDigest(data), fetchedAt,
+      suggestions: { products: preview.products, fields: preview.fields, parties: preview.parties, issues: preview.issues } };
+    const profiles = [product, ...(state === 'ambiguous identity' ? [{ ...product, id: randomUUID(), key: 'duplicate-product' }] : [])];
+    mocks.locked.mockResolvedValue({ record: { version: 1, status: 'draft' }, revision: { data } });
+    mocks.select.mockReturnValueOnce(query([])).mockReturnValueOnce(query([])).mockReturnValueOnce(query([{ actorId: 'admin', action: 'document.lingxing.preview', result: { preview } }]))
+      .mockReturnValueOnce(query([source])).mockReturnValueOnce(query(profiles));
+    mocks.checked.mockResolvedValue(Buffer.from(JSON.stringify(archive)));
+    await expect(applyDocumentLingxing(id, 'admin', { operationId: randomUUID(), expectedVersion: 1, previewOperationId: preview.operationId, reason: 'Refresh source', confirmPrices: false })).rejects.toThrow('本票商品档案已有更新');
+    expect(mocks.write).not.toHaveBeenCalled(); expect(mocks.append).not.toHaveBeenCalled();
+  });
   it.each(['retired', 'updated'])('applies only the representative declaration while preserving a hidden %s reference and all source facts', async (state) => {
     const id = randomUUID(), preview = makePreview(id), data = revision(), hidden = { ...identity, msku: 'M2', fnsku: 'F2', sku: 'S2' };
     const items = [{ ...identity, quantity: '1' }, { ...hidden, quantity: '2' }];

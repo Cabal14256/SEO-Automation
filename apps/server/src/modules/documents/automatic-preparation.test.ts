@@ -237,6 +237,38 @@ describe('automatic invoice preparation', () => {
     expect(plan.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining(['DOCUMENT_PROFILE_STALE', 'DOCUMENT_TEMPLATE_STALE']));
     expect(plan.profileReferences.find((entry) => entry.profileId === chosen.id)?.version).toBe(1); expect(plan.fields.service).toBe('EXPRESS'); expect(plan.templateReference?.version).toBe(1);
   });
+  it('refreshes a uniquely matched product after a source-only version change without mutating the old revision', () => {
+    const data = fixture(), profiles = catalog(), chosen = profiles.find((entry) => entry.category === 'product')!;
+    chosen.data._lingxingSources = [{ documentId: 'first', fetchedAt: now }];
+    data.profileReferences = [reference(chosen)];
+    const prefix = `product.${documentProductOverrideKey(101, chosen.data as { msku: string; fnsku: string; sku: string })}.`;
+    data.fields[prefix + 'material'] = '本票材质';
+    chosen.version = 11; chosen.data._lingxingSources = [{ documentId: 'later', fetchedAt: now }];
+    const before = structuredClone({ data, profiles });
+    const plan = planAutomaticPreparation(data, profiles, [template()]);
+    expect(errors(plan)).toEqual([]);
+    expect(plan.profileReferences.find((entry) => entry.profileId === chosen.id)).toEqual(reference(chosen));
+    expect(plan.fields[prefix + 'material']).toBe('本票材质');
+    expect({ data, profiles }).toEqual(before);
+  });
+  it.each(['hsCode', 'material', 'englishName', 'brand', 'imageBase64', 'unknownBusinessField'])('requires confirmation when a stale product changes %s', (field) => {
+    const data = fixture(), profiles = catalog(), chosen = profiles.find((entry) => entry.category === 'product')!;
+    data.profileReferences = [reference(chosen)]; chosen.version++; chosen.data[field] = 'changed';
+    const plan = planAutomaticPreparation(data, profiles, [template()]);
+    expect(plan.issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_PROFILE_STALE', profileCategory: 'product' }));
+    expect(plan.profileReferences.find((entry) => entry.profileId === chosen.id)?.version).toBe(1);
+  });
+  it.each(['retired', 'duplicate', 'replaced', 'identity'])('does not refresh an unchanged stale product when it is %s', (kind) => {
+    const data = fixture(), profiles = catalog(), chosen = profiles.find((entry) => entry.category === 'product')!;
+    data.profileReferences = [reference(chosen)]; chosen.version++;
+    if (kind === 'retired') chosen.status = 'retired';
+    if (kind === 'duplicate') profiles.push({ ...structuredClone(chosen), id: randomUUID() });
+    if (kind === 'replaced') chosen.id = randomUUID();
+    if (kind === 'identity') chosen.data.fnsku = 'OTHER';
+    const plan = planAutomaticPreparation(data, profiles, [template()]);
+    expect(plan.issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_PROFILE_STALE', profileCategory: 'product' }));
+    expect(plan.profileReferences[0]!.version).toBe(1);
+  });
   it('does not gate a merged FBA on the stale profile of a product outside its global representative', () => {
     const data = fixture(true), member = data.members[0]!, [representative, hidden] = member.shipment.data.items;
     const first = member.boxSource![0]!, second = { ...structuredClone(first), boxId: randomUUID(), order: 2, code: 'A2', items: [{ ...representative! }] };

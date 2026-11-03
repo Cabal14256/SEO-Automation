@@ -10,6 +10,7 @@ import { BatchError, requireBatchActor, type BatchTx } from '../batches/service.
 import { checkedFileBytes } from '../imports/service.js';
 import { createLingxingReadClient, LingxingReadError, type LingxingReadAttempt, type LingxingReadClient, type LingxingReadResult } from '../lingxing/read-client.js';
 import { documentDigest, documentUsesProfileReference } from './domain.js';
+import { resolveUnchangedProductProfile, sameProductProfileData } from './product-profile.js';
 import { downloadLingxingImage } from './lingxing-image.js';
 import { LINGXING_CUSTOMS_PRODUCT_FIELDS, mapLingxingInvoiceProduct, mapLingxingStockSubjects, matchLingxingFbaProduct, matchLingxingListingProduct } from './lingxing-mapping.js';
 import { documentExports, documentProfiles, documentTemplates, documentTemplateVersions } from './schema.js';
@@ -283,7 +284,10 @@ export function documentLingxingSourceFacts(preview: DocumentLingxingPreview, pr
   });
 }
 async function attachDerivedProfile(tx: BatchTx, actorId: string, input: ApplyInput, data: DocumentRevisionData, category: 'product', key: string, values: Record<string, unknown>, existing?: typeof documentProfiles.$inferSelect) {
-  const profile = await writeDocumentProfileInTx(tx, actorId, { operationId: input.operationId, category, key, data: values, reason: input.reason, ...(existing ? { expectedVersion: existing.version } : {}) });
+  // Each verified preview and its per-document source facts retain the latest
+  // provenance. Reobserving the same product must not version the shared catalog.
+  const profile = existing && sameProductProfileData(existing.data, values) ? existing
+    : await writeDocumentProfileInTx(tx, actorId, { operationId: input.operationId, category, key, data: values, reason: input.reason, ...(existing ? { expectedVersion: existing.version } : {}) });
   const next = { category, profileId: profile.id, version: profile.version, data: profile.data };
   const index = data.profileReferences.findIndex((reference) => reference.profileId === profile.id);
   if (index < 0) data.profileReferences.push(next); else data.profileReferences[index] = next;
@@ -314,7 +318,8 @@ export async function applyDocumentLingxing(id: string, actorId: string, input: 
       const profiles = productProfiles.filter((profile) => profile.status === 'active'), matches = profiles.filter((profile) => sameLingxingProduct(suggestion, profile.data));
       if (references.length > 1 || !references.length && matches.length > 1) { issues.push({ code: 'DOCUMENT_PRODUCT_AMBIGUOUS', message: `商品 ${suggestion.sku} 有多份相同完整身份档案，请人工选择。` }); continue; }
       const reference = references[0], existing = reference ? profiles.find((profile) => profile.id === reference.profileId) : matches[0];
-      if (reference && (!existing || existing.version !== reference.version || documentDigest(existing.data) !== documentDigest(reference.data))) throw new BatchError('VERSION_CONFLICT', 409, '本票商品档案已有更新，请重新选择后查询领星。');
+      if (reference && (!existing || existing.version !== reference.version || documentDigest(existing.data) !== documentDigest(reference.data))
+        && !resolveUnchangedProductProfile(reference, productProfiles)) throw new BatchError('VERSION_CONFLICT', 409, '本票商品档案已有更新，请重新选择后查询领星。');
       const key = existing?.key ?? `lingxing-product:${documentProductOverrideKey(suggestion.sid, suggestion)}`;
       if (!existing && productProfiles.some((profile) => profile.key === key)) { issues.push({ code: 'DOCUMENT_PROFILE_RETIRED', message: `商品 ${suggestion.sku} 的领星派生档案已停用，请人工处理。` }); continue; }
       const values = mergeLingxingProduct(existing?.data ?? {}, suggestion, true);

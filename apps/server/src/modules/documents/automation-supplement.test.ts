@@ -49,6 +49,40 @@ describe('central automatic document requirements', () => {
     expect(requirements.issues.filter((issue) => issue.severity === 'error')).toEqual([]);
     expect(value).toEqual(before);
   });
+  it('uses a uniquely matched product catalog for missing declarations before its automatic adoption is saved', () => {
+    const value = ticket(), currentTemplate = template(); completeDeclarations(value, currentTemplate);
+    const key = `product.${documentProductOverrideKey(101, product)}.`, declaration: Record<string, unknown> = { sid: 101, ...product };
+    for (const [name, entry] of Object.entries(fields(value))) if (name.startsWith(key)) { declaration[name.slice(key.length)] = entry; delete fields(value)[name]; }
+    const current = profile('product', declaration), before = structuredClone(value);
+    const requirements = buildDocumentAutomationRequirements([value], [current], [currentTemplate]);
+    expect(requirements.descriptors).toEqual([]);
+    expect(requirements.issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(value).toEqual(before);
+    delete current.data.hsCode;
+    expect(descriptors([value], [current], [currentTemplate]).map((entry) => entry.targets[0]!.fieldKey)).toEqual([key + 'hsCode']);
+  });
+  it('omits redundant product selection after a source-only catalog update while retaining genuinely missing fields', () => {
+    const value = ticket(), currentTemplate = template(); completeDeclarations(value, currentTemplate);
+    const current = profile('product', { sid: 101, ...product, _lingxingSources: [{ documentId: 'earlier' }] });
+    data(value).profileReferences = [{ category: 'product', profileId: current.id, version: 1, data: structuredClone(current.data) }];
+    current.version = 11; current.data._lingxingSources = [{ documentId: 'later' }];
+    const before = structuredClone(value), requirements = buildDocumentAutomationRequirements([value], [current], [currentTemplate]);
+    expect(requirements.descriptors).toEqual([]);
+    expect(requirements.issues.some((issue) => issue.code === 'DOCUMENT_PROFILE_STALE')).toBe(false);
+    expect(value).toEqual(before);
+    const key = `product.${documentProductOverrideKey(101, product)}.`;
+    delete fields(value)[key + 'hsCode'];
+    expect(descriptors([value], [current], [currentTemplate]).map((entry) => entry.targets[0]!.fieldKey)).toEqual([key + 'hsCode']);
+  });
+  it('still requires selecting a stale product with a changed declaration even if there is only one candidate', () => {
+    const value = ticket(), current = profile('product', { sid: 101, ...product, hsCode: 'OLD' });
+    data(value).profileReferences = [{ category: 'product', profileId: current.id, version: 1, data: structuredClone(current.data) }];
+    current.version++; current.data.hsCode = 'NEW';
+    const requirements = buildDocumentAutomationRequirements([value], [current], []);
+    const choice = requirements.descriptors.find((entry) => entry.targets[0]!.fieldKey.startsWith('@profile.product.'));
+    expect(choice?.options).toEqual([{ value: `${current.id}:2`, label: `${current.key} · v2` }]);
+    expect(requirements.issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_PROFILE_STALE', profileCategory: 'product' }));
+  });
   it('offers free service text when no channel was explicitly referenced and keeps selected profile service limits explicit', () => {
     const value = ticket(), channels = [profile('channel', { businessChannel: 'HY', allowedServices: ['旧服务'] })];
     fields(value).service = '';

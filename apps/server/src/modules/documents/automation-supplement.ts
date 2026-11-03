@@ -52,7 +52,9 @@ export function buildDocumentAutomationRequirements(tickets: readonly DocumentAu
       const choices = selectable ?? (key in DOCUMENT_FIELD_OPTIONS ? [...DOCUMENT_FIELD_OPTIONS[key as keyof typeof DOCUMENT_FIELD_OPTIONS]] : undefined);
       add({ group: commonScope, fieldKey: key, label: labels[key] ?? '单票资料', kind: choices?.length ? 'select' : 'text', value: data.fields[key] ?? '', required, scope: 'common', scopeLabel: commonLabel, ...(choices?.length ? { options: options(choices) } : {}) });
     };
-    const observed: DocumentValidation['issues'] = [...item.issues ?? [], ...planAutomaticPreparation(data, profiles, templates).issues, ...validateDocumentData(data), ...validateWorkbookData(data)];
+    const preparation = planAutomaticPreparation(data, profiles, templates);
+    const productData = { ...data, profileReferences: preparation.profileReferences };
+    const observed: DocumentValidation['issues'] = [...item.issues ?? [], ...preparation.issues, ...validateDocumentData(productData), ...validateWorkbookData(productData)];
     const seen = new Set<string>();
     for (const issue of observed) { const key = documentDigest(issue); if (seen.has(key)) continue; seen.add(key); issues.push({ ...issue, itemId: item.id, documentId: document.id }); }
     if (item.status === 'completed' || ['cancelled', 'superseded', 'approved', 'pending_review'].includes(document.status)) continue;
@@ -101,7 +103,7 @@ export function buildDocumentAutomationRequirements(tickets: readonly DocumentAu
       for (const { representative: product } of groups) {
         if (!product) continue;
         const identity = { sid: member.demand.snapshot.sid, msku: product.msku, fnsku: product.fnsku, sku: product.sku }, key = documentProductOverrideKey(identity.sid, product); if (identities.has(key)) continue; identities.add(key);
-        const saved = currentReference(data, profiles, 'product', identity), candidates = profiles.filter((profile) => profile.category === 'product' && profile.status === 'active' && identityMatches(profile.data, identity.sid, product));
+        const saved = currentReference(productData, profiles, 'product', identity), candidates = profiles.filter((profile) => profile.category === 'product' && profile.status === 'active' && identityMatches(profile.data, identity.sid, product));
         const productLabel = `${member.demand.snapshot.shop} · ${product.sku} · ${product.msku} / ${product.fnsku}`;
         if (candidates.length && (saved.refs.length > 1 || saved.refs.length === 1 && !saved.selected || !saved.refs.length && candidates.length > 1)) add({ group: key, fieldKey: `@profile.product.${key}`, label: '采用商品资料', kind: 'select', value: saved.selected ? profileValue(saved.selected) : '', required: true, scope: 'product', scopeLabel: productLabel, options: candidates.map((profile) => ({ value: profileValue(profile), label: `${profile.key} · v${profile.version}` })).sort((a, b) => a.value.localeCompare(b.value)) });
         const declaration = { ...saved.refs[0]?.data };
