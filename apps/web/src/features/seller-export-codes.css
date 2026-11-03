@@ -1,0 +1,10 @@
+.export-code-list { border-top: 1px solid var(--color-line); }
+.export-code-row { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(160px, 280px) auto; align-items: center; gap: 20px; padding: 18px 0; border-bottom: 1px solid var(--color-line); }
+.export-code-identity { min-width: 0; overflow-wrap: anywhere; }
+.export-code-identity strong, .export-code-identity small { display: block; }
+.export-code-row small { margin-top: 6px; color: var(--color-muted); overflow-wrap: anywhere; }
+.export-code-feedback { grid-column: 1 / -1; margin: 0; }
+@media (max-width: 600px) {
+  .export-code-row { grid-template-columns: minmax(0, 1fr) auto; gap: 14px; }
+  .export-code-identity { grid-column: 1 / -1; }
+}

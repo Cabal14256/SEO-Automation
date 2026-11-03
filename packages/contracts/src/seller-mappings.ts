@@ -1,5 +1,18 @@
 import { z } from 'zod';
 
+export const sellerExportCodeInputSchema = z.object({
+  operationId: z.uuid(), expectedVersion: z.number().int().nonnegative(),
+  code: z.string().trim().regex(/^\d{0,20}$/, '代号须为 1–20 位数字；留空则使用店铺名'),
+}).strict();
+export const sellerExportCodeSchema = z.object({
+  sid: z.number().int().positive(), name: z.string(), country: z.string(),
+  code: z.string(), version: z.number().int().nonnegative(),
+});
+export const sellerExportCodeListSchema = z.object({ items: z.array(sellerExportCodeSchema) });
+export type SellerExportCode = z.infer<typeof sellerExportCodeSchema>;
+export type SellerExportCodeInput = z.infer<typeof sellerExportCodeInputSchema>;
+export const sellerExportCodeResultSchema = z.object({ code: z.string(), version: z.number().int().positive() });
+
 export const sellerMappingStatusSchema = z.enum(['candidate', 'approved', 'disabled']);
 export const sellerCatalogModeSchema = z.enum(['lingxing', 'manual']);
 export const sellerCatalogSettingsSchema = z.object({ mode: sellerCatalogModeSchema, version: z.number().int().positive(), catalogVersion: z.number().int().nonnegative(), lastSyncedAt: z.iso.datetime().nullable(), lastError: z.object({ code: z.string(), message: z.string() }).nullable(), configured: z.boolean(), readOnly: z.literal(true) });

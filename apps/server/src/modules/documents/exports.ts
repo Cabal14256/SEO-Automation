@@ -14,6 +14,7 @@ import { documentDependencyValidityInTx, documentOperation, lockedDocument, seri
 import { documentExports, documents } from './schema.js';
 import { documentExportFileSha256 } from './export-file.js';
 import { documentInvoiceFileName } from './invoice-file-name.js';
+import { readSellerExportCodes } from '../seller-mappings/export-codes.js';
 
 export const DOCUMENT_EXPORT_QUEUE = 'document-invoice-export';
 export function serializeDocumentExport(row: typeof documentExports.$inferSelect, validity = { valid: row.status === 'completed', invalidReason: row.status === 'completed' ? null : '文件尚未成功发布。' } as { valid: boolean; invalidReason: string | null }, fileSha256: string | null = null): DocumentExport { return { id: row.id, status: row.status as DocumentExport['status'], reference: row.reference, fileId: row.fileId, fileSha256: documentExportFileSha256(row.reference, fileSha256), error: row.error, createdAt: row.createdAt.toISOString(), completedAt: row.completedAt?.toISOString() ?? null, ...validity }; }
@@ -68,7 +69,9 @@ export async function executeDocumentExport(id: string, options: { createWorkboo
     const createWorkbook = options.createWorkbook ?? (await import('./workbook.js')).createWorkbook;
     const bytes = await createWorkbook(prepared.data, prepared.templateBytes, id);
     const boxCount = new Set(prepared.data.members.flatMap((member) => documentBoxes(member, prepared.data.fields).map((box) => box.boxId))).size;
-    await publishReportFile({ bytes, originalName: documentInvoiceFileName(prepared.data, boxCount, generatedAt), mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', createdBy: row.createdBy }, async (file) => {
+    const sid = prepared.data.members[0]?.demand.snapshot.sid;
+    const codes = await readSellerExportCodes(sid ? [sid] : []);
+    await publishReportFile({ bytes, originalName: documentInvoiceFileName(prepared.data, boxCount, generatedAt, sid ? codes.get(sid) : undefined), mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', createdBy: row.createdBy }, async (file) => {
       await db.transaction(async (tx) => {
         const { record, revision } = await lockedDocument(tx, row.reference.documentId, row.createdBy);
         const [current] = await tx.select().from(documentExports).where(eq(documentExports.id, id)).for('update');

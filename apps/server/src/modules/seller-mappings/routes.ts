@@ -8,6 +8,8 @@ import { readConfig } from '../../config.js';
 import { isDatabaseUnavailable, logError } from '../../errors.js';
 import { createManualSeller, history, listSellerMappings, MappingError, reviseSellerAliases, reviseSellerMapping } from './service.js';
 import { CatalogError, getSellerCatalogSettings, setSellerCatalogMode, syncSellerCatalog } from './catalog.js';
+import { sellerExportCodeInputSchema } from '@scm/contracts';
+import { listSellerExportCodes, saveSellerExportCode } from './export-codes.js';
 
 type Variables = { actorUserId: string; role: string; traceId: string };
 export const sellerMappingRoutes = new Hono<{ Variables: Variables }>();
@@ -33,6 +35,13 @@ sellerMappingRoutes.get('/', async (c) => {
   return c.json(await listSellerMappings(parsed.data));
 });
 sellerMappingRoutes.get('/catalog-settings', async (c) => c.json(await getSellerCatalogSettings(c.get('actorUserId'))));
+sellerMappingRoutes.get('/export-codes', async (c) => c.json(await listSellerExportCodes(c.get('actorUserId'))));
+sellerMappingRoutes.post('/export-codes/:sid', async (c) => {
+  const sid = z.coerce.number().int().positive().max(2147483647).safeParse(c.req.param('sid'));
+  const input = sellerExportCodeInputSchema.safeParse(await c.req.json().catch(() => null));
+  if (!sid.success || !input.success) throw new MappingError('VALIDATION_ERROR', 422, '请填写最多 20 位数字代号；留空可恢复店铺名。');
+  return c.json(await saveSellerExportCode(sid.data, input.data, c.get('actorUserId')));
+});
 sellerMappingRoutes.post('/catalog-settings', async (c) => {
   const parsed = sellerCatalogModeInputSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: { code: 'VALIDATION_ERROR', message: '请核对店铺来源设置和版本。', details: parsed.error.flatten(), traceId: c.get('traceId') } }, 422);

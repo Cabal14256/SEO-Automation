@@ -130,6 +130,17 @@ export const sellerMappings = pgTable('seller_mapping', {
   check('seller_mapping_sid_check', sql`${table.sid} > 0`),
 ]);
 
+export const sellerExportCodes = pgTable('seller_export_code', {
+  sid: integer('sid').primaryKey().references(() => sellerMappings.sid),
+  code: text('code').notNull(),
+  version: integer('version').notNull().default(1),
+  updatedBy: text('updated_by').notNull().references(() => user.id),
+  updatedAt: at('updated_at').notNull().defaultNow(),
+}, (table) => [
+  check('seller_export_code_format_check', sql`${table.code} ~ '^[0-9]{0,20}$'`),
+  check('seller_export_code_version_check', sql`${table.version} > 0`),
+]);
+
 export const sellerAliases = pgTable('seller_alias', {
   normalizedAlias: text('normalized_alias').primaryKey(),
   alias: text('alias').notNull(),

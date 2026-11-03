@@ -80,7 +80,7 @@ describe('central automatic document requirements', () => {
     current.version++; current.data.hsCode = 'NEW';
     const requirements = buildDocumentAutomationRequirements([value], [current], []);
     const choice = requirements.descriptors.find((entry) => entry.targets[0]!.fieldKey.startsWith('@profile.product.'));
-    expect(choice?.options).toEqual([{ value: `${current.id}:2`, label: `${current.key} · v2` }]);
+    expect(choice?.options).toEqual([{ value: `${current.id}:2`, label: '商品 / S1 · 资料版本 v2' }]);
     expect(requirements.issues).toContainEqual(expect.objectContaining({ code: 'DOCUMENT_PROFILE_STALE', profileCategory: 'product' }));
   });
   it('offers free service text when no channel was explicitly referenced and keeps selected profile service limits explicit', () => {

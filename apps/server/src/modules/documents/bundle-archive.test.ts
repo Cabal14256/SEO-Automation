@@ -27,6 +27,14 @@ function invoiceData(country = 'US') {
 }
 
 describe('independent invoice Excel files in a ZIP archive', () => {
+  it('uses numeric shop codes for new files and preserves archived names', async () => {
+    const inputs = [
+      { ...await invoice('A', '10 Road', 2.3), invoiceData: invoiceData(), shopCode: '001' },
+      { ...await invoice('B', '10 Road', 2.3), invoiceData: invoiceData(), shopCode: '002', archivedFileName: '原归档发票.xlsx' },
+    ];
+    const archive = await createDocumentBundleArchive(inputs, new Date('2026-11-03T10:00:00Z'));
+    expect(Object.keys(unzipSync(archive.bytes))).toEqual(['11.3号001-US-海运-1件（ADDR-001）.xlsx', '原归档发票.xlsx']);
+  });
   it('names every invoice by business fields and actual boxes, retaining colliding invoices separately', async () => {
     const inputs = await Promise.all(['A', 'B', 'C'].map(async (id) => ({ ...await invoice(id, '10 Road', 2.3), invoiceData: invoiceData() })));
     const archive = await createDocumentBundleArchive(inputs, new Date('2026-10-30T16:01:00Z')), entries = unzipSync(archive.bytes);

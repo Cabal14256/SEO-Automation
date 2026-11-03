@@ -21,6 +21,9 @@ export function SettingsLayout({ user, children }: { user: User; children: React
           <Link to="/settings/document-profiles" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
             <Files size={18} aria-hidden="true" /><span>单据资料</span>
           </Link>
+          <Link to="/settings/seller-export-codes" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
+            <Store size={18} aria-hidden="true" /><span>店铺导出代号</span>
+          </Link>
           <Link to="/settings/service-mappings" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
             <ListChecks size={18} aria-hidden="true" /><span>发票服务映射</span>
           </Link>

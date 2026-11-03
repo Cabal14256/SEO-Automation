@@ -6,6 +6,7 @@ import { DashboardRoute, LoginRoute, NotFoundPage } from './pages';
 import { SellerMappingsRoute } from './features/seller-mappings';
 import { SettingsRoute } from './features/settings';
 import { ServiceMappingsRoute } from './features/service-mappings';
+import { SellerExportCodesRoute } from './features/seller-export-codes';
 import { DocumentProfilesRoute } from './features/document-profiles';
 import { ImportsRoute } from './features/imports';
 import { BatchesRoute } from './features/batches';
@@ -38,6 +39,7 @@ const loginRoute = createRoute({
 
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings', component: SettingsRoute });
 const serviceMappingsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings/service-mappings', component: ServiceMappingsRoute });
+const sellerExportCodesRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings/seller-export-codes', component: SellerExportCodesRoute });
 const documentProfilesRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings/document-profiles', component: DocumentProfilesRoute,
   validateSearch: (search: Record<string, unknown>): { documentId?: string } => ({ documentId: typeof search.documentId === 'string' && /^[0-9a-f-]{36}$/i.test(search.documentId) ? search.documentId : undefined }),
 });
@@ -88,7 +90,7 @@ const batchDetailRoute = createRoute({ getParentRoute: () => rootRoute, path: '/
 const batchReportsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/batch-reports', component: () => <Navigate to="/shipping" search={{ view: 'reports' }} replace /> });
 
 const router = createRouter({
-  routeTree: rootRoute.addChildren([dashboardRoute, loginRoute, settingsRoute, serviceMappingsRoute, documentProfilesRoute, documentAddressesRoute, sellerMappingsRoute, shippingRoute, financeRoute, importsRoute, newImportRoute, importDetailRoute, batchesRoute, newBatchRoute, batchDetailRoute, batchReportsRoute]),
+  routeTree: rootRoute.addChildren([dashboardRoute, loginRoute, settingsRoute, serviceMappingsRoute, sellerExportCodesRoute, documentProfilesRoute, documentAddressesRoute, sellerMappingsRoute, shippingRoute, financeRoute, importsRoute, newImportRoute, importDetailRoute, batchesRoute, newBatchRoute, batchDetailRoute, batchReportsRoute]),
   defaultPreload: 'intent',
 });
 

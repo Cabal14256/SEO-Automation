@@ -6,6 +6,12 @@ function invoice(snapshot = { shop: '16店铺', country: 'US', channel: 'UPS' },
 }
 
 describe('invoice business file names matching the reference file list', () => {
+  it('uses a configured code verbatim and falls back to the saved shop when cleared', () => {
+    const data = invoice(), before = structuredClone(data), at = new Date('2026-11-03T10:00:00Z');
+    expect(documentInvoiceFileName(data, 1, at, '001')).toBe('11.3号001-US-UPS-1件（ONT8）.xlsx');
+    expect(documentInvoiceFileName(data, 1, at, '')).toBe('11.3号16店铺-US-UPS-1件（ONT8）.xlsx');
+    expect(data).toEqual(before);
+  });
   it('uses the Shanghai generation day and the saved shop, country, business channel and address code', () => {
     const data = invoice();
     expect(documentInvoiceFileName(data, 2, new Date('2026-10-30T15:59:59Z'))).toBe('10.30号16店铺-US-UPS-2件（ONT8）.xlsx');

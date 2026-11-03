@@ -176,6 +176,13 @@
       "when": 1793604953825,
       "tag": "0024_service_mappings",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793714649030,
+      "tag": "0025_pink_jack_flag",
+      "breakpoints": true
     }
   ]
 }

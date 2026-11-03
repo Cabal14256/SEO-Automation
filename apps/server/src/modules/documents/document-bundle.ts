@@ -145,11 +145,13 @@ export async function publishDocumentBundle(job: Job, sources: Source[]) {
   if (!sources.length || sources.length !== job.items.length || job.items.some((item) => item.status !== 'ready')) throw new BatchError('VALIDATION_BLOCKED', 422, '整批所有货件须先完成资料检查，暂不生成文件。');
   const generatedAt = new Date(), cache = new Map<string, Buffer>(), inputs: BundleArchiveInput[] = [];
   const { createWorkbook, DOCUMENT_HEADER_FIELDS } = await import('./workbook.js');
+  const { readSellerExportCodes } = await import('../seller-mappings/export-codes.js');
+  const codes = await readSellerExportCodes(sources.filter((source) => !source.existingExportId).flatMap((source) => source.data.members[0]?.demand.snapshot.sid ?? []));
   for (const source of sources) {
     let bytes = cache.get(source.file.id); if (!bytes) { bytes = await checkedFileBytes(source.file); cache.set(source.file.id, bytes); }
     const fields = withDocumentInvoiceDefaults(source.data.fields, source.data.members);
     const expectedHeaders = Object.fromEntries(Object.entries(DOCUMENT_HEADER_FIELDS).map(([key, address]) => [address, key === 'currency' ? ({ USD: '美元', EUR: '欧元', GBP: '英镑' } as Record<string, string>)[fields.currency ?? ''] ?? null : fields[key] ?? null]));
-    inputs.push({ documentId: source.documentId, invoiceData: source.data, bytes: source.existingExportId ? bytes : await createWorkbook(source.data, bytes, automationOperationId(job.id, source.itemId, 'bundle-export')), selections: source.selections, expectedHeaders, expectedUnitPrice: Number(documentInvoicePrice(source.data).unitPrice) });
+    inputs.push({ documentId: source.documentId, invoiceData: source.data, shopCode: codes.get(source.data.members[0]?.demand.snapshot.sid ?? 0), archivedFileName: source.existingExportId ? source.selections?.[0]?.fileName ?? (/\.xlsx$/i.test(source.file.originalName) ? source.file.originalName : undefined) : undefined, bytes: source.existingExportId ? bytes : await createWorkbook(source.data, bytes, automationOperationId(job.id, source.itemId, 'bundle-export')), selections: source.selections, expectedHeaders, expectedUnitPrice: Number(documentInvoicePrice(source.data).unitPrice) });
   }
   const workbook = await createDocumentBundleArchive(inputs, generatedAt), originalName = bundleName(job.id);
   for (const source of sources) {

@@ -5,7 +5,7 @@ import { createDocumentBundleWorkbook, type BundleSheet, type BundleWorkbookInpu
 import { DocumentWorkbookError } from './workbook-errors.js';
 import { documentInvoiceFileName, type InvoiceFileNameData } from './invoice-file-name.js';
 
-export type BundleArchiveInput = BundleWorkbookInput & { invoiceData?: InvoiceFileNameData };
+export type BundleArchiveInput = BundleWorkbookInput & { invoiceData?: InvoiceFileNameData; shopCode?: string; archivedFileName?: string };
 
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 const safeFileName = (name: string) => name.length <= 200 && !/[\\/:*?"<>|]/.test(name) && !Array.from(name).some((character) => character.charCodeAt(0) < 32) && !name.startsWith('.') && /\.xlsx$/i.test(name);
@@ -39,7 +39,7 @@ export async function createDocumentBundleArchive(inputs: BundleArchiveInput[], 
     const workbook = await createDocumentBundleWorkbook([{ ...input, bytes: documentBundleInvoiceBytes(input), expectedUnitPrice }]);
     if (workbook.sheets.length !== 1) throw new DocumentWorkbookError('同一张发票包含不一致的表头，无法输出为独立单工作表 Excel 文件。');
     const identity = input.documentId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || 'invoice';
-    const requestedName = input.invoiceData ? documentInvoiceFileName(input.invoiceData, workbook.sheets[0]!.boxes, generatedAt) : `发票-${String(index + 1).padStart(3, '0')}-${identity}.xlsx`;
+    const requestedName = input.archivedFileName ?? (input.invoiceData ? documentInvoiceFileName(input.invoiceData, workbook.sheets[0]!.boxes, generatedAt, input.shopCode) : `发票-${String(index + 1).padStart(3, '0')}-${identity}.xlsx`);
     let fileName = requestedName, suffix = 2;
     const nameKey = (name: string) => name.normalize('NFKC').toLowerCase();
     while (usedNames.has(nameKey(fileName))) fileName = `${requestedName.slice(0, -5)}-${suffix++}.xlsx`;
