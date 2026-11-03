@@ -15,6 +15,42 @@ function fixture() {
   };
 }
 describe('shipment normalization', () => {
+  it('fills missing detail SKU and name from agreeing list and box identities without changing quantities or source data', () => {
+    const input = fixture();
+    for (const item of input.details.data.shipmentList[0]!.itemList) { item.sku = ''; item.productName = ''; }
+    const before = structuredClone(input), data = normalizeShipment(input);
+    expect(data.items.map((item) => [item.sku, item.name, item.quantity])).toEqual([['SKU', '商品', '5'], ['SKU', '商品', '1']]);
+    expect(data.issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+    expect(input).toEqual(before);
+  });
+  it.each(['duplicate-detail', 'duplicate-list', 'conflicting-list', 'conflicting-box', 'missing-box-sku', 'missing-msku', 'missing-fnsku'] as const)('does not infer missing detail SKU for %s', (scenario) => {
+    const input = fixture();
+    const details = input.details.data.shipmentList[0]!.itemList, listing = input.listing.item_list;
+    const boxes = input.packing.data.shipmentList[1]!.shipmentPackingList;
+    details[0]!.sku = ''; details[0]!.productName = '';
+    if (scenario === 'duplicate-detail') details.push({ ...details[0]! });
+    if (scenario === 'duplicate-list') listing.push({ ...listing[0]! });
+    if (scenario === 'conflicting-list') listing[0]!.sku = 'OTHER';
+    if (scenario === 'conflicting-box') boxes[0]!.productList[0]!.sku = 'OTHER';
+    if (scenario === 'missing-box-sku') for (const box of boxes) for (const item of box.productList) item.sku = '';
+    if (scenario === 'missing-msku') details[0]!.msku = '';
+    if (scenario === 'missing-fnsku') details[0]!.fnsku = '';
+    expect(normalizeShipment(input).items[0]).toMatchObject({ sku: '', name: null });
+  });
+  it('keeps conflicting box names unresolved and never replaces supplied detail values', () => {
+    const input = fixture(); const detail = input.details.data.shipmentList[0]!.itemList[0]!;
+    detail.productName = ''; input.packing.data.shipmentList[1]!.shipmentPackingList[0]!.productList[0]!.productName = 'OTHER';
+    expect(normalizeShipment(input).items[0]!.name).toBeNull();
+    detail.productName = '原始品名'; detail.sku = '原始SKU';
+    expect(normalizeShipment(input).items[0]).toMatchObject({ sku: '原始SKU', name: '原始品名' });
+  });
+  it('still reports actual quantity conflicts after filling missing detail metadata', () => {
+    const input = fixture(); const detail = input.details.data.shipmentList[0]!.itemList[0]!;
+    detail.sku = ''; detail.productName = ''; detail.quantity = 7;
+    const data = normalizeShipment(input);
+    expect(data.items[0]).toMatchObject({ sku: 'SKU', name: '商品', quantity: '7' });
+    expect(data.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining(['LIST_QUANTITY_MISMATCH', 'PACKED_QUANTITY_CONFLICT']));
+  });
   it('fills absent box SKUs from unique, corroborated detail identities without changing the raw response', () => {
     const input = fixture();
     for (const box of input.packing.data.shipmentList[1]!.shipmentPackingList) for (const item of box.productList) item.sku = '';
@@ -24,7 +60,7 @@ describe('shipment normalization', () => {
     expect(data.issues.filter((issue) => issue.severity === 'error')).toEqual([]);
     expect(input).toEqual(before);
   });
-  it.each(['duplicate-detail', 'duplicate-list', 'conflicting-detail', 'conflicting-list', 'conflicting-box', 'missing-msku', 'missing-fnsku', 'missing-detail-sku', 'missing-list-product'] as const)('keeps missing box SKUs blocked for %s', (scenario) => {
+  it.each(['duplicate-detail', 'duplicate-list', 'conflicting-detail', 'conflicting-list', 'conflicting-box', 'missing-msku', 'missing-fnsku', 'missing-list-product'] as const)('keeps missing box SKUs blocked for %s', (scenario) => {
     const input = fixture();
     const details = input.details.data.shipmentList[0]!.itemList;
     const listing = input.listing.item_list;
@@ -37,7 +73,6 @@ describe('shipment normalization', () => {
     if (scenario === 'conflicting-box') boxes[1]!.productList[0]!.sku = 'OTHER';
     if (scenario === 'missing-msku') item.msku = '';
     if (scenario === 'missing-fnsku') item.fnsku = '';
-    if (scenario === 'missing-detail-sku') details[0]!.sku = '';
     if (scenario === 'missing-list-product') listing.shift();
     const data = normalizeShipment(input);
     expect(data.boxes[0]!.items[0]!.sku).toBe('');

@@ -67,14 +67,31 @@ export function normalizeShipment(input: NormalizeShipmentInput): ShipmentData {
     if (result.quantity === null) add('INVALID_QUANTITY', positive ? '箱内商品数量必须为正整数。' : '商品申报数量缺失或不是有效整数。');
     return result;
   };
-  const items = rows(detail.itemList).map((row) => product(row, 'quantity', false));
-  if (!items.length) add('EMPTY_PRODUCTS', '货件详情没有商品明细。');
   const listItems = rows(input.listing.item_list);
+  const pair = (row: Record<string, unknown>) => JSON.stringify([text(row.msku), text(row.fnsku)]);
+  const rawDetailRows = rows(detail.itemList);
+  const packingItems = rows(matchingGroups[0]!.shipmentPackingList).flatMap((box) => rows(box.productList));
+  // Some detail responses omit local catalog fields even though the listing
+  // and packing agree. Require unique identities and independent SKU evidence;
+  // retain conflicting values and all quantities exactly as received.
+  const detailRows = rawDetailRows.map((row) => {
+    if (!text(row.msku) || !text(row.fnsku)) return row;
+    const key = pair(row);
+    if (rawDetailRows.filter((item) => pair(item) === key).length !== 1) return row;
+    const listingCandidates = listItems.filter((item) => pair(item) === key);
+    if (listingCandidates.length !== 1) return row;
+    const sku = text(listingCandidates[0]!.sku);
+    if (!sku || text(row.sku) && text(row.sku) !== sku) return row;
+    const boxCandidates = packingItems.filter((item) => pair(item) === key);
+    if (!boxCandidates.some((item) => text(item.sku) === sku) || boxCandidates.some((item) => text(item.sku) !== null && text(item.sku) !== sku)) return row;
+    const names = new Set(boxCandidates.filter((item) => text(item.sku) === sku).map((item) => text(item.productName)).filter((name) => name !== null));
+    return { ...row, sku: text(row.sku) ? row.sku : sku,
+      productName: text(row.productName) ? row.productName : names.size === 1 ? [...names][0] : row.productName };
+  });
+  const items = detailRows.map((row) => product(row, 'quantity', false));
+  if (!items.length) add('EMPTY_PRODUCTS', '货件详情没有商品明细。');
   // Fill only an absent box SKU, using a unique detail identity corroborated by
   // the listing. Never mutate the archived payload or overwrite a supplied SKU.
-  const pair = (row: Record<string, unknown>) => JSON.stringify([text(row.msku), text(row.fnsku)]);
-  const detailRows = rows(detail.itemList);
-  const packingItems = rows(matchingGroups[0]!.shipmentPackingList).flatMap((box) => rows(box.productList));
   const boxProduct = (row: Record<string, unknown>) => {
     if (text(row.sku) || !text(row.msku) || !text(row.fnsku)) return row;
     const key = pair(row);
