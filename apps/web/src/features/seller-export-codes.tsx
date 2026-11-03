@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Navigate } from '@tanstack/react-router';
 import { RefreshCw, Save } from 'lucide-react';
-import { sellerExportCodeInputSchema, sellerExportCodeListSchema, sellerExportCodeResultSchema, type SellerExportCode } from '@scm/contracts';
+import { invoiceFilenamePart, sellerExportCodeInputSchema, sellerExportCodeListSchema, sellerExportCodeResultSchema, type SellerExportCode } from '@scm/contracts';
 import { api, request, type User } from '../api';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -25,7 +25,7 @@ function SellerExportCodes({ user }: { user: User }) {
   const [search, setSearch] = useState(''), [notice, setNotice] = useState('');
   const rows = (list.data?.items ?? []).filter((row) => [row.name, row.country, String(row.sid), row.code].some((value) => value.toLowerCase().includes(search.trim().toLowerCase())));
   return <SettingsLayout user={user}><section aria-labelledby="export-codes-title">
-    <header className="settings-section-heading"><h2 id="export-codes-title">店铺导出代号</h2><p>为店铺填写数字代号，用于新生成的单票发票和整批压缩包文件名。留空使用店铺名，支持 001 等前导零；已归档文件保留原名称。</p></header>
+    <header className="settings-section-heading"><h2 id="export-codes-title">店铺导出代号</h2><p>代号最多 20 个字符，支持数字、字母、中文和符号，用于新生成的单票发票和整批压缩包文件名。留空使用店铺名，001 等前导零会保留；已归档文件保留原名称。Windows 文件名禁用字符会在文件名中替换为 _，保存的代号不变。</p></header>
     <div className="seller-directory-toolbar"><div className="field"><label htmlFor="export-code-search">搜索店铺、国家、SID 或代号</label><Input id="export-code-search" value={search} maxLength={160} onChange={(event) => setSearch(event.target.value)} /></div><Button icon={RefreshCw} loading={list.isFetching} onClick={() => void list.refetch()}>刷新列表</Button></div>
     {list.isPending ? <p role="status">正在读取店铺…</p> : list.isError ? <QueryError error={list.error} retry={() => void list.refetch()} /> : <>
       <p className="mapping-help">共 {rows.length} 家店铺 · 修改后请逐行保存</p>
@@ -42,7 +42,7 @@ function ExportCodeRow({ row, saved }: { row: SellerExportCode; saved: () => voi
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const parsed = sellerExportCodeInputSchema.safeParse({ operationId, expectedVersion: version, code });
-    if (!parsed.success) { setError('请填写最多 20 位数字，或留空恢复店铺名。'); return; }
+    if (!parsed.success) { setError(parsed.error.issues[0]?.message ?? '请填写最多 20 个字符的代号，或留空恢复店铺名。'); return; }
     setBusy(true); setError(''); setNotice('');
     try {
       const result = sellerExportCodeResultSchema.parse(await request(`${base}/${row.sid}`, { method: 'POST', body: JSON.stringify(parsed.data) }));
@@ -53,8 +53,8 @@ function ExportCodeRow({ row, saved }: { row: SellerExportCode; saved: () => voi
   const id = `export-code-${row.sid}`;
   return <form className="export-code-row" aria-label={`${row.name} 导出代号`} onSubmit={(event) => void submit(event)}>
     <div className="export-code-identity"><strong>{row.name}</strong><small>{row.country} · SID {row.sid}</small></div>
-    <div className="field"><label htmlFor={id}>数字代号</label><Input id={id} value={code} inputMode="numeric" maxLength={20} disabled={busy} aria-describedby={`${id}-preview`} aria-invalid={Boolean(error)} onChange={(event) => { setCode(event.target.value); setOperationId(newOperation()); setError(''); setNotice(''); }} /><small id={`${id}-preview`}>文件名店铺部分：{code.trim() || row.name}</small></div>
+    <div className="field"><label htmlFor={id}>导出代号</label><Input id={id} value={code} maxLength={20} disabled={busy} aria-describedby={`${id}-preview${error ? ` ${id}-error` : ''}`} aria-invalid={Boolean(error)} onChange={(event) => { setCode(event.target.value); setOperationId(newOperation()); setError(''); setNotice(''); }} /><small id={`${id}-preview`}>文件名店铺部分：{invoiceFilenamePart(code.trim() || row.name, '未填店铺')}</small></div>
     <Button icon={Save} type="submit" loading={busy} disabled={busy || code === stored}>保存</Button>
-    {error && <p className="error-note export-code-feedback" role="alert">{error} 请保留内容重试；若版本冲突，请刷新列表后核对。</p>}{notice && <p className="success-note export-code-feedback" role="status">{notice}</p>}
+    {error && <p id={`${id}-error`} className="error-note export-code-feedback" role="alert">{error} 请保留内容重试；若版本冲突，请刷新列表后核对。</p>}{notice && <p className="success-note export-code-feedback" role="status">{notice}</p>}
   </form>;
 }

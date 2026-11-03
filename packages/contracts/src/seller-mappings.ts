@@ -2,7 +2,8 @@ import { z } from 'zod';
 
 export const sellerExportCodeInputSchema = z.object({
   operationId: z.uuid(), expectedVersion: z.number().int().nonnegative(),
-  code: z.string().trim().regex(/^\d{0,20}$/, '代号须为 1–20 位数字；留空则使用店铺名'),
+  code: z.string().trim().max(20, '代号不能超过 20 个字符；留空则使用店铺名')
+    .refine((value) => !/\p{Cc}/u.test(value), '代号不能包含换行等控制字符'),
 }).strict();
 export const sellerExportCodeSchema = z.object({
   sid: z.number().int().positive(), name: z.string(), country: z.string(),

@@ -39,7 +39,7 @@ sellerMappingRoutes.get('/export-codes', async (c) => c.json(await listSellerExp
 sellerMappingRoutes.post('/export-codes/:sid', async (c) => {
   const sid = z.coerce.number().int().positive().max(2147483647).safeParse(c.req.param('sid'));
   const input = sellerExportCodeInputSchema.safeParse(await c.req.json().catch(() => null));
-  if (!sid.success || !input.success) throw new MappingError('VALIDATION_ERROR', 422, '请填写最多 20 位数字代号；留空可恢复店铺名。');
+  if (!sid.success || !input.success) throw new MappingError('VALIDATION_ERROR', 422, '代号最多 20 个字符，支持数字、字母和符号；不能包含控制字符，留空可恢复店铺名。');
   return c.json(await saveSellerExportCode(sid.data, input.data, c.get('actorUserId')));
 });
 sellerMappingRoutes.post('/catalog-settings', async (c) => {

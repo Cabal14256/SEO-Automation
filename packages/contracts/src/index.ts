@@ -15,6 +15,7 @@ export * from './document-boxes.js';
 export * from './workflow.js';
 export * from './maintenance.js';
 export * from './fulfillment.js';
+export * from './invoice-file-name.js';
 export * from './logistics.js';
 export * from './customs.js';
 export * from './finance.js';

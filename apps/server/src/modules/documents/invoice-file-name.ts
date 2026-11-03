@@ -1,11 +1,6 @@
-import type { DocumentRevisionData } from '@scm/contracts';
+import { invoiceFilenamePart as filePart, type DocumentRevisionData } from '@scm/contracts';
 
 export type InvoiceFileNameData = Pick<DocumentRevisionData, 'members' | 'fields'>;
-
-function filePart(value: string | null | undefined, fallback: string) {
-  const text = (value ?? '').trim().replace(/[\\/:*?"<>|\p{Cc}]/gu, '_').replace(/\s+/g, ' ').replace(/[. ]+$/g, '');
-  return (text || fallback).slice(0, 40).replace(/[\uD800-\uDBFF]$/u, '').replace(/[. ]+$/g, '');
-}
 
 /** Match the reference: 10.31号16店铺-US-UPS-2件（ONT8）.xlsx. */
 export function documentInvoiceFileName(data: InvoiceFileNameData, boxCount: number, generatedAt = new Date(), shopCode?: string): string {

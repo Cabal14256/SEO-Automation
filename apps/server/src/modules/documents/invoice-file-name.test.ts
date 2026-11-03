@@ -1,3 +1,5 @@
+import { win32 } from 'node:path';
+import { invoiceFilenamePart } from '@scm/contracts';
 import { describe, expect, it } from 'vitest';
 import { documentInvoiceFileName, type InvoiceFileNameData } from './invoice-file-name.js';
 
@@ -11,6 +13,28 @@ describe('invoice business file names matching the reference file list', () => {
     expect(documentInvoiceFileName(data, 1, at, '001')).toBe('11.3号001-US-UPS-1件（ONT8）.xlsx');
     expect(documentInvoiceFileName(data, 1, at, '')).toBe('11.3号16店铺-US-UPS-1件（ONT8）.xlsx');
     expect(data).toEqual(before);
+  });
+  it.each(['00Ab_沪-@＋(一)', '=00AB+1', '001.25', '-001'])('preserves the configured text code %s in a new filename', (code) => {
+    const data = invoice(), before = structuredClone(data);
+    const name = documentInvoiceFileName(data, 1, new Date('2026-11-04T00:00:00Z'), code);
+    expect(name).toBe(`11.4号${code}-US-UPS-1件（ONT8）.xlsx`);
+    expect(win32.basename(name)).toBe(name);
+    expect(data).toEqual(before);
+  });
+  it('uses the same filename-safe text in the settings preview and generated name', () => {
+    const code = '00A/B\\C:*?"<>|', before = code;
+    const preview = invoiceFilenamePart(code, '未填店铺');
+    expect(preview).toBe('00A_B_C_______');
+    const name = documentInvoiceFileName(invoice(), 1, new Date('2026-11-04T00:00:00Z'), code);
+    expect(name).toBe('11.4号00A_B_C_______-US-UPS-1件（ONT8）.xlsx');
+    expect(name).not.toMatch(/[\\/:*?"<>|\p{Cc}]/u);
+    expect(win32.basename(name)).toBe(name);
+    expect(code).toBe(before);
+  });
+  it('trims a configured code and restores the saved shop when only spaces remain', () => {
+    const data = invoice(), at = new Date('2026-11-04T00:00:00Z');
+    expect(documentInvoiceFileName(data, 1, at, '  00Ab-沪  ')).toBe('11.4号00Ab-沪-US-UPS-1件（ONT8）.xlsx');
+    expect(documentInvoiceFileName(data, 1, at, '   ')).toBe('11.4号16店铺-US-UPS-1件（ONT8）.xlsx');
   });
   it('uses the Shanghai generation day and the saved shop, country, business channel and address code', () => {
     const data = invoice();

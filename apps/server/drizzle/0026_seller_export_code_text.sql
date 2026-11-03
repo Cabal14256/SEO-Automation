@@ -1,0 +1,2 @@
+ALTER TABLE "seller_export_code" DROP CONSTRAINT "seller_export_code_format_check";--> statement-breakpoint
+ALTER TABLE "seller_export_code" ADD CONSTRAINT "seller_export_code_format_check" CHECK (char_length("seller_export_code"."code") <= 20 AND "seller_export_code"."code" !~ '[[:cntrl:]]');

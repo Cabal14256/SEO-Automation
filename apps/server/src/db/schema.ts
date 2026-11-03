@@ -137,7 +137,7 @@ export const sellerExportCodes = pgTable('seller_export_code', {
   updatedBy: text('updated_by').notNull().references(() => user.id),
   updatedAt: at('updated_at').notNull().defaultNow(),
 }, (table) => [
-  check('seller_export_code_format_check', sql`${table.code} ~ '^[0-9]{0,20}$'`),
+  check('seller_export_code_format_check', sql`char_length(${table.code}) <= 20 AND ${table.code} !~ '[[:cntrl:]]'`),
   check('seller_export_code_version_check', sql`${table.version} > 0`),
 ]);
 
