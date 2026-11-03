@@ -19,7 +19,7 @@ const now = '2026-10-23T02:00:00.000Z';
 const numberingDate = '2026-10-23';
 const id = () => randomUUID();
 const copy = (value) => structuredClone(value);
-const checks = [], unexpectedRequests = [], browserErrors = [], fixtureErrors = [];
+const checks = [], unexpectedRequests = [], transportDirectoryRequests = [], browserErrors = [], fixtureErrors = [];
 let browser, viteProcess, page, baseURL, step = 'setup', failed = false;
 const note = () => { checks.push({ name: step, result: 'passed' }); console.log(`PASS ${step}`); };
 
@@ -142,13 +142,17 @@ async function contextFor(state) {
       if (method === 'GET' && path === '/api/v1/batches/workspace') return json(contracts.batchWorkspaceSchema.parse({ rows: [], total: 0, page: 1, pageSize: 20, availableWeeks: [],
         filters: { weeks: [], shops: [], countries: [], channels: [] } }));
       if (method === 'GET' && path === '/api/v1/seller-mappings/catalog-settings') return json({ settings: { mode: 'manual', version: 1, catalogVersion: 1, lastSyncedAt: now, lastError: null, configured: true, readOnly: true } });
-      if (method === 'GET' && path === '/api/v1/imports/transport-methods') return json({ items: [{ id: 'test-sea', name: '海派', enabled: true, remark: '' }], queriedAt: now });
+      if (path === '/api/v1/imports/transport-methods') {
+        transportDirectoryRequests.push(`${method} ${path}`);
+        return json({ error: { code: 'FIXTURE_FORBIDDEN_DIRECTORY', message: '导入使用手填运输方式。' } }, 503);
+      }
       if (method === 'GET' && path === '/api/v1/imports') return json({ items: [], total: 0, page: 1, pageSize: 10 });
       if (method === 'POST' && path === '/api/v1/imports/online') {
         const body = contracts.onlineImportInputSchema.parse(request.postDataJSON()); state.sourceBodies.push(copy(body));
         assert.deepEqual(body.rows.map((row) => row.fba), [state.fbas[0], state.fbas[1], '', state.fbas[2]], 'online source must retain its internal blank row');
         assert(Object.values(body.rows[2]).every((value) => value === '' || value === undefined), 'the separator must remain empty in all business fields');
-        assert(body.rows.every((row) => !row.shop), 'automatic input should require only FBA');
+        assert.deepEqual(body.rows.map((row) => row.channel), ['海派', '海派', '', '海派'], 'manual full names and initials normalize without a transport directory');
+        assert(body.rows.every((row) => !row.shop), 'automatic input needs only FBA and manual transport; shop remains automatic');
         const source = state.source(false);
         return json(contracts.importAcceptedSchema.parse({ import: source, run: source.latestRun, taskId: id(), taskUrl: `/api/v1/imports/${state.importId}/runs`, replayed: false, deduplicated: false }), 202);
       }
@@ -156,7 +160,7 @@ async function contextFor(state) {
       if (method === 'GET' && path === `/api/v1/imports/${state.importId}/rows`) {
         assert.equal(url.searchParams.get('parseRunId'), state.parseRunId);
         const items = state.fbas.map((fba, index) => ({ id: id(), parseRunId: state.parseRunId, sheetName: '在线需求导入', rowNumber: index + 2, hidden: false, status: 'needs_review', rawCells: [], issues: [],
-          normalized: { shop: null, channel: null, country: index < 2 ? '美国' : '英国', destinationFc: null, fba, referenceQuantity: null, sourceDate: null, sourceRecordId: null,
+          normalized: { shop: null, channel: '海派', country: index < 2 ? '美国' : '英国', destinationFc: null, fba, referenceQuantity: null, sourceDate: null, sourceRecordId: null,
             notes: null, subBatchName: null, sellerMappingId: null, sid: null, sellerMappingVersion: null, sourceTicketIndex: 1, sourceMemberIndex: index + 1 } }));
         return json(contracts.importRowsResponseSchema.parse({ items, total: items.length, page: 1, pageSize: 100, parseRunId: state.parseRunId, previewVersion: 2 }));
       }
@@ -237,6 +241,7 @@ async function automaticChecks(state) {
   await wizard().getByRole('button', { name: '本次发货自动整理', exact: true }).click();
   await expect(wizard().getByRole('button', { name: '导入并整理本次发货', exact: true })).toBeVisible();
   await expect(wizard().getByLabel('编号日期', { exact: true })).toHaveValue(numberingDate);
+  await expect(wizard().getByLabel('第 1 行业务渠道', { exact: true })).toBeVisible();
   await expect(wizard().getByLabel('第 1 行店铺', { exact: true })).not.toBeVisible();
   await wizard().getByRole('button', { name: '显示补充资料', exact: true }).click();
   await expect(wizard().getByLabel('第 1 行店铺', { exact: true })).toBeVisible();
@@ -245,7 +250,9 @@ async function automaticChecks(state) {
   await wizard().getByLabel('第 1 行FBA 货件号', { exact: true }).evaluate((element, text) => {
     const clipboardData = new DataTransfer(); clipboardData.setData('text/plain', text);
     element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData }));
-  }, `${state.fbas[0]}\n${state.fbas[1]}\n\n${state.fbas[2]}`);
+  }, `${state.fbas[0]}\t海派\n${state.fbas[1]}\thP\n\n${state.fbas[2]}\t HP `);
+  for (const row of [1, 2, 4]) await expect(wizard().getByLabel(`第 ${row} 行业务渠道`, { exact: true })).toHaveValue('海派');
+  await expect(wizard().getByLabel('第 3 行业务渠道', { exact: true })).toHaveValue('');
   await expect(wizard()).toContainText('3 个 FBA · 2 票');
   await wizard().getByText('分票预览（按空行）', { exact: true }).click();
   await expect(wizard()).toContainText('第 1 段：2 个 FBA'); await expect(wizard()).toContainText('第 2 段：1 个 FBA');
@@ -253,7 +260,7 @@ async function automaticChecks(state) {
   await wizard().getByText('分票预览（按空行）', { exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(evidence, 'ticket-preview-1440.png') });
   await page.setViewportSize({ width: 390, height: 844 });
-  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'FBA-only entry must fit the mobile viewport');
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'FBA and manual transport entry must fit the mobile viewport');
   await wizard().getByText('分票预览（按空行）', { exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(evidence, 'ticket-preview-390.png') });
   await page.setViewportSize({ width: 1440, height: 1000 }); note();
@@ -541,13 +548,13 @@ try {
   }
   const displayState = allocationColumnFixture(), displayContext = await contextFor(displayState);
   await allocationColumnChecks(displayState); await displayContext.close();
-  assert.deepEqual(fixtureErrors, []); assert.deepEqual(unexpectedRequests, []); assert.deepEqual(browserErrors, []);
+  assert.deepEqual(fixtureErrors, []); assert.deepEqual(unexpectedRequests, []); assert.deepEqual(browserErrors, []); assert.deepEqual(transportDirectoryRequests, []);
 } catch (error) {
   failed = true; checks.push({ name: step, result: 'failed', message: error.message }); console.error(error.stack || error);
   if (page && !page.isClosed()) await page.screenshot({ path: resolve(evidence, 'failure.png'), fullPage: true }).catch(() => {});
 } finally {
   await browser?.close();
   if (viteProcess && viteProcess.exitCode === null) { viteProcess.kill(); await Promise.race([new Promise((done) => viteProcess.once('exit', done)), delay(5000)]); }
-  await writeFile(resolve(evidence, 'result.json'), JSON.stringify({ kind: 'fixture-only-shipping-runs-browser', passed: !failed, checks, fixtureErrors, browserErrors, unexpectedRequests }, null, 2) + '\n');
+  await writeFile(resolve(evidence, 'result.json'), JSON.stringify({ kind: 'fixture-only-shipping-runs-browser', passed: !failed, checks, fixtureErrors, browserErrors, unexpectedRequests, transportDirectoryRequests }, null, 2) + '\n');
 }
 if (failed) process.exitCode = 1;

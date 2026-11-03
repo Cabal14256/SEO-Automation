@@ -72,7 +72,7 @@ describe('validated XLSX admission and automatic parse scheduling', () => {
     const boss = queue(), input = content(await workbook());
     const accepted = importAcceptedSchema.parse(await createSourceImport(boss as unknown as PgBoss, input));
     expect(accepted.import).toMatchObject({ status: 'queued', version: 1, sheets: [{ name: '客户自定义表名' }], latestRun: { status: 'queued', sheetName: '客户自定义表名', mappingVersion: 'manual-v1' } });
-    expect(accepted.run).toMatchObject({ status: 'queued', sheetName: '客户自定义表名', mappingVersion: 'manual-v1', counts: { totalRows: 0 } });
+    expect(accepted.run).toMatchObject({ status: 'queued', sheetName: '客户自定义表名', mappingVersion: 'manual-v1', parserVersion: 'xlsx-preview-v4', counts: { totalRows: 0 } });
     expect(boss.send).toHaveBeenCalledOnce(); expect(state.store).toHaveBeenCalledOnce();
     expect(state.records.get(sourceImportRows)).toBeUndefined();
     expect(state.records.get(operationAudit)).toHaveLength(1);
@@ -84,7 +84,7 @@ describe('validated XLSX admission and automatic parse scheduling', () => {
     expect(accepted.run).toMatchObject({ status: 'completed', sheetName: null, mappingVersion: null, processedRows: 0, issues: [{ code: 'SOURCE_MAPPING_REQUIRED' }] });
     expect(boss.send).not.toHaveBeenCalled(); expect(state.records.get(sourceImportRows)).toBeUndefined();
     const reparsed = importAcceptedSchema.parse(await requestImportParse(boss as unknown as PgBoss, accepted.import.id, { operationId: randomUUID(), expectedVersion: 1, sheetName: '在线需求导入', mappingVersion: 'manual-v1' }, actorId));
-    expect(reparsed.run).toMatchObject({ status: 'queued', sheetName: '在线需求导入', mappingVersion: 'manual-v1', inputVersion: 2 }); expect(boss.send).toHaveBeenCalledOnce();
+    expect(reparsed.run).toMatchObject({ status: 'queued', sheetName: '在线需求导入', mappingVersion: 'manual-v1', parserVersion: 'xlsx-preview-v4', inputVersion: 2 }); expect(boss.send).toHaveBeenCalledOnce();
   });
   it('preserves operation replay and same-content deduplication without repeating validation publication or queueing', async () => {
     const boss = queue(), input = content(await workbook());

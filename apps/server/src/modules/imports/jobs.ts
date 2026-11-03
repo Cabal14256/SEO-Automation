@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { PgBoss } from 'pg-boss';
 import { z } from 'zod';
-import type { ImportMappingVersion } from '@scm/contracts';
+import { IMPORT_PARSER_VERSION, type ImportMappingVersion } from '@scm/contracts';
 import { db } from '../../db/client.js';
 import { fileIndex, importParseRuns, sellerAliases, sellerMappings, sourceImports, sourceImportRows, user } from '../../db/schema.js';
 import { logError } from '../../errors.js';
@@ -33,7 +33,7 @@ export async function executeImportParse(runId: string) {
     if (actor.role !== 'admin' && record.createdBy !== actor.id) throw new ImportError('FORBIDDEN', 403, '提交人已失去此文件的解析权限。');
     const [file] = await tx.select().from(fileIndex).where(eq(fileIndex.id, record.fileId));
     if (!file) throw new ImportError('FILE_UNAVAILABLE', 503, '原文件索引不存在。');
-    await tx.update(importParseRuns).set({ status: 'running', startedAt: new Date() }).where(eq(importParseRuns.id, runId));
+    await tx.update(importParseRuns).set({ status: 'running', startedAt: new Date(), parserVersion: IMPORT_PARSER_VERSION }).where(eq(importParseRuns.id, runId));
     await tx.update(sourceImports).set({ status: 'parsing' }).where(eq(sourceImports.id, record.id));
     return { run, record, file };
   });

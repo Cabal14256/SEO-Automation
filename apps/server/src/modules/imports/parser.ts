@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
 import { unzipSync } from 'fflate';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
-import { IMPORT_MAX_BYTES, type ImportCounts, type ImportIssue, type ImportMappingVersion, type ImportNormalizedRow, type ImportRawCell, type ImportRow, type ImportSheet } from '@scm/contracts';
+import { IMPORT_MAX_BYTES, normalizeManualTransportMethod, type ImportCounts, type ImportIssue, type ImportMappingVersion, type ImportNormalizedRow, type ImportRawCell, type ImportRow, type ImportSheet } from '@scm/contracts';
 import { findApprovedSellers } from '../seller-mappings/resolution.js';
 import { businessDateForReceipt } from './date.js';
 
@@ -354,6 +354,7 @@ export function parseWorkbook(bytes: Uint8Array, input: ParseWorkbookInput): { s
       if (field === 'referenceQuantity' && normalized.referenceQuantity !== null && !/^\d+$/.test(normalized.referenceQuantity)) issues.push(issue('INVALID_REFERENCE_QUANTITY', '参考数量应为非负整数，原始值已保留。', 'error', cell));
     }
     if (normalized.fba) normalized.fba = normalized.fba.toUpperCase();
+    if (normalized.channel) normalized.channel = normalizeManualTransportMethod(normalized.channel);
     if (!normalized.shop) issues.push(issue('SHOP_REQUIRED', input.mappingVersion === 'fba-list-v1' ? '店铺待 FBA 查询补全。' : '缺少店铺。', input.mappingVersion === 'fba-list-v1' ? 'warning' : 'error', cells.get(mapping.shop!)));
     if (!normalized.fba) issues.push(issue('FBA_REQUIRED', '缺少 FBA 货件号。', 'error', cells.get(mapping.fba!)));
     else if (!/^FBA[A-Z0-9]+$/.test(normalized.fba)) issues.push(issue('INVALID_FBA', 'FBA 货件号应以 FBA 开头且只包含字母和数字。', 'error', cells.get(mapping.fba!)));

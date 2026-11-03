@@ -49,6 +49,7 @@ describe('source acceptance catalog guard', () => {
     state.catalog.mockResolvedValue({ mode: 'manual', version: 99, catalogVersion: 99 });
     const accepted = await createSourceImport({ send } as unknown as PgBoss, request);
     expect(accepted.replayed).toBe(true); expect(accepted.import.id).toBe(previous.id);
+    expect(accepted.run.parserVersion).toBe('xlsx-preview-v1');
     expect(state.transaction).toHaveBeenCalledOnce(); expect(state.catalog).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled();
   });
   it('locks the expected catalog on the existing transaction before same-content deduplication', async () => {

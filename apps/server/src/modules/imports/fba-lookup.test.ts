@@ -39,7 +39,7 @@ vi.mock('../../file-store.js', () => ({ storeImmutableFile: async (_directory: s
 
 import { sellerCatalogSettings, sellerMappings, user } from '../../db/schema.js';
 import { fbaLookupRuns, fbaLookupSnapshots, type FbaLookupSellerScope } from './fba-lookup-schema.js';
-import { executeFbaLookup, getFbaLookup, inclusiveLookupEndDate, lookupMetadataSnapshot, projectFbaLookupRows, projectInboundShipmentChannels, requestFbaLookup } from './fba-lookup.js';
+import { executeFbaLookup, getFbaLookup, inclusiveLookupEndDate, lookupMetadataSnapshot, projectFbaLookupRows, requestFbaLookup } from './fba-lookup.js';
 
 const scope: FbaLookupSellerScope[] = [{ id: 'mapping', sid: 12, name: '已批准店铺', country: '美国', version: 1 }];
 const metadata = (operation: LingxingReadOperation = 'listShipments'): LingxingReadMetadata => ({ operation,
@@ -126,77 +126,6 @@ describe('FBA metadata projection', () => {
   });
 });
 
-describe('linked inbound order channels', () => {
-  const targets = [{ sid: 12, fba: 'FBA001' }, { sid: 12, fba: 'FBA002' }];
-  it('uses the transportation method and merges different logistics channels with their source identities', () => {
-    const channels = projectInboundShipmentChannels(targets, scope, [order(), order({ shipment_sn: 'ORDER002', logistics_channel_id: '19', logistics_channel_name: '另一海派渠道' }), order()]);
-    expect(channels.get('12:FBA001')).toEqual({ channel: '海派', channelStatus: 'unique', channelOptions: [{
-      name: '海派', shipmentNumbers: ['ORDER001', 'ORDER002'], channelIds: ['18', '19'], methodNames: ['海派'],
-    }] });
-    expect(channels.get('12:FBA002')).toEqual({ channel: null, channelStatus: 'not_found', channelOptions: [] });
-    const rows = projectFbaLookupRows(['FBA001'], scope, [{ ...shipment(), alpha_name: '旧承运编码', shipping_mode: 'GROUND_SMALL_PARCEL' }], metadata().requestedAt, channels);
-    expect(rows[0]!.candidates[0]).toMatchObject({ channel: '海派', channelStatus: 'unique' });
-  });
-  it('keeps different transportation methods ambiguous even when the logistics channel matches', () => {
-    const result = projectInboundShipmentChannels(targets, scope, [order(), order({ shipment_sn: 'ORDER002', method_name: '自定义空派' })]).get('12:FBA001');
-    expect(result).toMatchObject({ channel: null, channelStatus: 'ambiguous' });
-    expect(result?.channelOptions.map((option) => option.name).sort()).toEqual(['海派', '自定义空派'].sort());
-  });
-  it('uses the transportation method independently of the logistics channel name and never falls back to logistics metadata', () => {
-    const result = projectInboundShipmentChannels(targets, scope, [order({ logistics_channel_name: ' ', method_name: '海派', logistics: [{ transport_type: 2 }] })]);
-    expect(result.get('12:FBA001')).toMatchObject({ channel: '海派', channelStatus: 'unique', channelOptions: [{ name: '海派' }] });
-    for (const method_name of [undefined, null, '', ' ']) {
-      expect(projectInboundShipmentChannels(targets, scope, [order({ method_name, logistics: [{ transport_type: 2 }] })]).get('12:FBA001'))
-        .toEqual({ channel: null, channelStatus: 'not_found', channelOptions: [] });
-    }
-  });
-  it('does not automatically select a partial method when another active linked order has an empty method', () => {
-    const channels = projectInboundShipmentChannels(targets, scope, [order(), order({ shipment_sn: 'ORDER002', method_name: '' })]);
-    expect(channels.get('12:FBA001')).toEqual({ channel: null, channelStatus: 'unavailable', channelOptions: [{
-      name: '海派', shipmentNumbers: ['ORDER001'], channelIds: ['18'], methodNames: ['海派'],
-    }] });
-    const candidates = projectFbaLookupRows(['FBA001'], scope, [shipment()], metadata().requestedAt, channels)[0]!.candidates;
-    expect(candidates[0]).toMatchObject({ channel: null, channelStatus: 'unavailable', channelOptions: [{ name: '海派' }] });
-    expect(projectInboundShipmentChannels(targets, scope, [order({ method_name: '' }), order({ shipment_sn: 'ORDER002', method_name: null })]).get('12:FBA001'))
-      .toEqual({ channel: null, channelStatus: 'not_found', channelOptions: [] });
-  });
-  it('accepts only the documented active statuses and excludes unknown status values', () => {
-    const channels = projectInboundShipmentChannels(targets, scope, [
-      ...[-1, 0, '1', '2'].map((status) => order({ status, shipment_sn: `ACTIVE${status}` })),
-      ...[undefined, null, '', 9, 'unrecognized'].map((status) => order({ status, method_name: '未知状态运输方式' })),
-    ]);
-    expect(channels.get('12:FBA001')).toMatchObject({ channel: '海派', channelStatus: 'unique', channelOptions: [{ shipmentNumbers: ['ACTIVE-1', 'ACTIVE0', 'ACTIVE1', 'ACTIVE2'] }] });
-    expect(projectInboundShipmentChannels(targets, scope, [order({ status: undefined })]).get('12:FBA001'))
-      .toEqual({ channel: null, channelStatus: 'not_found', channelOptions: [] });
-  });
-  it('excludes cancelled and deleted order statuses without introducing a false conflict', () => {
-    const result = projectInboundShipmentChannels(targets, scope, [order(), order({ status: '3', method_name: '已作废运输方式' }), order({ status: 4, method_name: '已删除运输方式' }),
-      order({ status: 1, is_delete: 1, method_name: '已删除但状态未变运输方式' }), order({ status: 0, is_delete: '1', method_name: '已删除字符串标记运输方式' })]);
-    expect(result.get('12:FBA001')).toMatchObject({ channel: '海派', channelStatus: 'unique' });
-    expect(result.get('12:FBA001')?.channelOptions).toHaveLength(1);
-  });
-  it('associates each channel with the exact sid and FBA while allowing unrelated links in a shared order', () => {
-    const other = { ...scope[0]!, id: 'other', sid: 13, name: '其他店铺', country: '英国' };
-    const result = projectInboundShipmentChannels([{ sid: 12, fba: 'FBA001' }, { sid: 13, fba: 'FBA001' }], [...scope, other], [
-      order({ relate_list: [{ sid: '12', shipment_id: ' fba001 ' }, { sid: 999, shipment_id: 'FBA999' }] }),
-      order({ method_name: '英国空派', relate_list: [{ sid: 13, shipment_id: 'FBA001' }] }),
-    ]);
-    expect(result.get('12:FBA001')).toMatchObject({ channel: '海派', channelStatus: 'unique' });
-    expect(result.get('13:FBA001')).toMatchObject({ channel: '英国空派', channelStatus: 'unique' });
-    expect(() => projectInboundShipmentChannels(targets, scope, [order({ relate_list: [{ sid: 999, shipment_id: 'FBA001' }] })]))
-      .toThrow('范围外的店铺');
-  });
-  it('records only channel evidence and linked shipment identities in immutable snapshots', () => {
-    const result = lookupMetadataSnapshot({ metadata: metadata('listInboundShipments'), payload: { ...orderPayload([order({
-      item_list: [{ sku: 'private-product' }], access_token: 'private-token', phone: 'private-phone',
-      relate_list: [{ sid: 12, shipment_id: ' fba001 ', item_list: [{ sku: 'private-related-product' }] }],
-    })]), message: 'private-error' } }, { sids: '12', senior_search_list: [{ search_field: 'shipment_id', search_value: ['FBA001'] }], offset: 0, length: 20, is_delete: 0, access_token: 'private-token' });
-    expect(result).toMatchObject({ schemaVersion: 'fba-lookup-channels-v1', request: { sids: '12', offset: 0, length: 20, is_delete: 0 },
-      response: { total: '1', list: [{ shipment_sn: 'ORDER001', logistics_channel_id: '18', logistics_channel_name: '领星海派渠道', method_name: '海派', relate_list: [{ sid: '12', shipment_id: 'FBA001' }] }] } });
-    expect(JSON.stringify(result)).not.toMatch(/private-|item_list|phone|access_token|message/);
-  });
-});
-
 describe('FBA lookup requests', () => {
   it('does not expose legacy logistics channels as transportation methods or mutate the stored history', async () => {
     const record = run();
@@ -215,17 +144,19 @@ describe('FBA lookup requests', () => {
       destinationFc: 'TEST1', destinationAddress: 'Warehouse Road, City, US', observedAt: metadata().requestedAt });
     expect(record.rows).toEqual(storedRows);
   });
-  it('preserves newly projected transportation methods and their field source when loading a completed lookup', async () => {
+  it.each(['unique', 'ambiguous', 'not_found', 'unavailable'] as const)('discards historical %s transportation-method output without changing stored evidence', async (channelStatus) => {
     const record = run();
-    const channels = projectInboundShipmentChannels([{ sid: 12, fba: 'FBA001' }], scope, [order()]);
-    const rows = projectFbaLookupRows(['FBA001'], scope, [shipment()], metadata().requestedAt, channels);
+    const rows = projectFbaLookupRows(['FBA001'], scope, [shipment()], metadata().requestedAt);
+    Object.assign(rows[0]!.candidates[0]!, { channel: '海派', channelStatus, channelSource: 'method_name',
+      channelOptions: [{ name: '海派', shipmentNumbers: ['ORDER001'], channelIds: ['18'], methodNames: ['海派'] }],
+      channelIssue: { code: 'METHOD_MISSING', message: '旧查询提示' } });
     Object.assign(record, { status: 'completed', rows, completedAt: new Date('2026-10-17T01:00:01Z') });
-
+    const storedRows = structuredClone(rows);
     const result = await getFbaLookup(record.id, 'actor');
-
-    expect(result.rows).toEqual(rows);
-    expect(result.rows[0]!.candidates[0]).toMatchObject({ channel: '海派', channelStatus: 'unique', channelSource: 'method_name',
-      channelOptions: [{ name: '海派', shipmentNumbers: ['ORDER001'], channelIds: ['18'], methodNames: ['海派'] }] });
+    expect(result.rows[0]!.candidates[0]).toMatchObject({ channel: null, channelStatus: 'unavailable', channelOptions: [], destinationFc: 'TEST1' });
+    expect(result.rows[0]!.candidates[0]!.channelSource).toBeUndefined();
+    expect(result.rows[0]!.candidates[0]!.channelIssue).toBeUndefined();
+    expect(record.rows).toEqual(storedRows);
   });
   it('queries automatically approved remote shops while preserving manual candidates and excluding local disable or revoked authorization', async () => {
     state.records.set(sellerCatalogSettings, [{ id: 'global', mode: 'lingxing', version: 1, catalogVersion: 2 }]);
@@ -258,18 +189,31 @@ describe('FBA lookup requests', () => {
 });
 
 describe('FBA lookup execution', () => {
-  it('publishes transportation method names only after both listings complete and archives separate metadata evidence', async () => {
-    const record = run(), source = clientFor(payload(), undefined, orderPayload());
+  it('reads shipment metadata only and never requests transportation methods or linked orders', async () => {
+    const record = run(), source = clientFor(payload(), undefined, new LingxingReadError('LINGXING_RATE_LIMITED', 'must never read inbound orders'));
     await executeFbaLookup(record.id, { createClient: source.createClient });
-    expect(source.calls).toHaveBeenNthCalledWith(1, 'listShipments', { sid: '12', shipment_id: 'FBA001,FBA002', start_date: '2026-09-01', end_date: '2026-10-01', offset: 0, length: 100 });
-    expect(source.calls).toHaveBeenNthCalledWith(2, 'listInboundShipments', { sids: '12', senior_search_list: [{ search_field: 'shipment_id', search_value: ['FBA001'] }], is_delete: 0, offset: 0, length: 20 });
+    expect(source.calls).toHaveBeenCalledExactlyOnceWith('listShipments', { sid: '12', shipment_id: 'FBA001,FBA002', start_date: '2026-09-01', end_date: '2026-10-01', offset: 0, length: 100 });
     expect(record.status).toBe('completed');
-    expect(record.rows).toMatchObject([{ fba: 'FBA001', status: 'unique', candidates: [{ channel: '海派', channelStatus: 'unique', observedAt: '2026-10-17T01:00:01.000Z' }] }, { fba: 'FBA002', status: 'not_found' }]);
-    expect(record.requestsUsed).toBe(2);
-    expect(state.records.get(fbaLookupSnapshots)?.map((snapshot) => snapshot.page)).toEqual([0, 20]);
-    expect(state.files.flatMap((file) => file.bytes.toString('utf8'))).toHaveLength(2);
-    expect(state.files.map((file) => file.bytes.toString('utf8')).join('')).not.toContain('item_list');
+    expect(record.rows).toMatchObject([{ fba: 'FBA001', status: 'unique', candidates: [{ channel: null, channelStatus: 'unavailable', channelOptions: [], destinationFc: 'TEST1', observedAt: metadata().requestedAt }] }, { fba: 'FBA002', status: 'not_found' }]);
+    expect(record.requestsUsed).toBe(1);
+    expect(state.records.get(fbaLookupSnapshots)?.map((snapshot) => snapshot.page)).toEqual([0]);
+    expect(state.files).toHaveLength(1);
+    expect(state.files[0]!.bytes.toString('utf8')).not.toMatch(/item_list|method_name|logistics_channel_name/);
     expect(state.release).toHaveBeenCalledOnce();
+  });
+  it('completes every shipment page before publishing metadata', async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({ ...shipment(), shipment_id: index ? 'FBA002' : 'FBA001', sid: index + 12 }));
+    const record = run();
+    record.sellerScope = firstPage.map((row) => ({ ...scope[0]!, sid: row.sid }));
+    state.records.set(sellerMappings, record.sellerScope.map((seller) => ({ ...seller, manualEnabled: true, status: 'approved' })));
+    const source = clientFor((params) => params.offset === 0 ? payload(firstPage, 101) : payload([shipment('FBA001', 112)], 101));
+    record.sellerScope.push({ ...scope[0]!, sid: 112 });
+    state.records.set(sellerMappings, record.sellerScope.map((seller) => ({ ...seller, manualEnabled: true, status: 'approved' })));
+    await executeFbaLookup(record.id, { createClient: source.createClient });
+    expect(source.calls.mock.calls.map(([operation]) => operation)).toEqual(['listShipments', 'listShipments']);
+    expect(source.calls).toHaveBeenNthCalledWith(2, 'listShipments', expect.objectContaining({ offset: 100, length: 100 }));
+    expect(record).toMatchObject({ status: 'completed', requestsUsed: 2 });
+    expect(state.records.get(fbaLookupSnapshots)?.map((snapshot) => snapshot.page)).toEqual([0, 1]);
   });
   it('keeps no selectable results when paging is incomplete', async () => {
     const record = run(), source = clientFor(payload([shipment()], 101));
@@ -283,77 +227,23 @@ describe('FBA lookup execution', () => {
     expect(record).toMatchObject({ status: 'failed', rows: [], errorCode: 'CATALOG_VERSION_CONFLICT' });
     expect(state.records.get(fbaLookupSnapshots)).toHaveLength(1);
   });
-  it('completes all inbound order pages before resolving different transportation methods', async () => {
-    const firstPage = Array.from({ length: 20 }, (_, index) => order({ shipment_sn: `ORDER${String(index).padStart(3, '0')}` }));
-    const record = run(), source = clientFor(payload(), undefined, (params) => params.offset === 0
-      ? orderPayload(firstPage, 21)
-      : orderPayload([order({ shipment_sn: 'ORDER999', method_name: '第二页运输方式' })], 21));
-    await executeFbaLookup(record.id, { createClient: source.createClient });
-    expect(record).toMatchObject({ status: 'completed', requestsUsed: 3, rows: [{ candidates: [{ channel: null, channelStatus: 'ambiguous' }] }, { candidates: [] }] });
-    expect(source.calls).toHaveBeenNthCalledWith(3, 'listInboundShipments', expect.objectContaining({ offset: 20, length: 20 }));
-    expect(state.records.get(fbaLookupSnapshots)?.map((snapshot) => snapshot.page)).toEqual([0, 20, 21]);
-  });
-  it('discards partial channel values when inbound pagination ends early while retaining verified FBA metadata', async () => {
-    const record = run(), source = clientFor(payload(), undefined, orderPayload([order()], 21));
-    await executeFbaLookup(record.id, { createClient: source.createClient });
-    expect(record).toMatchObject({ status: 'completed', requestsUsed: 2, errorCode: null,
-      rows: [{ fba: 'FBA001', candidates: [{ channel: null, channelStatus: 'unavailable', channelOptions: [], destinationFc: 'TEST1' }] }, { fba: 'FBA002', candidates: [] }] });
-    expect(state.records.get(fbaLookupSnapshots)).toHaveLength(2);
-  });
-  it('does not accept an overlapping final inbound page as evidence of a unique channel', async () => {
-    const firstPage = Array.from({ length: 20 }, (_, index) => order({ shipment_sn: `ORDER${String(index).padStart(3, '0')}` }));
-    const record = run(), source = clientFor(payload(), undefined, (params) => params.offset === 0
-      ? orderPayload(firstPage, 21)
-      : orderPayload([firstPage[0]!], 21));
-    await executeFbaLookup(record.id, { createClient: source.createClient });
-    expect(record).toMatchObject({ status: 'completed', requestsUsed: 3, rows: [{ candidates: [{ channel: null, channelStatus: 'unavailable', channelOptions: [] }] }, { candidates: [] }] });
-    expect(source.calls).toHaveBeenNthCalledWith(3, 'listInboundShipments', expect.objectContaining({ offset: 20, length: 20 }));
-    expect(state.records.get(fbaLookupSnapshots)?.map((snapshot) => snapshot.page)).toEqual([0, 20, 21]);
-  });
-  it('does not publish a unique channel when an inbound order is missing its shipment number', async () => {
-    const record = run(), source = clientFor(payload(), undefined, orderPayload([order(), order({ shipment_sn: '' })]));
-    await executeFbaLookup(record.id, { createClient: source.createClient });
-    expect(record).toMatchObject({ status: 'completed', requestsUsed: 2, rows: [{ candidates: [{ channel: null, channelStatus: 'unavailable', channelOptions: [] }] }, { candidates: [] }] });
-    expect(state.records.get(fbaLookupSnapshots)).toHaveLength(2);
-  });
-  it('publishes incomplete linked-order evidence as options for review without auto-filling a channel', async () => {
-    const record = run(), source = clientFor(payload(), undefined, orderPayload([order(), order({ shipment_sn: 'ORDER002', method_name: '' })]));
-    await executeFbaLookup(record.id, { createClient: source.createClient });
-    expect(record).toMatchObject({ status: 'completed', rows: [{ candidates: [{ channel: null, channelStatus: 'unavailable', channelOptions: [{ name: '海派', shipmentNumbers: ['ORDER001'] }] }] }, { candidates: [] }] });
-  });
-  it.each(['LINGXING_READ_FAILED', 'LINGXING_INVALID_RESPONSE', 'LINGXING_NETWORK_ERROR', 'LINGXING_TIMEOUT'] as const)(
-    'retains FBA metadata and marks the channel unavailable after %s', async (code) => {
-      const record = run(), source = clientFor(payload(), undefined, new LingxingReadError(code, '离线模拟读取失败'));
-      await executeFbaLookup(record.id, { createClient: source.createClient });
-      expect(record).toMatchObject({ status: 'completed', requestsUsed: 2, rows: [{ candidates: [{ channel: null, channelStatus: 'unavailable', channelOptions: [] }] }, { candidates: [] }] });
-      expect(state.records.get(fbaLookupSnapshots)?.[1]).toMatchObject({ page: 20, successful: 0 });
-    },
-  );
-  it('stops the whole lookup on inbound rate limiting rather than publishing degraded candidates', async () => {
-    const record = run(), source = clientFor(payload(), undefined, new LingxingReadError('LINGXING_RATE_LIMITED', '离线模拟限流'));
-    await expect(executeFbaLookup(record.id, { createClient: source.createClient })).rejects.toMatchObject({ code: 'LINGXING_RATE_LIMITED' });
-    expect(record).toMatchObject({ status: 'failed', rows: [], requestsUsed: 2, errorCode: 'LINGXING_RATE_LIMITED' });
-    expect(source.calls).toHaveBeenCalledTimes(2);
-    expect(state.records.get(fbaLookupSnapshots)?.[1]).toMatchObject({ page: 20, successful: 0 });
-  });
-  it('stops before an inbound request would exceed the shared request budget', async () => {
-    const record = run(); record.requestsUsed = 39;
-    const source = clientFor(payload(), undefined, orderPayload());
+  it('stops before a shipment request would exceed the request budget', async () => {
+    const record = run(); record.requestsUsed = record.requestBudget;
+    const source = clientFor(payload());
     await expect(executeFbaLookup(record.id, { createClient: source.createClient })).rejects.toMatchObject({ code: 'REQUEST_BUDGET_EXHAUSTED' });
     expect(record).toMatchObject({ status: 'failed', rows: [], requestsUsed: 40, errorCode: 'REQUEST_BUDGET_EXHAUSTED' });
-    expect(source.calls).toHaveBeenCalledOnce();
-    expect(state.records.get(fbaLookupSnapshots)).toHaveLength(1);
+    expect(source.calls).not.toHaveBeenCalled(); expect(state.files).toHaveLength(0);
   });
-  it('rejects a catalog change observed after inbound evidence was archived', async () => {
-    const record = run(), source = clientFor(payload(), (operation) => {
-      if (operation === 'listInboundShipments') state.records.get(sellerCatalogSettings)![0]!.catalogVersion = 3;
-    }, orderPayload());
-    await expect(executeFbaLookup(record.id, { createClient: source.createClient })).rejects.toMatchObject({ code: 'CATALOG_VERSION_CONFLICT' });
-    expect(record).toMatchObject({ status: 'failed', rows: [], errorCode: 'CATALOG_VERSION_CONFLICT' });
-    expect(state.records.get(fbaLookupSnapshots)).toHaveLength(2);
+  it('blocks a client from reading linked orders through metadata lookup hooks', async () => {
+    const record = run();
+    await expect(executeFbaLookup(record.id, { createClient: async (hooks) => ({ read: async () => {
+      await hooks.beforeRequest?.('listInboundShipments');
+      throw new Error('unreachable');
+    } }) })).rejects.toMatchObject({ code: 'LOOKUP_OPERATION_DENIED' });
+    expect(record).toMatchObject({ status: 'failed', rows: [], requestsUsed: 0 });
   });
-  it('does not request inbound orders when no FBA identity is found', async () => {
-    const record = run(), source = clientFor(payload([], 0), undefined, orderPayload());
+  it('does not request additional data when no FBA identity is found', async () => {
+    const record = run(), source = clientFor(payload([], 0));
     await executeFbaLookup(record.id, { createClient: source.createClient });
     expect(record).toMatchObject({ status: 'completed', requestsUsed: 1, rows: [{ status: 'not_found', candidates: [] }, { status: 'not_found', candidates: [] }] });
     expect(source.calls).toHaveBeenCalledOnce();

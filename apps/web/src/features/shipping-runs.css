@@ -31,9 +31,9 @@
 .shipping-ticket-preview { margin-block: .75rem; }
 .shipping-ticket-preview summary, .shipping-run-export-history summary { cursor: pointer; font-weight: 600; }
 .shipping-ticket-preview ol { padding-inline-start: 1.5rem; }
-.online-grid.online-grid-fba-only { width: 100%; }
-.online-grid-fba-only td:nth-child(2) { width: 55%; }
-.online-grid-fba-only td:last-child { min-width: 150px; }
+.online-grid.online-grid-manual { width: 100%; }
+.online-grid-manual td:nth-child(2), .online-grid-manual td:nth-child(4) { width: 35%; }
+.online-grid-manual td:last-child { min-width: 150px; }
 .online-import [hidden] { display: none !important; }
 .shipping-run-export-history { margin-block-start: .5rem; }
 .shipping-run-export-history > summary { margin-block-end: .75rem; }

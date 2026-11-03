@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 export const IMPORT_MAX_BYTES = 10 * 1024 * 1024;
 export const IMPORT_DATE_POLICY = 'import-date-shanghai-v1' as const;
-export const IMPORT_PARSER_VERSION = 'xlsx-preview-v3' as const;
+export const IMPORT_PARSER_VERSION = 'xlsx-preview-v4' as const;
 export const importStatusSchema = z.enum(['queued', 'parsing', 'awaiting_mapping', 'preview_ready', 'failed']);
 export const importRunStatusSchema = z.enum(['queued', 'running', 'completed', 'failed']);
 export const importMappingVersionSchema = z.enum(['feishu-v1', 'manual-v1', 'online-v1', 'fba-list-v1']);

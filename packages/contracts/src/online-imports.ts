@@ -1,6 +1,17 @@
 import { z } from 'zod';
 import { sellerCatalogModeSchema } from './seller-mappings.js';
 
+/** Local intake names: importing shipments must not depend on the Lingxing directory. */
+export const manualTransportMethods = [
+  { name: '海运', initials: 'HY' }, { name: '海派', initials: 'HP' },
+  { name: '空派', initials: 'KP' }, { name: '快递', initials: 'KD' },
+  { name: '铁运', initials: 'TY' }, { name: '卡航', initials: 'KH' },
+] as const;
+export function normalizeManualTransportMethod(value: string): string {
+  const trimmed = value.trim();
+  return manualTransportMethods.find((method) => method.name === trimmed || method.initials === trimmed.toUpperCase())?.name ?? trimmed;
+}
+
 const cell = z.string().max(2000).default('');
 export const onlineImportRowSchema = z.object({
   fba: cell, shop: cell, channel: cell, country: cell, destinationFc: cell,
@@ -36,6 +47,10 @@ export const fbaLookupCandidateSchema = z.object({
   shipmentCreatedAt: z.string().nullable(), channel: z.string().nullable().default(null),
   channelSource: z.literal('method_name').optional(),
   channelStatus: z.enum(['unique', 'ambiguous', 'not_found', 'unavailable']).default('unavailable'),
+  channelIssue: z.object({
+    code: z.enum(['NO_LINKED_ORDER', 'METHOD_MISSING', 'METHOD_INCOMPLETE', 'LOOKUP_FAILED']),
+    message: z.string().min(1), errorCode: z.string().optional(),
+  }).optional(),
   channelOptions: z.array(fbaLookupChannelOptionSchema).default([]), observedAt: z.string(),
 });
 export type FbaLookupCandidate = z.infer<typeof fbaLookupCandidateSchema>;

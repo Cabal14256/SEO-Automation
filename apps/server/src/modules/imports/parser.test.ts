@@ -29,6 +29,11 @@ function multipleSheets(inputs: Array<{ name: string; rows?: string; header?: st
 }
 
 describe('XLSX import preview parser', () => {
+  it.each([['HY', '海运'], [' hp ', '海派'], ['kp', '空派'], ['KD', '快递'], ['ty', '铁运'], ['kh', '卡航'], ['海派', '海派'], ['自定义运输全名', '自定义运输全名']])('normalizes manual transportation input %s without rewriting raw evidence', (input, expected) => {
+    const result = parse(workbook(`<row r="2">${inline('A2', 'Shop-US')}${inline('B2', input)}${inline('E2', 'FBA123')}</row>`));
+    expect(result.rows[0]!.normalized.channel).toBe(expected);
+    expect(result.rows[0]!.rawCells.find((cell) => cell.column === 'B')?.value).toBe(input);
+  });
   it('initial uploads recognize supported headers independently of worksheet names', () => {
     expect(parseImportWorkbook(workbook(row(2, 'FBA123')))).toMatchObject({ sheetName: '需求导入', mappingVersion: 'manual-v1', status: 'preview_ready' });
     expect(parseImportWorkbook(workbook(row(2, 'FBA123'), { sheetName: '原始数据' }))).toMatchObject({ sheetName: '原始数据', mappingVersion: 'manual-v1', status: 'preview_ready' });

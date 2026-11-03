@@ -70,9 +70,8 @@ export async function createOnlineImport(boss: PgBoss, input: OnlineImportInput,
       if (!candidate) throw new ImportError('LOOKUP_CANDIDATE_INVALID', 422, `第 ${index + 1} 行需重新选择 FBA 查询候选。`);
       if (identityText(row.shop) !== identityText(candidate.shop)) throw new ImportError('LOOKUP_SHOP_MISMATCH', 422, `第 ${index + 1} 行的店铺与查询候选不一致，请重新查询或清除查询来源后手工填写。`);
       const remoteFields = [identityText(row.country) === identityText(candidate.country), row.destinationFc.trim() === (candidate.destinationFc ?? ''),
-        row.destinationAddress.trim() === (candidate.destinationAddress ?? ''), row.shipmentCreatedAt.trim() === (candidate.shipmentCreatedAt ?? ''),
-        row.channel.trim() === (candidate.channel ?? '') || (candidate.channelOptions ?? []).some((option) => option.name === row.channel.trim())];
-      evidence.set(index, { source: `${remoteFields.every(Boolean) ? 'lingxing' : 'online+lingxing'}:${lookup.id}:sid=${candidate.sid}`, observedAt: candidate.observedAt });
+        row.destinationAddress.trim() === (candidate.destinationAddress ?? ''), row.shipmentCreatedAt.trim() === (candidate.shipmentCreatedAt ?? '')];
+      evidence.set(index, { source: `${remoteFields.every(Boolean) && !row.channel.trim() ? 'lingxing' : 'online+lingxing'}:${lookup.id}:sid=${candidate.sid}`, observedAt: candidate.observedAt });
     }
   }
   const bytes = await buildOnlineWorkbook(rows, evidence);

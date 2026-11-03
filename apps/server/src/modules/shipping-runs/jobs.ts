@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { PgBoss } from 'pg-boss';
-import type { ConfirmAndAllocateSubBatchInput, FbaLookupCandidate, FbaLookupInput, ImportCommitInput, ImportNormalizedRow, ImportSellerSelection, ShippingRunIssue } from '@scm/contracts';
+import { normalizeManualTransportMethod, type ConfirmAndAllocateSubBatchInput, type FbaLookupCandidate, type FbaLookupInput, type ImportCommitInput, type ImportNormalizedRow, type ImportSellerSelection, type ShippingRunIssue } from '@scm/contracts';
 import { db, pool } from '../../db/client.js';
 import { demands, importCommits, importParseRuns, importPreviews, operationAudit, sellerMappings, sourceImports, sourceImportRows } from '../../db/schema.js';
 import { logError } from '../../errors.js';
@@ -76,7 +76,7 @@ async function lookupStage(boss: PgBoss, run: Run) {
   const dates = lookupDateRange(run.numberingDate);
   // Reuse only verified online evidence from the current catalog and query
   // dates. File metadata text never grants a trusted lookup identity.
-  if (data.record.sourceType === 'online') {
+  if (data.record.sourceType === 'online' && run.checkpoint.lookupAttempt === 0) {
     for (const row of data.rows) {
       const lookupId = /(?:^|[+:])lingxing:([0-9a-f-]{36}):sid=\d+$/i.exec(row.normalized.metadataSource ?? '')?.[1];
       if (!lookupId) continue;
@@ -86,16 +86,26 @@ async function lookupStage(boss: PgBoss, run: Run) {
       if (item) candidates.set(item.fba, { lookupId, candidates: item.candidates });
     }
   }
+  // Restore each checkpoint with its original FBA set before batching the
+  // remaining rows. A retry can refresh online evidence while an unrelated
+  // batch is still in flight, so ordinal keys must not be reassigned.
+  for (const [key, operation] of Object.entries(run.checkpoint.operations)) {
+    if (!key.startsWith('lookup:')) continue;
+    const lookup = operation.resultId ? await getFbaLookup(operation.resultId, run.createdBy)
+      : await requestFbaLookup(boss, operation.input as FbaLookupInput, run.createdBy);
+    if (lookup.status === 'failed') review(lookup.errorCode ?? 'FBA_LOOKUP_FAILED', lookup.errorMessage ?? 'FBA 信息补全失败，请稍后重试。');
+    if (!operation.resultId) await saveResult(run, key, lookup.id);
+    if (lookup.status !== 'completed') return false;
+    for (const item of lookup.rows) candidates.set(item.fba, { lookupId: lookup.id, candidates: item.candidates });
+  }
   const fbas = [...new Set(data.rows.flatMap((row) => candidates.has(row.normalized.fba!) ? [] : [row.normalized.fba!]))];
+  let nextLookupIndex = 0;
   for (let start = 0; start < fbas.length; start += 100) {
-    const key = `lookup:${start / 100}`; let operation = run.checkpoint.operations[key];
-    if (operation?.resultId) {
-      const previous = await getFbaLookup(operation.resultId, run.createdBy);
-      if (previous.status === 'failed') { delete run.checkpoint.operations[key]; await saveCheckpoint(run); operation = undefined; }
-    }
-    const input = await checkpointInput<FbaLookupInput>(run, key, () => ({ operationId: shippingOperationId(run.id, `${key}:${run.checkpoint.lookupAttempt}`), fbas: fbas.slice(start, start + 100), startDate: lookupDateRange(run.numberingDate).startDate, endDate: run.numberingDate, expectedCatalogSettingsVersion: catalog.version, expectedCatalogVersion: catalog.catalogVersion }));
-    const lookup = operation?.resultId ? await getFbaLookup(operation.resultId, run.createdBy) : await requestFbaLookup(boss, input, run.createdBy);
-    if (!run.checkpoint.operations[key]!.resultId) await saveResult(run, key, lookup.id);
+    while (run.checkpoint.operations[`lookup:${nextLookupIndex}`]) nextLookupIndex++;
+    const key = `lookup:${nextLookupIndex++}`;
+    const input = await checkpointInput<FbaLookupInput>(run, key, () => ({ operationId: shippingOperationId(run.id, `${key}:${run.checkpoint.lookupAttempt}`), fbas: fbas.slice(start, start + 100), startDate: dates.startDate, endDate: run.numberingDate, expectedCatalogSettingsVersion: catalog.version, expectedCatalogVersion: catalog.catalogVersion }));
+    const lookup = await requestFbaLookup(boss, input, run.createdBy);
+    await saveResult(run, key, lookup.id);
     if (lookup.status === 'failed') review(lookup.errorCode ?? 'FBA_LOOKUP_FAILED', lookup.errorMessage ?? 'FBA 信息补全失败，请稍后重试。');
     if (lookup.status !== 'completed') return false;
     for (const item of lookup.rows) candidates.set(item.fba, { lookupId: lookup.id, candidates: item.candidates });
@@ -110,13 +120,12 @@ async function lookupStage(boss: PgBoss, run: Run) {
     if (!candidate || !seller) { issues.push({ code: possible?.length ? 'FBA_SHOP_AMBIGUOUS' : 'FBA_NOT_FOUND', message: possible?.length ? 'FBA 对应多个店铺，请在来源中选择店铺候选后重新导入。' : '未找到所选店铺中的 FBA，请检查 FBA、店铺及货件创建日期。', ...extra }); continue; }
     if (row.normalized.country && shippingCountry(row.normalized.country) !== shippingCountry(seller.country)) { issues.push({ code: 'COUNTRY_MISMATCH', message: '来源国家与店铺国家不同，请修正来源。', ...extra }); continue; }
     if (!shippingCountry(seller.country)) { issues.push({ code: 'UNKNOWN_COUNTRY', message: `无法识别国家“${seller.country}”的简写，请维护店铺国家。`, ...extra }); continue; }
-    if (candidate.channelStatus === 'ambiguous' && !(row.normalized.channel && candidate.channelOptions.some((option) => option.name === row.normalized.channel))) { issues.push({ code: 'CHANNEL_AMBIGUOUS', message: '该 FBA 对应多个运输方式，请在来源中明确选择。', ...extra }); continue; }
-    if (candidate.channelStatus === 'unique' && row.normalized.channel && candidate.channel && row.normalized.channel !== candidate.channel) { issues.push({ code: 'CHANNEL_MISMATCH', message: '来源渠道与领星运输方式不同，请核对来源后重新导入。', ...extra }); continue; }
-    if ((!candidate.channel || candidate.channelStatus === 'unavailable' || candidate.channelStatus === 'not_found') && !row.normalized.channel) { issues.push({ code: 'CHANNEL_REQUIRED', message: '领星未提供明确运输方式，请在来源中补充渠道后重试。', ...extra }); continue; }
+    const channel = normalizeManualTransportMethod(row.normalized.channel ?? '');
+    if (!channel) { issues.push({ code: 'CHANNEL_REQUIRED', message: '请在来源中手工填写业务渠道（运输方式），支持全名或拼音首字母缩写。', ...extra }); continue; }
     resolved.push({ row, normalized: { ...row.normalized, shop: row.normalized.shop || seller.name, country: seller.country, sid: seller.sid, sellerMappingId: seller.id, sellerMappingVersion: seller.version,
-      channel: row.normalized.channel || candidate?.channel || null, destinationFc: row.normalized.destinationFc || candidate?.destinationFc || null,
+      channel, destinationFc: row.normalized.destinationFc || candidate?.destinationFc || null,
       destinationAddress: row.normalized.destinationAddress || candidate?.destinationAddress || null, shipmentCreatedAt: row.normalized.shipmentCreatedAt || candidate?.shipmentCreatedAt || null,
-      ...(candidate && match ? { metadataSource: `lingxing:${match.lookupId}:sid=${seller.sid}`, metadataObservedAt: candidate.observedAt } : {}) } });
+      ...(candidate && match ? { metadataSource: `${data.record.sourceType}+lingxing:${match.lookupId}:sid=${seller.sid}`, metadataObservedAt: candidate.observedAt } : {}) } });
   }
   const countryByTicket = new Map<number, Set<string>>();
   for (const entry of resolved) { const index = entry.normalized.sourceTicketIndex ?? 1; const set = countryByTicket.get(index) ?? new Set(); set.add(shippingCountry(entry.normalized.country)!); countryByTicket.set(index, set); }
@@ -130,7 +139,9 @@ async function lookupStage(boss: PgBoss, run: Run) {
     const previousCommits = await tx.select({ id: importCommits.operationId }).from(importCommits).where(eq(importCommits.importId, importId)).limit(1);
     const modifiesRows = resolved.some((entry) => JSON.stringify(entry.row.normalized) !== JSON.stringify(entry.normalized));
     const fields = ['shop', 'country', 'sid', 'sellerMappingId', 'sellerMappingVersion', 'channel', 'destinationFc', 'destinationAddress', 'shipmentCreatedAt'] as const;
-    const changesCommittedFields = resolved.some((entry) => fields.some((field) => (entry.row.normalized[field] ?? null) !== (entry.normalized[field] ?? null)));
+    const changesCommittedFields = resolved.some((entry) => fields.some((field) => field === 'channel'
+      ? normalizeManualTransportMethod(entry.row.normalized.channel ?? '') !== normalizeManualTransportMethod(entry.normalized.channel ?? '')
+      : (entry.row.normalized[field] ?? null) !== (entry.normalized[field] ?? null)));
     if (previousCommits.length && changesCommittedFields) review('SOURCE_ALREADY_COMMITTED', '该来源已提交过需求，不能改写历史补全依据；请复制清单为新的在线来源后重试。');
     const finalRows = resolved.map((entry) => ({ ...entry, filtered: entry.row.issues.filter((issue) => !['SHOP_REQUIRED', 'COUNTRY_REQUIRED', 'SOURCE_MAPPING_REQUIRED', 'SELLER_ALIAS_CONFLICT', 'SELLER_COUNTRY_MISMATCH', 'COUNTRY_MISMATCH'].includes(issue.code)) }));
     const countsAfter = { totalRows: finalRows.length, validFbaRows: finalRows.length, errorRows: finalRows.filter((entry) => entry.filtered.some((issue) => issue.severity === 'error')).length, warningRows: finalRows.filter((entry) => entry.filtered.some((issue) => issue.severity === 'warning')).length };

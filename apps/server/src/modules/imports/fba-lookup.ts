@@ -4,7 +4,7 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { fromDrizzle, type PgBoss } from 'pg-boss';
 import { z } from 'zod';
-import { fbaLookupInputSchema, fbaLookupRecordSchema, type FbaLookupCandidate, type FbaLookupChannelOption, type FbaLookupInput, type FbaLookupRecord, type FbaLookupRow } from '@scm/contracts';
+import { fbaLookupInputSchema, fbaLookupRecordSchema, type FbaLookupCandidate, type FbaLookupInput, type FbaLookupRecord, type FbaLookupRow } from '@scm/contracts';
 import { db, pool } from '../../db/client.js';
 import { fileIndex, operationAudit, sellerMappings, user } from '../../db/schema.js';
 import { readConfig } from '../../config.js';
@@ -23,53 +23,8 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type Run = typeof fbaLookupRuns.$inferSelect;
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown): string | null => typeof value === 'string' && value.trim() ? value.trim() : null;
-const scalarText = (value: unknown): string | null => typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : text(value);
 const normalizedFba = (value: unknown) => text(value)?.toUpperCase() ?? '';
 const sidValue = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
-
-type ChannelResolution = Pick<FbaLookupCandidate, 'channel' | 'channelStatus' | 'channelOptions'>;
-
-/** The intake channel means transport method; logistics channel names never supply a fallback. */
-export function projectInboundShipmentChannels(
-  requested: readonly { sid: number; fba: string }[], scope: readonly FbaLookupSellerScope[], orders: readonly Record<string, unknown>[],
-): Map<string, ChannelResolution> {
-  const sellers = new Map(scope.map((seller) => [seller.sid, seller]));
-  const targets = new Set(requested.map(({ sid, fba }) => `${sid}:${fba}`));
-  const requestedFbas = new Set(requested.map(({ fba }) => fba));
-  const missingMethods = new Set<string>();
-  const evidence = new Map<string, Map<string, { name: string; shipmentNumbers: Set<string>; channelIds: Set<string>; methodNames: Set<string> }>>();
-  for (const order of orders) {
-    if (!['-1', '0', '1', '2'].includes(String(order.status)) || String(order.is_delete) === '1') continue;
-    const shipmentSn = scalarText(order.shipment_sn);
-    const methodName = text(order.method_name);
-    if (!Array.isArray(order.relate_list)) continue;
-    const methodKey = methodName?.replace(/\s+/g, ' ').toLocaleLowerCase('zh-CN') ?? '';
-    for (const relation of order.relate_list) {
-      const row = object(relation), fba = normalizedFba(row.shipment_id);
-      if (!requestedFbas.has(fba)) continue;
-      const sid = sidValue(row.sid), seller = sellers.get(sid);
-      if (!Number.isSafeInteger(sid) || !seller) throw new ImportError('LOOKUP_SCOPE_MISMATCH', 503, '领星发货单关联了本次范围外的店铺，渠道结果未发布。');
-      const key = `${sid}:${fba}`;
-      if (!targets.has(key)) continue;
-      if (!methodName) { missingMethods.add(key); continue; }
-      const values = evidence.get(key) ?? new Map();
-      const entry = values.get(methodKey) ?? { name: methodName, shipmentNumbers: new Set<string>(), channelIds: new Set<string>(), methodNames: new Set<string>() };
-      if (shipmentSn) entry.shipmentNumbers.add(shipmentSn);
-      // These are logistics channel IDs, retained as order evidence only.
-      const channelId = scalarText(order.logistics_channel_id); if (channelId) entry.channelIds.add(channelId);
-      entry.methodNames.add(methodName);
-      values.set(methodKey, entry); evidence.set(key, values);
-    }
-  }
-  return new Map(requested.map(({ sid, fba }) => {
-    const options: FbaLookupChannelOption[] = [...(evidence.get(`${sid}:${fba}`)?.values() ?? [])]
-      .map((entry) => ({ name: entry.name, shipmentNumbers: [...entry.shipmentNumbers].sort(), channelIds: [...entry.channelIds].sort(), methodNames: [...entry.methodNames].sort() }))
-      .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'));
-    const incomplete = missingMethods.has(`${sid}:${fba}`);
-    return [`${sid}:${fba}`, { channel: options.length === 1 && !incomplete ? options[0]!.name : null,
-      channelStatus: incomplete && options.length ? 'unavailable' as const : options.length === 1 ? 'unique' as const : options.length ? 'ambiguous' as const : 'not_found' as const, channelOptions: options }];
-  }));
-}
 
 export function inclusiveLookupEndDate(endDate: string): string {
   const date = new Date(`${endDate}T00:00:00.000Z`);
@@ -90,7 +45,6 @@ export function formatLookupDestinationAddress(value: unknown): string | null {
 /** A partial list is never passed here: only a completed, verified pagination can identify a shop. */
 export function projectFbaLookupRows(
   fbas: readonly string[], scope: readonly FbaLookupSellerScope[], listing: readonly Record<string, unknown>[], observedAt: string,
-  channels = new Map<string, ChannelResolution>(), channelLookupAvailable = true,
 ): FbaLookupRow[] {
   const requested = new Set(fbas);
   const sellers = new Map(scope.map((seller) => [seller.sid, seller]));
@@ -104,8 +58,8 @@ export function projectFbaLookupRows(
     const identity = `${sid}:${fba}`;
     if (seen.has(identity)) throw new ImportError('LOOKUP_DUPLICATE_SHIPMENT', 503, '领星列表出现重复的店铺和 FBA，无法确认唯一结果。');
     seen.add(identity);
-    const channel = channels.get(identity) ?? { channel: null, channelStatus: channelLookupAvailable ? 'not_found' as const : 'unavailable' as const, channelOptions: [] };
-    const candidate: FbaLookupCandidate = { sid, shop: seller.name, country: seller.country, ...channel, channelSource: 'method_name',
+    const candidate: FbaLookupCandidate = { sid, shop: seller.name, country: seller.country,
+      channel: null, channelStatus: 'unavailable', channelOptions: [],
       destinationFc: text(row.destination_fulfillment_center_id), destinationAddress: formatLookupDestinationAddress(row.ship_to_address),
       shipmentCreatedAt: text(row.gmt_create), observedAt };
     candidates.set(fba, [...candidates.get(fba) ?? [], candidate]);
@@ -120,19 +74,6 @@ export function projectFbaLookupRows(
 export function lookupMetadataSnapshot(attempt: LingxingReadAttempt, params: Readonly<Record<string, unknown>>) {
   const payload = object(attempt.payload);
   const source = object(payload.data).list;
-  if (attempt.metadata.operation === 'listInboundShipments') {
-    return { schemaVersion: 'fba-lookup-channels-v1', request: { sids: params.sids, senior_search_list: params.senior_search_list, offset: params.offset, length: params.length, is_delete: params.is_delete },
-      metadata: attempt.metadata, errorCode: attempt.errorCode ?? null,
-      response: { code: attempt.metadata.businessCode, total: scalarText(object(payload.data).total) ?? scalarText(payload.total),
-        list: Array.isArray(source) ? source.map((value) => {
-          const row = object(value);
-          return { shipment_sn: scalarText(row.shipment_sn), logistics_channel_id: scalarText(row.logistics_channel_id),
-            logistics_channel_name: text(row.logistics_channel_name), method_id: scalarText(row.method_id), method_name: text(row.method_name),
-            status: scalarText(row.status), is_delete: scalarText(row.is_delete), relate_list: Array.isArray(row.relate_list) ? row.relate_list.map((relation) => {
-              const item = object(relation); return { sid: scalarText(item.sid), shipment_id: normalizedFba(item.shipment_id) || null };
-            }) : null };
-        }) : null } };
-  }
   const keys = ['sid', 'shipment_id', 'seller', 'destination_fulfillment_center_id', 'gmt_create', 'gmt_modified', 'shipping_mode', 'shipping_solution', 'alpha_code', 'alpha_name', 'sta_shipment_date', 'sta_delivery_start_date', 'sta_delivery_end_date', 'shipped_time'];
   const addressKeys = ['name', 'country_code', 'state_or_province_code', 'city', 'region', 'address_line1', 'address_line2', 'postal_code', 'doorplate'];
   return { schemaVersion: 'fba-lookup-metadata-v1', request: { sid: params.sid, shipment_id: params.shipment_id, start_date: params.start_date,
@@ -146,10 +87,11 @@ export function lookupMetadataSnapshot(attempt: LingxingReadAttempt, params: Rea
 }
 
 function serializeLookup(run: Run): FbaLookupRecord {
-  // Completed legacy lookups contain logistics channel names. Keep their stored
-  // evidence intact, but never replay those values as transport-method results.
-  const rows = run.status === 'completed' ? run.rows.map((row) => ({ ...row, candidates: row.candidates.map((candidate) =>
-    candidate.channelSource === 'method_name' ? candidate : { ...candidate, channel: null, channelStatus: 'unavailable' as const, channelOptions: [] }) })) : [];
+  // Transport methods are supplied by the source. Historical lookup values
+  // remain in stored evidence, but are never replayed into manual channel input.
+  const rows = run.status === 'completed' ? run.rows.map((row) => ({ ...row, candidates: row.candidates.map((candidate) => {
+    return { ...candidate, channel: null, channelSource: undefined, channelStatus: 'unavailable' as const, channelOptions: [], channelIssue: undefined };
+  }) })) : [];
   return fbaLookupRecordSchema.parse({ id: run.id, status: run.status as FbaLookupRecord['status'], startDate: run.startDate, endDate: run.endDate, fbas: run.fbas,
     catalogMode: run.catalogMode as FbaLookupRecord['catalogMode'], catalogSettingsVersion: run.catalogSettingsVersion, catalogVersion: run.catalogVersion,
     createdAt: run.createdAt.toISOString(), completedAt: run.completedAt?.toISOString() ?? null, errorCode: run.errorCode, errorMessage: run.errorMessage,
@@ -287,7 +229,7 @@ async function executeLockedLookup(id: string, dependencies: FbaLookupDependenci
   let page = 0, params: Record<string, unknown> = {}, observedAt = '';
   const hooks: LingxingReadDependencies = {
     beforeRequest: async (operation) => {
-      if (operation !== 'listShipments' && operation !== 'listInboundShipments') throw new ImportError('LOOKUP_OPERATION_DENIED', 422, 'FBA 补全只允许查询货件和关联发货单元数据。');
+      if (operation !== 'listShipments') throw new ImportError('LOOKUP_OPERATION_DENIED', 422, 'FBA 补全只允许查询货件元数据。');
       await db.transaction(async (tx) => {
         const [current] = await tx.select().from(fbaLookupRuns).where(eq(fbaLookupRuns.id, id)).for('update');
         if (!current || current.status !== 'running') throw new ImportError('LOOKUP_NOT_RUNNING', 409, 'FBA 查询已中断，结果不会发布。');
@@ -310,44 +252,14 @@ async function executeLockedLookup(id: string, dependencies: FbaLookupDependenci
     if (result.metadata.requestedAt > observedAt) observedAt = result.metadata.requestedAt;
     return result.payload;
   }, run.maxPages);
-  // Establish the exact sid/FBA identities before reading any linked order.
-  const shipmentRows = projectFbaLookupRows(run.fbas, run.sellerScope, listing.rows, observedAt || new Date().toISOString());
-  const identities = shipmentRows.flatMap((row) => row.candidates.map((candidate) => ({ sid: candidate.sid, fba: row.fba })));
-  let channels = new Map<string, ChannelResolution>(), channelAvailable = true, channelPages = 0;
-  if (identities.length) {
-    try {
-      const channelListing = await fetchCompleteShipmentList(async (pagination, nextPage): Promise<LingxingReadPayload> => {
-        page = run.maxPages + nextPage;
-        params = { sids: [...new Set(identities.map((item) => item.sid))].sort((left, right) => left - right).join(','),
-          senior_search_list: [{ search_field: 'shipment_id', search_value: [...new Set(identities.map((item) => item.fba))] }],
-          is_delete: 0, ...pagination };
-        const result = await client.read('listInboundShipments', params);
-        if (result.metadata.requestedAt > observedAt) observedAt = result.metadata.requestedAt;
-        // Unlike Amazon shipmentList, this endpoint nests its count in data.
-        return { ...result.payload, total: object(result.payload.data).total ?? result.payload.total };
-      }, run.maxPages, 20);
-      channelPages = channelListing.pages;
-      const orderNumbers = channelListing.rows.map((order) => scalarText(order.shipment_sn));
-      if (orderNumbers.some((number) => !number) || new Set(orderNumbers).size !== orderNumbers.length) {
-        throw new BatchSyncError('INCOMPLETE_PAGINATION', '发货单分页缺少唯一单号或存在重叠记录，渠道结果尚不可确认。');
-      }
-      channels = projectInboundShipmentChannels(identities, run.sellerScope, channelListing.rows);
-    } catch (error) {
-      // Failed/partial order reads never produce a channel candidate. They do
-      // not discard independently verified FBA metadata or a person's fallback.
-      if (error instanceof LingxingReadError && ['LINGXING_READ_FAILED', 'LINGXING_INVALID_RESPONSE', 'LINGXING_NETWORK_ERROR', 'LINGXING_TIMEOUT'].includes(error.code)
-        || error instanceof BatchSyncError && ['INCOMPLETE_PAGINATION', 'PAGINATION_CHANGED', 'REPEATED_PAGE', 'PAGE_LIMIT', 'LINGXING_INVALID_RESPONSE'].includes(error.code)) channelAvailable = false;
-      else throw error;
-    }
-  }
-  const rows = projectFbaLookupRows(run.fbas, run.sellerScope, listing.rows, observedAt || new Date().toISOString(), channels, channelAvailable);
+  const rows = projectFbaLookupRows(run.fbas, run.sellerScope, listing.rows, observedAt || new Date().toISOString());
   await db.transaction(async (tx) => {
     const [current] = await tx.select().from(fbaLookupRuns).where(eq(fbaLookupRuns.id, id)).for('update');
     if (!current || current.status !== 'running') throw new ImportError('LOOKUP_NOT_RUNNING', 409, 'FBA 查询已经中断，结果未发布。');
     await validateRun(tx, current);
     await tx.update(fbaLookupRuns).set({ status: 'completed', rows, completedAt: new Date(), errorCode: null, errorMessage: null }).where(eq(fbaLookupRuns.id, id));
     await tx.insert(operationAudit).values({ id: randomUUID(), action: 'fba_lookup.complete', targetId: id, actorUserId: run.createdBy,
-      requestHash: run.requestHash, details: { fbaCount: String(rows.length), pages: String(listing.pages), channelPages: String(channelPages), channelLookup: channelAvailable ? 'completed' : 'unavailable', channelSource: 'method_name', readOnly: 'true' } });
+      requestHash: run.requestHash, details: { fbaCount: String(rows.length), pages: String(listing.pages), channelLookup: 'manual', readOnly: 'true' } });
   });
 }
 

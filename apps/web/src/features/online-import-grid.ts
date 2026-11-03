@@ -1,10 +1,10 @@
-import type { FbaLookupCandidate, FbaLookupRecord, FbaLookupRow, OnlineImportRow, TransportMethod } from '@scm/contracts';
+import { manualTransportMethods, type FbaLookupCandidate, type FbaLookupRecord, type FbaLookupRow, type OnlineImportRow } from '@scm/contracts';
 import { pinyin } from 'pinyin-pro';
 
 export const onlineColumns = [
   { key: 'fba', label: 'FBA 货件号', placeholder: 'FBA…' },
   { key: 'shop', label: '店铺', placeholder: '店铺名称' },
-  { key: 'channel', label: '业务渠道', placeholder: '运输方式，优先通过 FBA 查询' },
+  { key: 'channel', label: '业务渠道', placeholder: '运输方式全名或拼音缩写' },
   { key: 'country', label: '国家', placeholder: '国家' },
   { key: 'destinationFc', label: '目的 FC', placeholder: '如 ONT8' },
   { key: 'destinationAddress', label: '仓库地址', placeholder: '完整地址' },
@@ -14,11 +14,11 @@ export const onlineColumns = [
 ] as const;
 export type OnlineCellKey = typeof onlineColumns[number]['key'];
 export type OnlineChannelMatch = { value: string; candidates: string[] };
-/** Index the current dictionary once; abbreviations never invent transport methods. */
-export function createOnlineChannelMatcher(methods: readonly TransportMethod[]) {
-  const actualNames = new Set(methods.map((method) => method.name));
+/** Resolve complete initials against local names, without requesting a remote directory. */
+export function createOnlineChannelMatcher(names: readonly string[] = manualTransportMethods.map((method) => method.name)) {
+  const actualNames = new Set(names.map((name) => name.trim()).filter(Boolean));
   const literals = new Map<string, string[]>(), initials = new Map<string, string[]>();
-  for (const name of new Set(methods.filter((method) => method.enabled).map((method) => method.name))) {
+  for (const name of actualNames) {
     const abbreviation = pinyin(name, { pattern: 'first', toneType: 'none', type: 'array', nonZh: 'consecutive' })
       .join('').replace(/[^a-z0-9]/gi, '').toUpperCase();
     for (const [index, key] of [[literals, name.toUpperCase()], [initials, abbreviation]] as const) {
@@ -32,16 +32,6 @@ export function createOnlineChannelMatcher(methods: readonly TransportMethod[]) 
     const candidates = literals.get(key) ?? initials.get(key) ?? [];
     return { value: candidates.length === 1 ? candidates[0]! : trimmed, candidates };
   };
-}
-export const isOnlineChannelSelectable = (value: string, methods: TransportMethod[]) => !value.trim() || methods.some((method) => method.enabled && method.name === value);
-export function onlineChannelOptions(methods: TransportMethod[], current: string) {
-  const names = new Map<string, boolean>();
-  for (const method of methods) names.set(method.name, Boolean(names.get(method.name)) || method.enabled);
-  return [
-    { value: '', label: '留空，按 FBA 自动补全', disabled: false },
-    ...[...names].map(([value, enabled]) => ({ value, label: enabled ? value : `${value}（已停用）`, disabled: !enabled })),
-    ...(current && !names.has(current) ? [{ value: current, label: `${current}（原值，请重新选择）`, disabled: true }] : []),
-  ];
 }
 export const emptyOnlineRow = (): OnlineImportRow => ({ fba: '', shop: '', channel: '', country: '', destinationFc: '', destinationAddress: '', shipmentCreatedAt: '', sourceFilledAt: '', referenceQuantity: '', notes: '' });
 export const hasOnlineContent = (row: OnlineImportRow) => onlineColumns.some(({ key }) => row[key].trim() !== '');
@@ -68,8 +58,9 @@ export function onlineTicketPreview(rows: { value: OnlineImportRow }[]) {
 }
 
 export const normalFba = (value: string) => value.trim().toUpperCase();
-export const lookupFields = ['shop', 'country', 'destinationFc', 'destinationAddress', 'shipmentCreatedAt', 'channel'] as const;
-export type AutofilledValues = Partial<Record<typeof lookupFields[number], string>>;
+export const lookupFields = ['shop', 'country', 'destinationFc', 'destinationAddress', 'shipmentCreatedAt'] as const;
+// Legacy drafts may still contain channel provenance; it must never clear manual input.
+export type AutofilledValues = Partial<Record<typeof lookupFields[number] | 'channel', string>>;
 export type OnlineDraftRow = { id: string; value: OnlineImportRow; lookup?: FbaLookupRow; lookupId?: string; autofilled?: AutofilledValues };
 export const candidateValue = (candidate: FbaLookupCandidate, key: typeof lookupFields[number]) => candidate[key] ?? '';
 export const conflictsWith = (row: OnlineImportRow, candidate: FbaLookupCandidate) => lookupFields.filter((key) => row[key].trim() && candidateValue(candidate, key).trim() && row[key].trim() !== candidateValue(candidate, key).trim());
@@ -92,9 +83,8 @@ export function mergeLookupRecord(rows: OnlineDraftRow[], record: FbaLookupRecor
     }
     if (lookup.status !== 'unique' || !lookup.candidates[0]) return { ...row, value, lookup, lookupId: record.id };
     const candidate = lookup.candidates[0], autofilled = { ...row.autofilled };
-    const selectedChannel = adoptedSid === candidate.sid && candidate.channelOptions.some((option) => option.name === value.channel);
-    if (!candidate.channel && !selectedChannel && autofilled.channel !== undefined && value.channel === autofilled.channel) { value.channel = ''; delete autofilled.channel; }
-    for (const key of lookupFields) if ((key === 'channel' || !value[key].trim()) && candidateValue(candidate, key)) {
+    delete autofilled.channel;
+    for (const key of lookupFields) if (!value[key].trim() && candidateValue(candidate, key)) {
       value[key] = candidateValue(candidate, key); autofilled[key] = value[key];
     }
     if (!conflictsWith(value, candidate).length) { value.lookupId = record.id; value.lookupSid = candidate.sid; }
@@ -115,7 +105,7 @@ export function needsLookupReview(row: OnlineDraftRow): boolean {
   if (!/^FBA[A-Z0-9]+$/.test(normalFba(row.value.fba)) || !row.lookup || row.lookup.status === 'not_found') return true;
   const candidate = row.lookup.candidates.find((entry) => entry.sid === row.value.lookupSid);
   if (!candidate || row.value.lookupId !== row.lookupId || conflictsWith(row.value, candidate).length) return true;
-  return candidate.channelStatus !== 'unique' && !candidate.channelOptions.some((option) => option.name === row.value.channel);
+  return false;
 }
 
 export function splitLookupFbas(rows: OnlineDraftRow[], alreadyLookedUp: ReadonlySet<string> = new Set()): string[][] {

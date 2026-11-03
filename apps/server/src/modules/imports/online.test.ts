@@ -58,7 +58,7 @@ describe('online intake snapshots', () => {
     const rows = canonicalOnlineRows(input());
     const result = parseImportWorkbook(await buildOnlineWorkbook(rows));
     expect(result.mappingVersion).toBe('online-v1');
-    expect(result.rows[0]?.normalized).toMatchObject({ fba: 'FBA123', channel: 'HY', referenceQuantity: '0', destinationAddress: '123 Main St', shipmentCreatedAt: '2026-09-01 10:00', sourceFilledAt: '2026-09-02', notes: '=HYPERLINK("https://example.com")' });
+    expect(result.rows[0]?.normalized).toMatchObject({ fba: 'FBA123', channel: '海运', referenceQuantity: '0', destinationAddress: '123 Main St', shipmentCreatedAt: '2026-09-01 10:00', sourceFilledAt: '2026-09-02', notes: '=HYPERLINK("https://example.com")' });
     expect(result.rows[0]?.rawCells.find((cell) => cell.column === 'I')?.formula).toBeNull();
   });
   it('produces the same bytes and content hash for equal input, independent of operation ID', async () => {
@@ -92,7 +92,7 @@ describe('online lookup provenance and retries', () => {
     await createOnlineImport(boss, lookupInput(), 'actor');
     const source = controls.persist.mock.calls[0]![1];
     const result = parseImportWorkbook(source.bytes);
-    expect(result.rows[0]?.normalized).toMatchObject({ metadataSource: `lingxing:${lookupId}:sid=12`, metadataObservedAt: '2026-10-17T00:00:01Z' });
+    expect(result.rows[0]?.normalized).toMatchObject({ metadataSource: `online+lingxing:${lookupId}:sid=12`, metadataObservedAt: '2026-10-17T00:00:01Z' });
     expect(controls.lookup).toHaveBeenCalledWith(lookupId, 'actor');
     expect(source.expectedCatalog).toEqual({ mode: 'lingxing', version: 1, catalogVersion: 2 });
     expect(controls.catalog).toHaveBeenCalledOnce();
@@ -103,21 +103,36 @@ describe('online lookup provenance and retries', () => {
     const source = controls.persist.mock.calls[0]![1];
     expect(parseImportWorkbook(source.bytes).rows[0]?.normalized.metadataSource).toBe(`online+lingxing:${lookupId}:sid=12`);
   });
-  it('preserves an adopted transportation method name and its provenance instead of requiring a short code', async () => {
+  it('preserves manually supplied full transportation names without adopting lookup channel evidence', async () => {
     const lookup = completedLookup();
     Object.assign(lookup.rows[0]!.candidates[0]!, { channel: '自定义海派', channelOptions: [{ name: '自定义海派', shipmentNumbers: ['SP-TEST-001'], channelIds: ['22'], methodNames: ['自定义海派'] }] });
     controls.lookup.mockResolvedValue(lookup);
     await createOnlineImport(boss, lookupInput({ channel: '自定义海派' }), 'actor');
-    expect(parseImportWorkbook(controls.persist.mock.calls[0]![1].bytes).rows[0]?.normalized).toMatchObject({ channel: '自定义海派', metadataSource: `lingxing:${lookupId}:sid=12` });
+    expect(parseImportWorkbook(controls.persist.mock.calls[0]![1].bytes).rows[0]?.normalized).toMatchObject({ channel: '自定义海派', metadataSource: `online+lingxing:${lookupId}:sid=12` });
   });
-  it('records manual channel overrides as combined evidence and accepts an explicitly chosen transportation method', async () => {
+  it('keeps manually entered channels independent of unique or ambiguous historical lookup channels', async () => {
     await createOnlineImport(boss, lookupInput({ channel: '人工渠道' }), 'actor');
     expect(parseImportWorkbook(controls.persist.mock.calls[0]![1].bytes).rows[0]?.normalized.metadataSource).toBe(`online+lingxing:${lookupId}:sid=12`);
     const lookup = completedLookup();
     Object.assign(lookup.rows[0]!.candidates[0]!, { channel: null, channelStatus: 'ambiguous', channelOptions: [{ name: '海派', shipmentNumbers: ['SP-TEST-001'], channelIds: [], methodNames: ['海派'] }, { name: '空派', shipmentNumbers: ['SP-TEST-002'], channelIds: [], methodNames: ['空派'] }] });
     controls.lookup.mockResolvedValue(lookup); controls.persist.mockClear();
     await createOnlineImport(boss, lookupInput({ channel: '空派' }), 'actor');
-    expect(parseImportWorkbook(controls.persist.mock.calls[0]![1].bytes).rows[0]?.normalized).toMatchObject({ channel: '空派', metadataSource: `lingxing:${lookupId}:sid=12` });
+    expect(parseImportWorkbook(controls.persist.mock.calls[0]![1].bytes).rows[0]?.normalized).toMatchObject({ channel: '空派', metadataSource: `online+lingxing:${lookupId}:sid=12` });
+  });
+  it('never fills a blank manual channel from a historical remote transportation method', async () => {
+    await createOnlineImport(boss, lookupInput({ channel: '' }), 'actor');
+    expect(parseImportWorkbook(controls.persist.mock.calls[0]![1].bytes).rows[0]?.normalized).toMatchObject({ channel: null, metadataSource: `lingxing:${lookupId}:sid=12` });
+  });
+  it('keeps the source channel and fingerprint literal while normalizing known manual abbreviations', async () => {
+    const request = input({ channel: ' hp ' });
+    const fingerprint = onlineContentHash(canonicalOnlineRows(request));
+    await createOnlineImport(boss, request, 'actor');
+    const source = controls.persist.mock.calls[0]![1];
+    const row = parseImportWorkbook(source.bytes).rows[0]!;
+    expect(row.normalized.channel).toBe('海派');
+    expect(row.rawCells.find((cell) => cell.column === 'B')?.value).toBe(' hp ');
+    expect(source.requestFingerprint).toBe(fingerprint);
+    expect(request.rows[0]!.channel).toBe(' hp ');
   });
   it('rejects reusing one shop candidate for another shop or another FBA', async () => {
     await expect(createOnlineImport(boss, lookupInput({ shop: '另一个店铺' }), 'actor')).rejects.toMatchObject({ code: 'LOOKUP_SHOP_MISMATCH' });

@@ -5,7 +5,7 @@ import type { DemandSnapshot, FbaLookupInput, ShipmentData } from '@scm/contract
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({ schemaName: `shipping_run_test_${crypto.randomUUID().replaceAll('-', '')}`, pool: null as Pool | null, queuedLookup: false,
-  failSync: false, crashSync: false, lookupCalls: 0, syncCalls: 0, countries: new Map<string, string>(), jobs: new Map<string, string>() }));
+  failChannel: false, failSync: false, crashSync: false, lookupCalls: 0, syncCalls: 0, countries: new Map<string, string>(), jobs: new Map<string, string>() }));
 vi.mock('../../db/client.js', async () => {
   const { Pool } = await import('pg'); const { drizzle } = await import('drizzle-orm/node-postgres'); const { readConfig } = await import('../../config.js');
   state.pool = new Pool({ connectionString: readConfig().DATABASE_URL, options: `-c search_path=${state.schemaName} -c timezone=Asia/Shanghai`, max: 16 });
@@ -14,7 +14,7 @@ vi.mock('../../db/client.js', async () => {
 vi.mock('../imports/fba-lookup.js', async () => {
   const { db } = await import('../../db/client.js'); const { fbaLookupRuns } = await import('../imports/fba-lookup-schema.js'); const { eq } = await import('drizzle-orm');
   const candidates = (fbas: string[]) => fbas.map((fba) => { const country = state.countries.get(fba) ?? 'US'; return { fba, status: 'unique', candidates: [{ sid: country === 'UK' ? 202 : 101, shop: country === 'UK' ? '英国测试店' : '美国测试店', country: country === 'UK' ? '英国' : '美国',
-    channel: '海运', channelStatus: 'unique', channelSource: 'method_name', channelOptions: [], destinationFc: 'FC1', destinationAddress: '测试仓库地址', shipmentCreatedAt: '2026-10-01 12:00:00', observedAt: '2026-10-23T00:00:00.000Z' }] }; });
+    channel: state.failChannel ? null : '海运', channelStatus: state.failChannel ? 'unavailable' : 'unique', channelSource: 'method_name', channelOptions: [], destinationFc: 'FC1', destinationAddress: '测试仓库地址', shipmentCreatedAt: '2026-10-01 12:00:00', observedAt: '2026-10-23T00:00:00.000Z' }] }; });
   const read = async (id: string) => { const [row] = await db.select().from(fbaLookupRuns).where(eq(fbaLookupRuns.id, id)); return { ...row!, createdAt: row!.createdAt.toISOString(), completedAt: row!.completedAt?.toISOString() ?? null }; };
   return { getFbaLookup: read, requestFbaLookup: async (_boss: PgBoss, input: FbaLookupInput, actor: string) => {
     const [old] = await db.select().from(fbaLookupRuns).where(eq(fbaLookupRuns.operationId, input.operationId)); if (old) return read(old.id);
@@ -59,11 +59,13 @@ import { demandRevisions, demands, fileIndex, importCommits, importParseRuns, op
 import { shipmentRevisions, subBatchMembers, subBatches, weeklyBatches } from '../batches/schema.js';
 import { correctGroup, createSubBatch, createWeeklyBatch, confirmAndAllocateGroup, getSubBatchDetail, getWeeklyBatch, mergeGroups, publishCandidate, reviseGroupAfterDemandMutationInTx, splitGroup } from '../batches/service.js';
 import { getShipmentReport } from '../batches/report-service.js';
+import { fbaLookupRuns } from '../imports/fba-lookup-schema.js';
 import { commitImport, createImportPreview } from '../imports/confirmation.js';
 import { eq, sql } from 'drizzle-orm';
 import { createShippingRun, getShippingRun, retryShippingRun } from './service.js';
 import { addShippingTicket, appendShippingTicketMembers, correctShippingRun, createManualShippingRun } from './manual.js';
 import { executeShippingRun, reconcileShippingRuns } from './jobs.js';
+import { lookupDateRange } from './domain.js';
 import { shippingMonthCounters, shippingRunCorrections, shippingRuns, shippingTicketMembers } from './schema.js';
 
 const actor = 'shipping-isolated-admin';
@@ -79,7 +81,7 @@ describe.runIf(process.env.SHIPPING_RUN_DB_TEST === '1')('shipping pipeline with
     for (const [sid, name, country] of [[101, '美国测试店', '美国'], [202, '英国测试店', '英国']] as const) await db.insert(sellerMappings).values({ id: randomUUID(), sid, name, country, status: 'approved', sourceObservedAt: new Date(), sourceSha256: '0'.repeat(64) });
   });
   afterAll(async () => { if (state.pool) { await state.pool.query(`DROP SCHEMA "${state.schemaName}" CASCADE`); await state.pool.end(); } });
-  beforeEach(() => { state.queuedLookup = false; state.failSync = false; state.crashSync = false; state.lookupCalls = 0; state.syncCalls = 0; state.countries.clear(); });
+  beforeEach(() => { state.queuedLookup = false; state.failChannel = false; state.failSync = false; state.crashSync = false; state.lookupCalls = 0; state.syncCalls = 0; state.countries.clear(); });
   async function manualDemand(businessDate = '2026-09-01', weekStartDate = '2026-08-31', weekEndDate = '2026-09-06') {
     const id = randomUUID(), fba = `FBA${randomUUID().replaceAll('-', '').toUpperCase()}`;
     const snapshot: DemandSnapshot = { sid: 101, fba, shop: '美国测试店', country: '美国', channel: '海运', destinationFc: 'FC1', referenceQuantity: null, notes: null, subBatchName: null };
@@ -169,7 +171,7 @@ describe.runIf(process.env.SHIPPING_RUN_DB_TEST === '1')('shipping pipeline with
     expect((await getSubBatchDetail(groupId, actor)).members).toEqual([]);
     expect((await getShipmentReport(actor, { shippingRunId: run.run.id })).confirmations).toEqual([]);
   });
-  async function fixture(tickets: Array<Array<{ fba?: string; country?: string }>> = [[{}]], month = '2026-10') {
+  async function fixture(tickets: Array<Array<{ fba?: string; country?: string; channel?: string }>> = [[{}]], month = '2026-10') {
     const fileId = randomUUID(), importId = randomUUID(), parseRunId = randomUUID();
     await db.insert(fileIndex).values({ id: fileId, storageKey: fileId, sha256: '0'.repeat(64), byteSize: 1, originalName: '技术测试清单.xlsx', mimeType: 'application/octet-stream', createdBy: actor });
     await db.insert(sourceImports).values({ id: importId, fileId, sha256: importId, originalName: '技术测试清单.xlsx', byteSize: 1, createdBy: actor, importedAt: new Date(), businessDate: '2026-10-23', datePolicyVersion: 'import-date-shanghai-v1', weekStartDate: '2026-10-19', weekEndDate: '2026-10-25', status: 'preview_ready', latestRunId: parseRunId });
@@ -178,7 +180,7 @@ describe.runIf(process.env.SHIPPING_RUN_DB_TEST === '1')('shipping pipeline with
     for (const [index, ticket] of tickets.entries()) {
       for (const [memberIndex, member] of ticket.entries()) {
         const fba = member.fba ?? `FBA${randomUUID().replaceAll('-', '').toUpperCase()}`; fbas.push(fba); state.countries.set(fba, member.country ?? 'US');
-        await db.insert(sourceImportRows).values({ id: randomUUID(), parseRunId, sheetName: '清单', rowNumber: rowNumber++, status: 'needs_review', rawCells: [{ address: `A${rowNumber}`, column: 'A', type: 'string', rawValue: fba, value: fba, numberFormat: '@', formula: null, formulaCache: 'not_formula', hidden: false }], normalized: { shop: null, country: null, channel: null, destinationFc: null, fba, referenceQuantity: null, sourceDate: null, sourceRecordId: null, notes: null, subBatchName: null, sellerMappingId: null, sid: null, sellerMappingVersion: null, sourceTicketIndex: index + 1, sourceMemberIndex: memberIndex + 1 }, issues: [{ code: 'SHOP_REQUIRED', severity: 'warning', message: '等待补全' }] });
+        await db.insert(sourceImportRows).values({ id: randomUUID(), parseRunId, sheetName: '清单', rowNumber: rowNumber++, status: 'needs_review', rawCells: [{ address: `A${rowNumber}`, column: 'A', type: 'string', rawValue: fba, value: fba, numberFormat: '@', formula: null, formulaCache: 'not_formula', hidden: false }], normalized: { shop: null, country: null, channel: member.channel ?? '海运', destinationFc: null, fba, referenceQuantity: null, sourceDate: null, sourceRecordId: null, notes: null, subBatchName: null, sellerMappingId: null, sid: null, sellerMappingVersion: null, sourceTicketIndex: index + 1, sourceMemberIndex: memberIndex + 1 }, issues: [{ code: 'SHOP_REQUIRED', severity: 'warning', message: '等待补全' }] });
       }
       rowNumber++;
     }
@@ -205,6 +207,95 @@ describe.runIf(process.env.SHIPPING_RUN_DB_TEST === '1')('shipping pipeline with
     const { completeTestLookups } = await import('../imports/fba-lookup.js') as unknown as { completeTestLookups: () => Promise<void> }; await completeTestLookups();
     await reconcileShippingRuns(boss); const [rescheduled] = await db.select().from(shippingRuns).where(eq(shippingRuns.id, accepted.run.id)); expect(rescheduled!.queueJobId).not.toBe(record!.queueJobId);
     await executeShippingRun(boss, accepted.run.id); expect((await getShippingRun(accepted.run.id, actor)).run.status).toBe('ready'); expect(state.lookupCalls).toBe(1);
+  });
+  it.each([true, false])('refreshes completed lookup evidence while recovering a missing manual channel (saved result: %s)', async (savedResult) => {
+    state.failChannel = true; const data = await fixture([[{ channel: '' }]]); const accepted = await createShippingRun(boss, data.input, actor);
+    await executeShippingRun(boss, accepted.run.id);
+    const blocked = await getShippingRun(accepted.run.id, actor);
+    expect(blocked.run.status).toBe('needs_review'); expect(blocked.run.stage).toBe('lookup'); expect(blocked.issues[0]!.fba).toBe(data.fbas[0]);
+    const [record] = await db.select().from(shippingRuns).where(eq(shippingRuns.id, accepted.run.id));
+    const oldLookupId = record!.checkpoint.operations['lookup:0']!.resultId!;
+    if (!savedResult) {
+      delete record!.checkpoint.operations['lookup:0']!.resultId;
+      await db.update(shippingRuns).set({ checkpoint: record!.checkpoint }).where(eq(shippingRuns.id, accepted.run.id));
+    }
+    const [sourceRow] = await db.select().from(sourceImportRows).where(eq(sourceImportRows.parseRunId, data.input.parseRunId));
+    await db.update(sourceImportRows).set({ normalized: { ...sourceRow!.normalized, channel: ' hp ' } }).where(eq(sourceImportRows.id, sourceRow!.id));
+    const retry = { operationId: randomUUID(), expectedVersion: blocked.run.version };
+    await retryShippingRun(boss, accepted.run.id, retry, actor); await retryShippingRun(boss, accepted.run.id, retry, actor);
+    await executeShippingRun(boss, accepted.run.id); await executeShippingRun(boss, accepted.run.id);
+    expect((await getShippingRun(accepted.run.id, actor)).run.status).toBe('ready'); expect(state.lookupCalls).toBe(2);
+    const [oldLookup] = await db.select().from(fbaLookupRuns).where(eq(fbaLookupRuns.id, oldLookupId));
+    expect(oldLookup!.rows[0]!.candidates[0]!.channelStatus).toBe('unavailable');
+    const [finished] = await db.select().from(shippingRuns).where(eq(shippingRuns.id, accepted.run.id));
+    expect(finished!.checkpoint.operations['lookup:0']!.resultId).not.toBe(oldLookupId);
+  });
+  it('retains an in-flight lookup on explicit recovery and does not issue another external job', async () => {
+    state.queuedLookup = true; const data = await fixture(); const accepted = await createShippingRun(boss, data.input, actor);
+    await executeShippingRun(boss, accepted.run.id);
+    await db.update(shippingRuns).set({ status: 'failed' }).where(eq(shippingRuns.id, accepted.run.id));
+    const failed = await getShippingRun(accepted.run.id, actor);
+    await retryShippingRun(boss, accepted.run.id, { operationId: randomUUID(), expectedVersion: failed.run.version }, actor);
+    await executeShippingRun(boss, accepted.run.id); expect(state.lookupCalls).toBe(1);
+    const { completeTestLookups } = await import('../imports/fba-lookup.js') as unknown as { completeTestLookups: () => Promise<void> }; await completeTestLookups();
+    await executeShippingRun(boss, accepted.run.id);
+    expect((await getShippingRun(accepted.run.id, actor)).run.status).toBe('ready'); expect(state.lookupCalls).toBe(1);
+  });
+  it.each(['unique', 'ambiguous', 'unavailable'] as const)('keeps manual channels when reusing historical %s online lookup evidence', async (channelStatus) => {
+    const data = await fixture([[{ channel: 'hp' }]]);
+    const { requestFbaLookup } = await import('../imports/fba-lookup.js');
+    const dates = lookupDateRange(data.input.numberingDate);
+    const lookup = await requestFbaLookup(boss, { operationId: randomUUID(), fbas: data.fbas, startDate: dates.startDate, endDate: dates.endDate, expectedCatalogSettingsVersion: 1, expectedCatalogVersion: 0 }, actor);
+    const [stored] = await db.select().from(fbaLookupRuns).where(eq(fbaLookupRuns.id, lookup.id));
+    stored!.rows[0]!.candidates[0]!.channelStatus = channelStatus;
+    stored!.rows[0]!.candidates[0]!.channel = '历史空派';
+    await db.update(fbaLookupRuns).set({ rows: stored!.rows }).where(eq(fbaLookupRuns.id, lookup.id));
+    await db.update(sourceImports).set({ sourceType: 'online' }).where(eq(sourceImports.id, data.input.importId));
+    const [row] = await db.select().from(sourceImportRows).where(eq(sourceImportRows.parseRunId, data.input.parseRunId));
+    await db.update(sourceImportRows).set({ normalized: { ...row!.normalized, metadataSource: `lingxing:${lookup.id}:sid=101` } }).where(eq(sourceImportRows.id, row!.id));
+    const accepted = await createShippingRun(boss, data.input, actor); await executeShippingRun(boss, accepted.run.id);
+    expect((await getShippingRun(accepted.run.id, actor)).run.status).toBe('ready'); expect(state.lookupCalls).toBe(1);
+    const [normalized] = await db.select().from(sourceImportRows).where(eq(sourceImportRows.id, row!.id));
+    expect(normalized!.normalized.channel).toBe('海派');
+    expect(normalized!.normalized.metadataSource).toBe(`online+lingxing:${lookup.id}:sid=101`);
+    const [demand] = await db.select().from(demands).where(eq(demands.fba, data.fbas[0]!));
+    expect(demand!.snapshot.channel).toBe('海派');
+  });
+  it('requires a manual channel even when historical lookup evidence has one', async () => {
+    const data = await fixture([[{ channel: '' }]]);
+    const accepted = await createShippingRun(boss, data.input, actor); await executeShippingRun(boss, accepted.run.id);
+    const result = await getShippingRun(accepted.run.id, actor);
+    expect(result.run.status).toBe('needs_review'); expect(result.issues[0]!.code).toBe('CHANNEL_REQUIRED');
+    expect(result.issues[0]!.message).toContain('手工填写'); expect(result.run.sequence).toBeNull();
+  });
+  it('preserves an in-flight lookup FBA set when retrying mixed online evidence', async () => {
+    const data = await fixture([[{}, {}]]), [cachedFba, pendingFba] = data.fbas;
+    const { requestFbaLookup, completeTestLookups } = await import('../imports/fba-lookup.js') as unknown as { requestFbaLookup: typeof import('../imports/fba-lookup.js').requestFbaLookup; completeTestLookups: () => Promise<void> };
+    const dates = lookupDateRange(data.input.numberingDate);
+    const cached = await requestFbaLookup(boss, { operationId: randomUUID(), fbas: [cachedFba!], startDate: dates.startDate, endDate: dates.endDate, expectedCatalogSettingsVersion: 1, expectedCatalogVersion: 0 }, actor);
+    await db.update(sourceImports).set({ sourceType: 'online' }).where(eq(sourceImports.id, data.input.importId));
+    const rows = await db.select().from(sourceImportRows).where(eq(sourceImportRows.parseRunId, data.input.parseRunId));
+    const cachedRow = rows.find((row) => row.normalized.fba === cachedFba)!;
+    await db.update(sourceImportRows).set({ normalized: { ...cachedRow.normalized, metadataSource: `lingxing:${cached.id}:sid=101` } }).where(eq(sourceImportRows.id, cachedRow.id));
+    state.queuedLookup = true;
+    const accepted = await createShippingRun(boss, data.input, actor); await executeShippingRun(boss, accepted.run.id);
+    const [initial] = await db.select().from(shippingRuns).where(eq(shippingRuns.id, accepted.run.id));
+    const pendingId = initial!.checkpoint.operations['lookup:0']!.resultId!;
+    expect(initial!.checkpoint.operations['lookup:0']!.input).toMatchObject({ fbas: [pendingFba] }); expect(state.lookupCalls).toBe(2);
+    await db.update(shippingRuns).set({ status: 'failed' }).where(eq(shippingRuns.id, accepted.run.id));
+    const failed = await getShippingRun(accepted.run.id, actor);
+    await retryShippingRun(boss, accepted.run.id, { operationId: randomUUID(), expectedVersion: failed.run.version }, actor);
+    await executeShippingRun(boss, accepted.run.id); expect(state.lookupCalls).toBe(2);
+    await completeTestLookups(); await executeShippingRun(boss, accepted.run.id);
+    const [refreshing] = await db.select().from(shippingRuns).where(eq(shippingRuns.id, accepted.run.id));
+    expect(refreshing!.checkpoint.operations['lookup:0']!.resultId).toBe(pendingId);
+    expect(refreshing!.checkpoint.operations['lookup:0']!.input).toMatchObject({ fbas: [pendingFba] });
+    expect(refreshing!.checkpoint.operations['lookup:1']!.input).toMatchObject({ fbas: [cachedFba] });
+    expect(refreshing!.checkpoint.operations['lookup:1']!.resultId).not.toBe(cached.id); expect(state.lookupCalls).toBe(3);
+    await executeShippingRun(boss, accepted.run.id); expect(state.lookupCalls).toBe(3);
+    await completeTestLookups(); await executeShippingRun(boss, accepted.run.id); await executeShippingRun(boss, accepted.run.id);
+    const ready = await getShippingRun(accepted.run.id, actor);
+    expect(ready.run.status).toBe('ready'); expect(ready.tickets.flatMap((ticket) => ticket.members.map((member) => member.fba))).toEqual(data.fbas); expect(state.lookupCalls).toBe(3);
   });
   it('allocates different monthly sequences concurrently and starts the next month at one', async () => {
     const fixtures = await Promise.all([fixture(undefined, '2026-11'), fixture(undefined, '2026-11'), fixture(undefined, '2026-12')]);
@@ -236,7 +327,7 @@ describe.runIf(process.env.SHIPPING_RUN_DB_TEST === '1')('shipping pipeline with
     state.failSync = true; const data = await fixture(); const accepted = await createShippingRun(boss, data.input, actor); await executeShippingRun(boss, accepted.run.id);
     const blocked = await getShippingRun(accepted.run.id, actor); expect(blocked.run.status).toBe('needs_review'); const number = blocked.tickets[0]!.number;
     state.failSync = false; await retryShippingRun(boss, accepted.run.id, { operationId: randomUUID(), expectedVersion: blocked.run.version }, actor); await executeShippingRun(boss, accepted.run.id); await executeShippingRun(boss, accepted.run.id);
-    const ready = await getShippingRun(accepted.run.id, actor); expect(ready.run.status).toBe('ready'); expect(ready.tickets[0]!.number).toBe(number);
+    const ready = await getShippingRun(accepted.run.id, actor); expect(ready.run.status).toBe('ready'); expect(ready.tickets[0]!.number).toBe(number); expect(state.lookupCalls).toBe(1);
   });
   it('prevents the same demand from being occupied by another shipping run', async () => {
     const first = await fixture(); const a = await createShippingRun(boss, first.input, actor); await executeShippingRun(boss, a.run.id);
@@ -292,9 +383,9 @@ describe.runIf(process.env.SHIPPING_RUN_DB_TEST === '1')('shipping pipeline with
     expect(concurrent[0].tickets[0]!.members[0]!.demandId).toBe(demandIds[0]); expect(concurrent[1].tickets[0]!.members[0]!.demandId).toBe(demandIds[1]);
     expect(concurrent[2].rows.map((row) => row.fba)).toEqual([included]); expect(concurrent[3].rows.map((row) => row.fba)).toEqual([extra]);
   });
-  it('links an already committed source without modifying its historical normalized rows', async () => {
+  it.each(['海运', 'HY', 'hp', '自定义运输全名'])('links an already committed %s source without modifying its historical channel or normalized rows', async (channel) => {
     const source = await fixture(); const [row] = await db.select().from(sourceImportRows).where(eq(sourceImportRows.parseRunId, source.input.parseRunId)); const [mapping] = await db.select().from(sellerMappings).where(eq(sellerMappings.sid, 101));
-    const normalized = { ...row!.normalized, shop: mapping!.name, country: mapping!.country, channel: '海运', destinationFc: 'FC1', destinationAddress: '测试仓库地址', shipmentCreatedAt: '2026-10-01 12:00:00', sellerMappingId: mapping!.id, sid: mapping!.sid, sellerMappingVersion: mapping!.version };
+    const normalized = { ...row!.normalized, shop: mapping!.name, country: mapping!.country, channel, destinationFc: 'FC1', destinationAddress: '测试仓库地址', shipmentCreatedAt: '2026-10-01 12:00:00', sellerMappingId: mapping!.id, sid: mapping!.sid, sellerMappingVersion: mapping!.version };
     await db.update(sourceImportRows).set({ normalized, status: 'valid', issues: [] }).where(eq(sourceImportRows.id, row!.id));
     const preview = await createImportPreview(source.input.importId, { expectedVersion: 1, parseRunId: source.input.parseRunId, sellerSelections: [{ sourceShop: mapping!.name, sellerMappingId: mapping!.id, expectedVersion: 1, confirmed: true }], expectedCatalogSettingsVersion: 1, expectedCatalogVersion: 0 }, actor);
     await commitImport(source.input.importId, { operationId: randomUUID(), previewId: preview.preview.id, selectedItemIds: preview.preview.selectableItemIds, confirmedChangedItemIds: [] }, actor);
@@ -302,6 +393,10 @@ describe.runIf(process.env.SHIPPING_RUN_DB_TEST === '1')('shipping pipeline with
     expect((await getShippingRun(accepted.run.id, actor)).run.status).toBe('ready');
     const [after] = await db.select().from(sourceImportRows).where(eq(sourceImportRows.id, row!.id)); expect(after!.normalized).toEqual(normalized);
     const [record] = await db.select().from(sourceImports).where(eq(sourceImports.id, source.input.importId)); expect(record!.version).toBe(1);
+    const [demand] = await db.select().from(demands).where(eq(demands.fba, normalized.fba!));
+    expect(demand!.snapshot.channel).toBe(channel); expect(demand!.version).toBe(1);
+    const [parse] = await db.select().from(importParseRuns).where(eq(importParseRuns.id, source.input.parseRunId));
+    expect(parse!.parserVersion).toBe('xlsx-preview-v3');
   });
   it('invalidates ready state when candidate data changes, recovers with the same number and blocks removed members', async () => {
     const data = await fixture(); const accepted = await createShippingRun(boss, data.input, actor); await executeShippingRun(boss, accepted.run.id); const ready = await getShippingRun(accepted.run.id, actor);

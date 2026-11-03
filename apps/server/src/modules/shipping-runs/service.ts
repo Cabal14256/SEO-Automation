@@ -174,12 +174,22 @@ export async function retryShippingRun(boss: PgBoss, runId: string, input: Retry
       await tx.delete(shippingTicketMembers).where(eq(shippingTicketMembers.runId, runId)); await tx.delete(shippingTickets).where(eq(shippingTickets.runId, runId));
       checkpoint.operations = {}; checkpoint.lookupAttempt++;
     } else {
-      // Failed lookups have immutable operation IDs. Retain successful batches,
-      // create a new lookup only for a failed batch, and re-evaluate previews.
+      // A completed lookup can still lack usable channels. An explicit retry
+      // at this stage refreshes terminal evidence with a new operation ID;
+      // in-flight reads and evidence used by later stages remain reusable.
       checkpoint.lookupAttempt++;
       for (const key of Object.keys(checkpoint.operations)) if (key === 'commit-preview' || key.startsWith('confirm:')) delete checkpoint.operations[key];
       if (!committed.length) delete checkpoint.operations['commit-request'];
       for (const [key, operation] of Object.entries(checkpoint.operations)) {
+        if (run.stage === 'lookup' && key.startsWith('lookup:')) {
+          const operationId = (operation.input as { operationId?: string }).operationId;
+          const [lookup] = operation.resultId
+            ? await tx.select().from(fbaLookupRuns).where(eq(fbaLookupRuns.id, operation.resultId))
+            : operationId ? await tx.select().from(fbaLookupRuns).where(eq(fbaLookupRuns.operationId, operationId)) : [];
+          if (!lookup || ['completed', 'failed'].includes(lookup.status)) delete checkpoint.operations[key];
+          else operation.resultId = lookup.id;
+          continue;
+        }
         if (operation.resultId) continue;
         const operationId = (operation.input as { operationId?: string }).operationId;
         if (!operationId) continue;

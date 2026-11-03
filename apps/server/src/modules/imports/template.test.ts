@@ -42,10 +42,11 @@ describe('downloadable demand import template', () => {
     const parsed = parseWorkbook(bytes, { sheetName: IMPORT_TEMPLATE_SHEET_NAME, mappingVersion: 'online-v1', parseRunId: randomUUID(), sellers: [seller] });
     expect(parsed.rows).toHaveLength(1);
     expect(parsed.rows[0]).toMatchObject({ rowNumber: 2, status: 'needs_review', issues: [expect.objectContaining({ code: 'HIDDEN_MAPPED_COLUMN', column: 'F' })], normalized: {
-      shop: '模板技术店', sid: 101, fba: 'FBATEMPLATE001', channel: 'HY', country: '美国', destinationFc: 'ONT8',
+      shop: '模板技术店', sid: 101, fba: 'FBATEMPLATE001', channel: '海运', country: '美国', destinationFc: 'ONT8',
       referenceQuantity: '0', sourceFilledAt: '2026-10-18T07:08:09Z', shipmentCreatedAt: '2026-10-16T02:03:04Z',
       subBatchName: '来源标签', notes: '=1+1', destinationAddress: 'TECHNICAL ONLY destination address',
     } });
+    expect(parsed.rows[0]!.rawCells.find((cell) => cell.column === 'B')).toMatchObject({ value: 'HY', formula: null });
     expect(parsed.rows[0]!.rawCells.find((cell) => cell.column === 'G')).toMatchObject({ type: 'n', formula: null });
     expect(parsed.rows[0]!.rawCells.find((cell) => cell.column === 'I')).toMatchObject({ value: '=1+1', formula: null });
     expect(parsed.rows[0]!.normalized.metadataSource ?? null).toBeNull();

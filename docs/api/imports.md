@@ -1,10 +1,10 @@
 # T08–T11 上传、解析、差异与确认提交契约
 
-版本：1.7。更新：2026-10-23（`Asia/Shanghai`）。本契约覆盖上传前校验、模板下载、T09解析及T10–T11映射、差异、选择提交、需求版本、导入草稿和统一发货工作台的需求管理。仅有效管理员可访问。周批次和子批次业务接口及领星同步见[批次契约](batches.md)。
+版本：1.8。更新：2026-11-03（`Asia/Shanghai`）。本契约覆盖上传前校验、模板下载、T09解析及T10–T11映射、差异、选择提交、需求版本、导入草稿和统一发货工作台的需求管理。仅有效管理员可访问。周批次和子批次业务接口及领星同步见[批次契约](batches.md)。
 
 共享Zod定义见 `packages/contracts/src/imports.ts`、`demands.ts`、`demand-workspace.ts` 和 `import-drafts.ts`。页面为 `/imports`、`/imports/new` 和 `/imports/$importId`，统一发货工作台为 `/shipping`。上传保存不代表业务需求确认；必须生成差异预览并选择提交。提交建立需求和版本，不创建周批次、子批次或领星任务。
 
-2026-10-23 新增[本次发货自动整理](shipping-runs.md)：新导入默认按空白行分票，可仅提供单列 FBA；后台依次补全、提交和制表。上述手动确认流程在“仅导入需求”模式保留。源行增加可选 `sourceTicketIndex`、`sourceMemberIndex`，草稿保存编号日期和分票边界，票号不写入需求内容字段。
+2026-10-23 新增[本次发货自动整理](shipping-runs.md)：新导入默认按空白行分票；2026-11-03 起，在线默认填写 FBA 和业务渠道，后台补全其余货件资料后依次提交和制表。单列 FBA 文件仍可解析，但自动整理前须通过修正来源补齐运输方式。上述手动确认流程在“仅导入需求”模式保留。源行增加可选 `sourceTicketIndex`、`sourceMemberIndex`，草稿保存编号日期和分票边界，票号不写入需求内容字段。
 
 ## 权限与文件
 
@@ -16,7 +16,7 @@
 
 ## 接口
 
-`GET /api/v1/imports/transport-methods`：仅已登录且未停用的管理员可读取领星运输方式字典，无需任务队列。响应为 `{items:[{id,name,enabled,remark}],queriedAt}`，其中 `id` 保持字符串精度，列表包含停用项以供历史值展示。通过统一领星只读客户端查询 `listTransportMethods`，只返回完整有效的列表；缓存五分钟并合并并发请求，领星连接错误返回 503 与对应错误码。在线来源的业务渠道下拉只允许新选已启用名称；空白允许按 FBA 自动补全，旧值或粘贴的非字典值保留并提示修正。历史来源和已提交快照不回写。
+`GET /api/v1/imports/transport-methods`：仅已登录且未停用的管理员可读取领星运输方式字典，无需任务队列。响应为 `{items:[{id,name,enabled,remark}],queriedAt}`，其中 `id` 保持字符串精度，列表包含停用项以供历史值展示。通过统一领星只读客户端查询 `listTransportMethods`，只返回完整有效的列表；缓存五分钟并合并并发请求，领星连接错误返回 503 与对应错误码。该接口保留兼容，2026-11-03 起发货导入不调用它。发票服务映射设置仍独立使用领星运输方式目录。
 
 | 方法与路径（均带 `/api/v1`） | 请求 | 结果 |
 | --- | --- | --- |
@@ -48,7 +48,7 @@
 
 ## 状态、幂等和版本
 
-导入状态：上传校验通过后 `queued → parsing → preview_ready/failed`；需要人工选表时直接保存为 `awaiting_mapping`（元数据运行 completed，未排队），人工确认后再进入 queued。解析运行状态：`queued → running → completed/failed`；completed代表该运行完成，即使部分源行有错误也不代表需求有效。每次重新解析增加导入version，建立新的run；历史行绑定parseRunId，保持不可变。重新解析不修改原文件或业务日期。新解析器标识为 `xlsx-preview-v2`，历史运行保留原版本。
+导入状态：上传校验通过后 `queued → parsing → preview_ready/failed`；需要人工选表时直接保存为 `awaiting_mapping`（元数据运行 completed，未排队），人工确认后再进入 queued。解析运行状态：`queued → running → completed/failed`；completed代表该运行完成，即使部分源行有错误也不代表需求有效。每次重新解析增加导入version，建立新的run；历史行绑定parseRunId，保持不可变。重新解析不修改原文件或业务日期。2026-11-03 新解析器标识为 `xlsx-preview-v4`，相对 v3 增加本地渠道缩写归一，`mappingVersion` 保持不变；历史运行保留原版本，成功请求重放仍返回原记录。
 
 写请求必须同源且带operationId。同操作者、对象/文件及内容重放返回原run；同operationId不同请求409。新操作号但同一操作者及相同文件SHA-256返回原导入和原日期，不新增文件或任务。不同操作者上传相同字节拥有各自隔离记录。解析请求先检查已完成幂等操作，再检查expectedVersion；并发提交旧版本或导入忙返回409，不自动覆盖或自动重试。页面网络失败保留文件/选项和operationId，同一请求可显式重试。
 
@@ -129,22 +129,23 @@ sellerSelections逐项包含sourceShop、sellerMappingId、expectedVersion、con
 
 `POST /api/v1/imports/online` 接收 `{operationId, rows}`，最多1000行。文本字段为 `fba/shop/channel/country/destinationFc/destinationAddress/shipmentCreatedAt/sourceFilledAt/referenceQuantity/notes`；采用查询候选时同时提交 `lookupId/lookupSid`。服务端生成不可变“在线填写快照.xlsx”，使用“在线需求导入”工作表及 `online-v1` 映射，返回现有202 `ImportAccepted`，继续经过源行预览、店铺确认、差异及显式提交。公式样文字按文本保存。操作号幂等基于标准字段顺序的输入内容，等值输入生成相同快照字节；同操作号异内容409。
 
-`POST /api/v1/imports/fba-lookups` 接收 `{operationId,fbas,startDate,endDate,expectedCatalogSettingsVersion,expectedCatalogVersion}`，最多100个不同FBA，UI日期两端均包含。服务端将结束日期转换为领星左闭右开的次日，限定当前可用店铺范围，不自动扩大日期。返回202 `FbaLookupRecord`；通过 `GET /api/v1/imports/fba-lookups/:id` 轮询。完成后每票为 `unique/ambiguous/not_found` 及候选店铺、国家、目的FC、地址、创建时间、取数时间；每个候选另返回 `channel`、`channelStatus` 和 `channelOptions`。货件查询失败或分页不完整时不发布补全结果。
+`POST /api/v1/imports/fba-lookups` 接收 `{operationId,fbas,startDate,endDate,expectedCatalogSettingsVersion,expectedCatalogVersion}`，最多100个不同FBA，UI日期两端均包含。服务端将结束日期转换为领星左闭右开的次日，限定当前可用店铺范围，不自动扩大日期。返回202 `FbaLookupRecord`；通过 `GET /api/v1/imports/fba-lookups/:id` 轮询。完成后每票为 `unique/ambiguous/not_found` 及候选店铺、国家、目的FC、地址、创建时间、取数时间。货件查询失败或分页不完整时不发布补全结果。
 
 在线“补全并解析”按标准化 FBA 去重，每批最多 100 个顺序查询，汇总后一次保存在线快照，保留 1000 行容量。查询未找到、失败或存在差异时暂停，用户处理或明确选择按当前填写继续后再解析。查询与提交结果不确定时复用各自操作编号，已完成批次不重复发起；终态失败任务重试使用新查询操作编号。在线草稿可选保存 `pendingSubmission` 原请求，须与草稿 `operationId/rows` 一致；恢复后直接重试原提交，不重新补全或修改内容。正式需求仍须在差异预览后显式提交。
 
-Worker 先完整读取并校验领星货件列表，再以实际找到的 `sid + FBA` 集合，通过只读 operation `listInboundShipments`（`POST /erp/sc/routing/storage/shipment/getInboundShipmentList`）查询关联发货单。请求使用店铺集合 `sids`、FBA 精准条件 `senior_search_list` 和 `is_delete=0`；发货单每页20条，每类列表最多20页，两阶段共用40次请求预算。响应按 `relate_list[].sid + shipment_id` 再次核对，只接纳 `status=-1/0/1/2` 的有效单，作废、删除及未知状态剔除。业务渠道指头程运输方式，只取 `method_name`，不以物流渠道名称 `logistics_channel_name` 或平台SPD/LTL字段回退。
+2026-11-03 起，Worker 只通过 `listShipments` 完整读取并校验领星货件列表，核对实际找到的 `sid + FBA` 身份；不再调用 `listInboundShipments` 查询关联发货单，也不读取运输方式目录。每类货件列表最多20页，沿用40次请求预算。限流、请求预算耗尽、目录或查询范围变化仍中止本轮，不发布不完整的货件结果。
 
-兼容保留 `channel`、`channelStatus`、`channelOptions` 字段名。`channelOptions` 按运输方式逐项保存 `name`（来自 `method_name`）、`shipmentNumbers`、`channelIds`（返回时）和 `methodNames`；`channelIds` 仅为关联发货单的物流渠道证据，不代表运输方式 ID。新查询候选带 `channelSource='method_name'`；缺少该标记的历史已完成查询在读取或操作号重放响应中清空渠道及候选、标为 `unavailable`，保留货件元数据，不改写历史数据库记录。旧草稿原值保留，可重新查询更新。渠道状态规则如下：
+业务渠道由来源手工填写，在线默认与 FBA 一起显示普通输入框，支持逐格输入、单列粘贴及完整表格粘贴。全名直接采用；本地将 `HY/HP/KP/KD/TY/KH` 分别识别为海运、海派、空派、快递、铁运、卡航，忽略首尾空格和缩写大小写。其他运输方式全名及未知文本保留，不以领星字典是否存在或启用阻止提交。在线和文件解析的标准化渠道均采用上述六种识别规则；文件原始来源、已保存请求指纹和已提交历史快照不回写。
 
-| `channelStatus` | 含义与在线表处理 |
-| --- | --- |
-| `unique` | 所有有效关联单的非空运输方式一致且无运输方式缺失；`channel` 返回该方式，采用货件候选时优先填入或覆盖当前渠道，包括 HYKD 等旧缩写；同一运输方式对应多个物流渠道仍可为唯一结果 |
-| `ambiguous` | 得到多个运输方式；不自动填入，用户显式选择候选或手工填写 |
-| `not_found` | 未取得有效运输方式；保留手工内容并提示人工确认 |
-| `unavailable` | 运输方式查询失败、分页不完整，或部分有效关联单缺少运输方式但存在已知候选；不声称唯一，保留手工内容，已有候选可显式选择 |
+继续整理已提交的旧来源时，仅在渠道兼容比较中将上述缩写与全名视为等价，例如 `HY` 与“海运”；已提交来源行和需求快照保留原值。这不改变新来源的需求差异规则，新来源与旧缩写需求是否形成变化仍按预览结果核对。
 
-关联发货单接口失败或分页不完整时降级为渠道 `unavailable`，仍发布此前已完整校验的货件元数据；限流、请求预算耗尽、目录或查询范围变化则中止本轮，不发布补全结果。该能力接入在线表“通过 FBA 补全信息”，文件导入仍保留来源渠道原值，不自动发起领星查询；新规则不回写历史导入、需求或确认快照，不改变渠道必填规则。
+默认收起补充资料时，从 FBA 格粘贴且每行至多两列的内容按可见的“FBA、业务渠道”对齐；含三列及以上的完整表格，或展开补充资料后的粘贴，继续按原列顺序处理，保持既有多列表格兼容。
+
+兼容保留候选 `channel`、`channelStatus`、`channelOptions`、可选 `channelSource/channelIssue` 的契约。新查询以及历史已完成查询的读取或操作号重放响应统一返回 `channel=null`、`channelStatus=unavailable`、`channelOptions=[]`，不返回旧运输方式来源及错误；数据库中的历史证据保持原样。这里的 `unavailable` 表示该补全流程不提供运输方式，不能解释为一次运输方式查询失败。客户端和后台整理均忽略旧候选渠道，不将其填入来源、不作渠道差异校验，也不因旧渠道状态暂停。
+
+采用 FBA 候选只补全店铺、国家、目的 FC、仓库地址和货件创建时间，业务渠道始终保留手填内容。自动整理要求每个有效来源行渠道非空，缺少时返回 `CHANNEL_REQUIRED` 并定位到票/FBA，前台在线提交也会提前提示；“仅导入需求”保持原有可留空规则。查询证据中的纯领星字段比较不再包含渠道。
+
+发货自动整理停在补全阶段时，显式点击“处理后继续整理”会用新操作号刷新已完成或失败的补全查询，并重新核验在线来源的旧补全依据；排队中或运行中的查询继续复用。已进入提交或同步阶段的查询依据保留，重复提交同一重试操作号不新增查询。
 
 查询只获取元数据，不建立需求、分组或商品装箱版本，不写回领星。候选店铺的别名审批状态不限制只读查询，停用或实际目录未授权店铺排除。在线来源记录为 `sourceType=online`，历史与文件上传为 `xlsx`；列表另提供 `submissionStatus/submittedSourceRows`。填写、创建、实际发货及首次导入业务日期各自保存。新增字段兼容旧快照缺值；来源填写日期仍属于证据，不因更换来源日期生成需求变化。
 
@@ -163,4 +164,4 @@ Worker 先完整读取并校验领星货件列表，再以实际找到的 `sid +
 
 草稿行允许尚未补齐的业务字段，但仍受字段类型、长度及文件大小校验。草稿保存结果未知时，前端锁住原 ID、期望版本及内容，显式重试原请求；已知 4xx 校验或版本错误后才解除原请求锁并修改或另存。恢复草稿不自动采用旧版本确认；当前解析、目录和需求版本检查仍在正式预览/提交路径执行。普通勾选不作为持久确认，已经发起的未知业务提交保留原 payload 和操作号用于重放。浏览器刷新/关闭只受原生离开提醒约束，不能保证退出时执行自定义异步保存；当前操作流程见[草稿箱与恢复](../operations/runbook.md#需求导入草稿箱2026-10-19)，其规则覆盖旧标签页自动恢复行为。
 
-头程运输方式的官方 API 核验及实现边界见[通过 FBA 查询头程运输方式](../integrations/fba-logistics-channel.md)：在线补全读取关联领星发货单的 `method_name`；2026-10-23 口径调整未新增真实账号调用验证。
+运输方式手填与 FBA 补全的当前边界见[运输方式输入与接口核验记录](../integrations/fba-logistics-channel.md)。旧版关联发货单取数记录仅作历史参考，不代表当前导入会请求运输方式。

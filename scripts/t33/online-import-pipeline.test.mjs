@@ -2,22 +2,25 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { importDraftContentSchema } from '../../packages/contracts/dist/import-drafts.js';
-import { currentLookupRecord, emptyOnlineRow, mergeLookupRecord, needsLookupReview, refreshLookupEvidence, splitLookupFbas, trimOnlineRows, onlineTicketPreview, parsePastedCells, createOnlineChannelMatcher, isOnlineChannelSelectable, onlineChannelOptions } from '../../apps/web/src/features/online-import-grid.ts';
+import { normalizeManualTransportMethod } from '../../packages/contracts/dist/online-imports.js';
+import { clearAutofilled, currentLookupRecord, emptyOnlineRow, mergeLookupRecord, needsLookupReview, refreshLookupEvidence, splitLookupFbas, trimOnlineRows, onlineTicketPreview, parsePastedCells, createOnlineChannelMatcher } from '../../apps/web/src/features/online-import-grid.ts';
 
-const method = (name, enabled = true, id = name) => ({ id, name, enabled, remark: '' });
-
-test('pasted pinyin initials resolve to the actual enabled dictionary values', () => {
+test('manual names and pasted pinyin initials resolve locally without a directory', () => {
   const names = ['海运', '海派', '空派', '快递', '铁运', '卡航'];
-  const match = createOnlineChannelMatcher(names.map((name) => method(name)));
+  const match = createOnlineChannelMatcher();
   const pasted = parsePastedCells(' HY \r\nhp\r\nKP\r\nkd\r\nTy\r\nkh\r\n');
   assert.deepEqual(pasted.map(([value]) => match(value).value), names);
+  assert.deepEqual(pasted.map(([value]) => normalizeManualTransportMethod(value)), names);
   for (const name of names) assert.equal(match(` ${name} `).value, name);
-  for (const value of ['', 'HYKD', '海运整柜', '__proto__']) assert.equal(match(value).value, value);
+  for (const value of ['', 'HYKD', '海运整柜', '__proto__', '欧洲铁路专线']) {
+    assert.equal(match(value).value, value);
+    assert.equal(normalizeManualTransportMethod(value), value);
+  }
   assert.equal(match('  ').value, '');
 });
 
 test('new channel names, phrase pronunciation and mixed identifiers require no fixed alias table', () => {
-  const match = createOnlineChannelMatcher(['欧洲铁路专线', '重庆专线', 'US 海派-2'].map((name) => method(name)));
+  const match = createOnlineChannelMatcher(['欧洲铁路专线', '重庆专线', 'US 海派-2']);
   assert.equal(match(' oztlzx ').value, '欧洲铁路专线');
   assert.equal(match('CQZX').value, '重庆专线');
   assert.equal(match('ushp2').value, 'US 海派-2');
@@ -25,39 +28,20 @@ test('new channel names, phrase pronunciation and mixed identifiers require no f
   assert.equal(match('HY').value, 'HY', 'missing names never become invented dictionary options');
 });
 
-test('ambiguous pinyin initials stay unchanged with distinct candidates for manual selection', () => {
-  const match = createOnlineChannelMatcher([method('海派'), method('海配'), method('海派', true, 'duplicate')]);
+test('ambiguous local initials stay unchanged and complete literal names take priority', () => {
+  const match = createOnlineChannelMatcher(['海派', '海配', '海派']);
   assert.deepEqual(match(' hp '), { value: 'hp', candidates: ['海派', '海配'] });
   assert.deepEqual(match('海派'), { value: '海派', candidates: [] }, 'an exact actual value wins');
-  const actualCode = createOnlineChannelMatcher([method('HP'), method('海派'), method('海配')]);
+  const actualCode = createOnlineChannelMatcher(['HP', '海派', '海配']);
   assert.equal(actualCode('HP').value, 'HP');
   assert.equal(actualCode('hp').value, 'HP', 'a literal dictionary value wins over pinyin initials');
 });
 
-test('disabled and unavailable dictionary entries do not resolve abbreviations', () => {
-  const methods = [method('海派'), method('海配', false), method('卡航', false)];
-  const match = createOnlineChannelMatcher(methods);
-  assert.equal(match('HP').value, '海派', 'disabled names do not create ambiguity');
-  assert.equal(match('KH').value, 'KH');
-  assert.equal(match('海配').value, '海配', 'disabled exact values remain visible for correction');
-  assert(isOnlineChannelSelectable(match('HP').value, methods));
-  assert(!isOnlineChannelSelectable(match('KH').value, methods));
-  assert(!isOnlineChannelSelectable(match('HY').value, methods));
-  assert.equal(createOnlineChannelMatcher([])('HP').value, 'HP', 'keep input until the dictionary is available');
-});
-
-test('transport dropdown preserves unknown values and excludes disabled methods from new selections', () => {
-  const methods = [{ id: '1', name: '海派', enabled: true, remark: '' }, { id: '2', name: '海卡', enabled: false, remark: '' }];
-  assert(isOnlineChannelSelectable('', methods));
-  assert(isOnlineChannelSelectable('海派', methods));
-  assert(!isOnlineChannelSelectable('海运', methods));
-  assert(!isOnlineChannelSelectable('海卡', methods));
-  assert(!isOnlineChannelSelectable(' 海派 ', methods));
-  const options = onlineChannelOptions(methods, '海运');
-  assert.equal(options.find((option) => option.value === '海运').disabled, true);
-  assert.equal(options.find((option) => option.value === '海卡').disabled, true);
-  assert.equal(options.find((option) => option.value === '海派').disabled, false);
-  assert.equal(onlineChannelOptions([...methods, { ...methods[0], id: '3' }], '').filter((option) => option.value === '海派').length, 1);
+test('custom manual values remain available without any remote options', () => {
+  const match = createOnlineChannelMatcher();
+  assert.equal(match(' 海配 ').value, '海配');
+  assert.equal(match(' hYkD ').value, 'hYkD');
+  assert.equal(createOnlineChannelMatcher([])('HP').value, 'HP');
 });
 
 // The web matcher and grid helpers run locally without an application server or credentials.
@@ -112,14 +96,14 @@ test('fresh enrichment is immediately usable for every duplicate row and preserv
   const enriched = mergeLookupRecord([row(' fba123 '), row('FBA123')], result);
   assert(enriched.every((entry) => entry.value.lookupId === result.id && entry.value.lookupSid === candidate.sid));
   assert(enriched.every((entry) => entry.value.shop === candidate.shop && !needsLookupReview(entry)));
-  assert(enriched.every((entry) => entry.autofilled.channel === '海派'));
+  assert(enriched.every((entry) => entry.value.channel === '' && entry.autofilled.channel === undefined));
 });
 
-test('manual conflicts pause parsing while the unique transport method replaces abbreviations', () => {
+test('metadata conflicts pause parsing while manual transport input is preserved', () => {
   const enriched = mergeLookupRecord([row('FBA123', { shop: '人工店铺', country: '加拿大', channel: 'HYKD' })], record(['FBA123']))[0];
   assert.equal(enriched.value.shop, '人工店铺');
   assert.equal(enriched.value.country, '加拿大');
-  assert.equal(enriched.value.channel, '海派');
+  assert.equal(enriched.value.channel, 'HYKD');
   assert.equal(enriched.value.lookupId, undefined);
   assert(needsLookupReview(enriched));
   const corrected = refreshLookupEvidence({ ...enriched, value: { ...enriched.value, shop: candidate.shop, country: candidate.country } });
@@ -127,19 +111,27 @@ test('manual conflicts pause parsing while the unique transport method replaces 
   assert.equal(needsLookupReview(corrected), false);
 });
 
-test('missing and ambiguous channels require confirmation or an actual selected transport option', () => {
+test('legacy channel results never require lookup review or overwrite manual transport', () => {
   const missing = mergeLookupRecord([row('FBA123', { channel: '人工渠道' })], record(['FBA123'], { channel: null, channelStatus: 'unavailable', channelOptions: [] }))[0];
   assert.equal(missing.value.channel, '人工渠道');
-  assert(needsLookupReview(missing));
+  assert.equal(needsLookupReview(missing), false);
   const ambiguous = mergeLookupRecord([row('FBA123')], record(['FBA123'], { channel: null, channelStatus: 'ambiguous', channelOptions: [{ name: '空派' }, { name: '海派' }] }))[0];
-  assert(needsLookupReview(ambiguous));
+  assert.equal(needsLookupReview(ambiguous), false);
   assert.equal(needsLookupReview({ ...ambiguous, value: { ...ambiguous.value, channel: '海派' } }), false);
   const notFound = { ...missing, lookup: { fba: 'FBA123', status: 'not_found', candidates: [] } };
   assert(needsLookupReview(notFound));
   const restoredRecord = record(['FBA123'], { channel: null, channelStatus: 'ambiguous', channelOptions: [{ name: '空派' }, { name: '海派' }] });
   const restored = mergeLookupRecord([{ ...row('FBA123', { lookupId: restoredRecord.id, lookupSid: 101, channel: '海派' }), autofilled: { channel: '海派' } }], restoredRecord)[0];
   assert.equal(restored.value.channel, '海派', 'a saved explicitly selected transport option survives result hydration');
+  assert.equal(restored.autofilled.channel, undefined, 'legacy channel provenance cannot clear manual values later');
   assert.equal(needsLookupReview(restored), false);
+});
+
+test('changing an FBA clears only remote metadata and retains manual channel from legacy drafts', () => {
+  const value = { ...emptyOnlineRow(), fba: 'FBAOTHER', channel: '海派', shop: '旧店铺' };
+  clearAutofilled(value, { channel: '海派', shop: '旧店铺' });
+  assert.equal(value.channel, '海派');
+  assert.equal(value.shop, '');
 });
 
 test('pending submission drafts accept only their original operation and exact rows', () => {
