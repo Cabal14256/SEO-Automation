@@ -1,4 +1,4 @@
-import type { ShipmentReportRow } from './reports.js';
+import type { ShipmentReport, ShipmentReportBox, ShipmentReportRow } from './reports.js';
 
 type TicketIdentity = Pick<ShipmentReportRow, 'shippingRunId' | 'ticketId' | 'ticketNumber' | 'groupId'>;
 
@@ -33,4 +33,52 @@ export function formatReportCodeRanges(codes: readonly string[]): string {
   }
   flush();
   return ranges.join('、');
+}
+
+export type ReportTicketCodeDisplay = { range: string; uniform: boolean };
+
+const isUnitedStates = (country: string) => ['美国', 'US', 'USA', 'UNITED STATES'].includes(country.trim().toUpperCase());
+
+/** Compare actual carton contents across the complete ticket, including separate FBAs. */
+function boxProductSignature(box: ShipmentReportBox): string {
+  const quantities = new Map<string, bigint>();
+  for (const item of box.items) {
+    if (item.quantity <= 0) continue;
+    const identity = JSON.stringify([box.sid, item.msku, item.fnsku, item.sku]);
+    quantities.set(identity, (quantities.get(identity) ?? 0n) + BigInt(item.quantity));
+  }
+  return JSON.stringify([...quantities].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([identity, quantity]) => [identity, quantity.toString()]));
+}
+
+/** Box data is complete even when product rows are paginated. Missing data never implies equal packing. */
+export function getReportTicketCodeDisplays(report: Pick<ShipmentReport, 'rows' | 'boxes'> | undefined): Map<string, ReportTicketCodeDisplay> {
+  type Ticket = { codes: string[]; rows: ShipmentReportRow[]; boxes: ShipmentReportBox[] };
+  const tickets = new Map<string, Ticket>();
+  const ticket = (key: string) => {
+    const value = tickets.get(key) ?? { codes: [], rows: [], boxes: [] };
+    tickets.set(key, value);
+    return value;
+  };
+  for (const row of report?.rows ?? []) {
+    const value = ticket(reportTicketKey(row));
+    value.codes.push(...row.codes); value.rows.push(row);
+  }
+  for (const box of report?.boxes ?? []) {
+    const value = ticket(reportTicketKey(box));
+    value.codes.push(box.code); value.boxes.push(box);
+  }
+  return new Map([...tickets].map(([key, value]) => {
+    const signature = value.boxes[0] && boxProductSignature(value.boxes[0]);
+    const uniform = value.rows.length > 0 && value.rows.every((row) => isUnitedStates(row.country))
+      && signature !== undefined && signature !== '[]' && value.boxes.every((box) => boxProductSignature(box) === signature);
+    return [key, { range: value.rows.find((row) => row.ticketCodeRange !== undefined)?.ticketCodeRange ?? formatReportCodeRanges(value.codes), uniform }];
+  }));
+}
+
+/** Unequal packing lists only the positive carton allocations of this product row. */
+export function getReportRowCodeLabel(row: Pick<ShipmentReportRow, 'boxes'>, display: ReportTicketCodeDisplay | undefined, firstRow: boolean): string {
+  if (display?.uniform) return firstRow ? display.range : '';
+  return [...new Set([...row.boxes].sort((left, right) => left.boxOrder - right.boxOrder)
+    .filter((box) => box.quantity > 0 && box.code.length > 0).map((box) => box.code))].join('');
 }

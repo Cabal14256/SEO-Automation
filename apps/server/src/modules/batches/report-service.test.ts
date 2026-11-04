@@ -134,6 +134,20 @@ describe('shipment product box ordering', () => {
     expect(result.rows.map((row) => row.sku)).toEqual([2, 3, 1, 0].map((index) => `SKU-Gamma-${index}`));
   });
 
+  it('orders European products by positive carton spans before pagination', () => {
+    const group = distributedFixture([[[2, 300]], [[1, 50], [2, 300]], [[1, 380]], [[1, 120]], [[1, 50]], [[1, 0], [3, 20]], []]);
+    group.confirmation.snapshot.members[0]!.snapshot.country = '德国';
+    const before = structuredClone(group);
+    const first = project([group], { pageSize: 3 }), second = project([group], { pageSize: 3, page: 2 }), third = project([group], { pageSize: 3, page: 3 });
+    expect([...first.rows, ...second.rows, ...third.rows].map((row) => row.sku))
+      .toEqual([2, 3, 4, 1, 0, 5, 6].map((index) => `SKU-Gamma-${index}`));
+    expect(second.rows[0]!.boxes.map((box) => [box.boxOrder, box.quantity])).toEqual([[1, 50], [2, 300]]);
+    expect(first.total).toBe(7);
+    expect(second.boxes).toEqual(first.boxes);
+    expect(third.confirmations).toEqual(first.confirmations);
+    expect(group).toEqual(before);
+  });
+
   it('ignores zero quantities in the sort key and retains empty or all-zero products at the end', () => {
     const group = distributedFixture([[[1, 0], [5, 3]], [[3, 2]], [[1, 0]], []]);
     const result = project([group]);

@@ -77,3 +77,50 @@ describe('complete-ticket product ordering', () => {
     expect(productsIn(sorted, 'FBA-SAMPLE-SECOND')).toEqual(['B', 'A']);
   });
 });
+
+describe('European carton product ordering', () => {
+  const distribution = (quantities: Array<number | null>) => quantities.flatMap((quantity, index) => quantity === null ? []
+    : [{ boxId: `box-${index + 1}`, boxOrder: index + 1, code: `K${index + 1}`, quantity }]);
+
+  it.each(['德国', '法国', '英国', 'DE', 'FR', ' uk '])('follows carton transitions for %s instead of total product quantities', (country) => {
+    const row = fixture();
+    const product = (sku: string, quantities: Array<number | null>) => {
+      const boxes = distribution(quantities);
+      return row(sku, boxes.reduce((sum, box) => sum + box.quantity, 0), { country, boxes, codes: boxes.map((box) => box.code) });
+    };
+    const input = [product('split-350', [50, 300]), product('first-380', [380, null]), product('second-300', [null, 300]),
+      product('first-120', [120, null]), product('first-50', [50, null])];
+    const before = structuredClone(input), sorted = sortReportRows(input);
+    expect(sorted.map((item) => item.sku)).toEqual(['first-380', 'first-120', 'first-50', 'split-350', 'second-300']);
+    expect(sorted.map((item) => item.quantity)).toEqual([380, 120, 50, 350, 300]);
+    expect(input).toEqual(before);
+    expect(sorted.map((item) => item.id).sort()).toEqual(input.map((item) => item.id).sort());
+  });
+
+  it('preserves source order for a shared carton span and places single-carton products before transitions', () => {
+    const row = fixture();
+    const product = (sku: string, quantities: Array<number | null>) => {
+      const boxes = distribution(quantities);
+      return row(sku, boxes.reduce((sum, box) => sum + box.quantity, 0), { country: '法国', boxes, codes: boxes.map((box) => box.code) });
+    };
+    const sorted = sortReportRows([
+      product('split-300', [null, 100, 200]), product('z-first-60', [60]), product('a-first-70', [70]),
+      product('split-170', [70, 100]), product('fourth-200', [null, null, null, 200]),
+      product('split-fifth-sixth', [null, null, null, null, 100, 100]), product('fifth-only', [null, null, null, null, 80]),
+      product('sixth-only', [null, null, null, null, null, 200]), product('seventh-only', [null, null, null, null, null, null, 200]),
+    ]);
+    expect(sorted.map((item) => item.sku)).toEqual(['z-first-60', 'a-first-70', 'split-170', 'split-300', 'fourth-200',
+      'fifth-only', 'split-fifth-sixth', 'sixth-only', 'seventh-only']);
+  });
+
+  it('ignores explicit zero quantities when locating a carton and retains unboxed zero rows at the end', () => {
+    const row = fixture();
+    const product = (sku: string, quantities: Array<number | null>) => {
+      const boxes = distribution(quantities);
+      return row(sku, boxes.reduce((sum, box) => sum + box.quantity, 0), { country: '德国', boxes, codes: boxes.map((box) => box.code) });
+    };
+    const sorted = sortReportRows([product('explicit-zero', [0]), product('third', [0, null, 10]), product('no-boxes', []), product('second', [null, 10])]);
+    expect(sorted.map((item) => item.sku)).toEqual(['second', 'third', 'explicit-zero', 'no-boxes']);
+    expect(sorted.find((item) => item.sku === 'third')!.boxes.map((box) => box.quantity)).toEqual([0, 10]);
+  });
+});

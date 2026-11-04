@@ -278,10 +278,10 @@ async function automaticChecks(state) {
   await expect(productTable()).toHaveAttribute('data-row-count', '3');
   const textRows = []; for (let index = 0; index < await gridRowCount(page, '本次发货商品表'); index++) textRows.push(await (await selectGridRow(page, '本次发货商品表', index)).textContent());
   [state.fbas[1], state.fbas[0], state.fbas[2]].forEach((fba, index) => assert(textRows[index].includes(fba), 'FBA rows stay inside their ticket and sort by actual box count'));
-  const ticketRangeColumn = (await (await selectGridRow(page, '本次发货商品表', 0)).locator('dt').allTextContents()).indexOf('整票编码范围');
+  const ticketRangeColumn = (await (await selectGridRow(page, '本次发货商品表', 0)).locator('dt').allTextContents()).indexOf('内部编码');
   assert(ticketRangeColumn >= 0);
-  await expect((await selectGridRow(page, '本次发货商品表', 0)).locator('dd').nth(ticketRangeColumn)).toHaveText('A1-A12、B1-B2');
-  await expect((await selectGridRow(page, '本次发货商品表', 1)).locator('dd').nth(ticketRangeColumn)).toHaveText('');
+  await expect((await selectGridRow(page, '本次发货商品表', 0)).locator('dd').nth(ticketRangeColumn)).toHaveText('B1B2');
+  await expect((await selectGridRow(page, '本次发货商品表', 1)).locator('dd').nth(ticketRangeColumn)).toHaveText('A1A2A3A4A5A6A7A8A9A10A11A12');
   await expect((await selectGridRow(page, '本次发货商品表', 2)).locator('dd').nth(ticketRangeColumn)).toHaveText('C1');
   await expect(generate()).toBeEnabled();
   await productTable().scrollIntoViewIfNeeded();
@@ -488,7 +488,7 @@ async function correctionChecks(state) {
 }
 
 async function allocationColumnChecks(state) {
-  step = 'per-fba-box-columns-reset-to-one-with-five-columns-and-one-code-range-per-ticket';
+  step = 'per-fba-box-columns-reset-to-one-with-five-columns-and-product-box-codes';
   await page.goto('/shipping'); await page.getByRole('button', { name: '本次发货与票号', exact: true }).click(); await page.getByRole('button', { name: '查看发货表', exact: true }).click();
   await expect(productTable()).toHaveAttribute('data-row-count', '3');
   await expect(generate()).toBeEnabled();
@@ -499,14 +499,14 @@ async function allocationColumnChecks(state) {
     ['11', '11', '—', '—', '—'],
     ['9', '9', '—', '—', '—'],
   ];
-  const expectedRanges = ['G7-G10', '', 'G11-G12'];
+  const expectedRanges = ['G7G8', 'G9G10', 'G11G12'];
   const expectedQuantities = ['30', '22', '18'];
   assert.deepEqual(headers.filter((header) => /^箱 \d+$/.test(header)), ['箱 1', '箱 2', '箱 3', '箱 4', '箱 5']);
   for (let index = 0; index < 3; index++) {
     const row = await selectGridRow(page, '本次发货商品表', index), cells = row.locator('dd');
     await expect(cells.nth(column('FBA / 目的仓'))).toContainText(state.fbas[index]);
     await expect(cells.nth(column('商品数量'))).toHaveText(expectedQuantities[index]);
-    await expect(cells.nth(column('整票编码范围'))).toHaveText(expectedRanges[index]);
+    await expect(cells.nth(column('内部编码'))).toHaveText(expectedRanges[index]);
     for (let order = 1; order <= 5; order++) await expect(cells.nth(column(`箱 ${order}`))).toHaveText(expected[index][order - 1]);
   }
   // Each FBA keeps separate local boxes 1/2 and all 70 accepted units, while

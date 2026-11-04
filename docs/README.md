@@ -7,13 +7,15 @@
 | 目的 | 建议阅读 |
 | --- | --- |
 | 了解项目与启动方式 | [项目 README](../README.md)、[运行维护](operations/runbook.md) |
-| 确认已经实现什么、哪些仍需验收 | [实现状态](development/implementation-status.md)、[M5–M8 交付说明](development/m5-m8-implementation.md) |
+| 确认最终交付范围、人工验证确认和技术收尾状态 | [实现状态](development/implementation-status.md) |
 | 查业务规则与字段 | [业务规则](business/rules.md)、[字段映射](business/field-mapping.md) |
 | 开发接口或调整数据结构 | 下方接口导航、[数据模型](architecture/data-model.md) |
 | 整理资料并准备发布 | [隐私边界](publishing/privacy.md)、[GitHub 发布步骤](publishing/github-publishing.md) |
 | 追溯早期方案 | [历史计划索引](archive/README.md) |
 
 同一主题有多次变更时，先阅读当前实现状态及业务／API 文档中最新的明确规则，再查历史记录。`archive/` 中的阶段计划不作为现行操作指南。文档存在差异时应核对对应代码与共享契约，不以早期计划替代实际行为。
+
+2026-11-04 收尾范围仅为发货工作台、发票与单据及配套设置；项目负责人确认人工工作已在 VPS 验证处理完成。M5–M8 等范围外功能不交付、不再列为开发待办，下方相关文档仅用于历史追溯。
 
 ## 目录分工
 

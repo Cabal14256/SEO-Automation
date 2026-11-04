@@ -1,5 +1,3 @@
-import { formatReportCodeRanges, reportTicketKey, type ShipmentReport } from '@scm/contracts';
-
 type ShippingShopCellProps = {
   shop: string;
   sid?: number;
@@ -51,21 +49,4 @@ ShippingCodesCell.gridCells = ShippingCodesCell;
 export function getShippingBoxColumns(maxBoxes: number | undefined, boxes?: ReadonlyArray<{ boxOrder: number }>) {
   const maximum = boxes === undefined ? maxBoxes ?? 0 : boxes.reduce((maximum, box) => Math.max(maximum, box.boxOrder), 0);
   return Array.from({ length: Math.max(5, maximum) }, (_, index) => index + 1);
-}
-
-export function getReportTicketCodeRanges(report: Pick<ShipmentReport, 'rows' | 'boxes'> | undefined): Map<string, string> {
-  const codes = new Map<string, string[]>();
-  for (const row of report?.rows ?? []) {
-    const key = reportTicketKey(row);
-    const ticketCodes = codes.get(key) ?? [];
-    ticketCodes.push(...row.codes); codes.set(key, ticketCodes);
-  }
-  for (const box of report?.boxes ?? []) {
-    const key = reportTicketKey(box);
-    const ticketCodes = codes.get(key) ?? [];
-    ticketCodes.push(box.code); codes.set(key, ticketCodes);
-  }
-  const ranges = new Map([...codes].map(([key, values]) => [key, formatReportCodeRanges(values)]));
-  for (const row of report?.rows ?? []) if (row.ticketCodeRange !== undefined) ranges.set(reportTicketKey(row), row.ticketCodeRange);
-  return ranges;
 }

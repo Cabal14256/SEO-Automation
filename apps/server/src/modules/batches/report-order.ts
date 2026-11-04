@@ -2,6 +2,10 @@ import { formatReportCodeRanges, reportTicketKey, type ShipmentReportBox, type S
 
 const textOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
 
+export function isEuropeanReportCountry(country: string): boolean {
+  return ['英国', '法国', '德国', '西班牙', '意大利', '荷兰', '波兰', '瑞典', '比利时', '爱尔兰', 'GB', 'UK', 'FR', 'DE', 'ES', 'IT', 'NL', 'PL', 'SE', 'BE', 'IE'].includes(country.trim().toUpperCase());
+}
+
 export function compareInternalCodes(left: string, right: string): number {
   const a = /^([A-Z]+)(\d+)$/.exec(left), b = /^([A-Z]+)(\d+)$/.exec(right);
   if (a && b) {
@@ -73,7 +77,21 @@ export function sortReportRows(rows: ShipmentReportRow[]): ShipmentReportRow[] {
       .sort((left, right) => left.boxes.size - right.boxes.size
         || (left.rows[0]!.inputOrder !== undefined && right.rows[0]!.inputOrder !== undefined ? left.rows[0]!.inputOrder! - right.rows[0]!.inputOrder! : 0)
         || codeOrder(left.code, right.code))
-      .flatMap((block) => block.rows.sort((left, right) => rank.get(productKey(left))! - rank.get(productKey(right))!));
+      .flatMap((block) => {
+        if (!isEuropeanReportCountry(block.rows[0]!.country))
+          return block.rows.sort((left, right) => rank.get(productKey(left))! - rank.get(productKey(right))!);
+        // Follow the carton columns down the sheet. A product spanning the next
+        // carton follows products contained in the current carton, even if its
+        // total quantity is larger. Preserve source order within the same span.
+        return block.rows.map((row, index) => {
+          let first = Infinity, last = 0;
+          for (const box of row.boxes) if (box.quantity > 0) {
+            first = Math.min(first, box.boxOrder); last = Math.max(last, box.boxOrder);
+          }
+          return { row, index, first, last };
+        }).sort((left, right) => left.first - right.first || left.last - right.last || left.index - right.index)
+          .map(({ row }) => row);
+      });
   });
 }
 

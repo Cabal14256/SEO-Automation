@@ -32,7 +32,7 @@ function fixture() {
     tickets: [{ id: ticketId, number: '20261023-2-US-1', sourceTicketIndex: 1, members: [member] }], groupIds: [groupId] };
   const projection = { shippingRunId: runId, shippingRunVersion: 4, shippingRunDate: '2026-10-23', shippingRunSequence: 2,
     rows: [{ demandId, groupId, ticketId, ticketNumber: '20261023-2-US-1', sourceTicketIndex: 1, inputOrder: 1, status: '已确认',
-      sid: 11, msku: 'M', fnsku: 'FN', sku: 'SKU', quantity: 1 }], boxes: [] } as unknown as ShipmentReport;
+      country: '美国', sid: 11, msku: 'M', fnsku: 'FN', sku: 'SKU', quantity: 1 }], boxes: [] } as unknown as ShipmentReport;
   const record = { id: randomUUID(), status: 'queued', groupIds: [groupId], references: [{ groupId, groupVersion: 2, confirmationId }], projection,
     createdBy: 'admin', month: null, region: 'all', fileId: null, rowCount: 1 };
   const group = { id: groupId, batchId, version: 2 };

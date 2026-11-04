@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Check, CircleAlert, Download, FileSpreadsheet, LoaderCircle, RefreshCw } from 'lucide-react';
-import { correctShippingRunInputSchema, reportTicketKey, type CorrectShippingRunInput, type CreateShippingRunInput, type ImportAccepted, type ImportDraftContent, type OnlineImportRow, type ShippingRun, type SourceImport } from '@scm/contracts';
+import { correctShippingRunInputSchema, getReportRowCodeLabel, getReportTicketCodeDisplays, reportTicketKey, type CorrectShippingRunInput, type CreateShippingRunInput, type ImportAccepted, type ImportDraftContent, type OnlineImportRow, type ShippingRun, type SourceImport } from '@scm/contracts';
 import { api, ApiError } from '../api';
 import { Button, IconButton } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -15,7 +15,7 @@ import { OnlineImport } from './online-import';
 import { emptyOnlineRow } from './online-import-grid';
 import { UploadPanel, ParseControls, isBusy } from './import-source';
 import { shanghaiToday } from '../components/ui/date-utils';
-import { getReportTicketCodeRanges, getShippingBoxColumns } from './shipping-table-parts';
+import { getShippingBoxColumns } from './shipping-table-parts';
 import { ShippingLifecycleActions, ShippingRecycleBin, lifecycleLabels } from './shipping-lifecycle';
 import { lifecycleOf, lifecyclePending } from './shipping-lifecycle-api';
 import { previousShippingExport, ShippingExportNotice } from './shipping-export-notice';
@@ -127,7 +127,7 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
   if (lifecycleOf(run) !== 'active' || lifecyclePending(run)) return <section className="shipping-run-process" aria-label="本次发货历史"><h3>{run.month} · 第 {run.sequence ?? '待编号'} 次发货 · {lifecycleLabels[lifecycleOf(run)]}</h3><p>原安排及历史文件保留，当前不能继续整理或生成文件。恢复前会重新核对成员占用。</p><ShippingLifecycleActions target={{ type: 'run', id, name: `${run.month} 第 ${run.sequence ?? '待编号'} 次发货`, lifecycle: lifecycleOf(run), lifecyclePending: lifecyclePending(run) }} active={active} changed={refresh} /><h4>历史文件</h4>{exports.isError ? <QueryError error={exports.error} retry={() => void exports.refetch()} /> : exports.data?.filter((item) => item.fileId).map((item) => <div key={item.id}><span>{timestamp(item.createdAt)} · 历史文件仅供追溯 </span><Button type="button" icon={Download} onClick={() => action.run(`shipping-download-${item.id}`, () => downloadBlob(batchApi.download(item.fileId!), `${run.numberingDate}-${run.sequence}-发货表.xlsx`), '下载已开始。')}>下载 XLSX</Button></div>)}{action.feedback}</section>;
   const runDetail = detail.data;
   const boxes = getShippingBoxColumns(report.data?.maxBoxes, report.data?.boxes);
-  const ticketRanges = getReportTicketCodeRanges(report.data);
+  const ticketCodeDisplays = getReportTicketCodeDisplays(report.data);
   const inProgress = Boolean(running(run));
   const stopped = run.status === 'draft' || run.status === 'needs_review' || run.status === 'failed';
   // An unconfirmed source is expected while the automatic job is building or
@@ -191,8 +191,8 @@ export function ShippingRunPanel({ id, active, sourceRecord }: { id: string; act
     <ShippingExportNotice previous={previousExport} frozen={Boolean(run.membershipFrozenAt)} historyUnavailable={exports.isError} />
     {!run.sequence ? <p className="mapping-help">完成货件资料和分票校验后，系统会自动分配票号并同步商品、箱数据。</p> : report.isPending ? <p className="list-state" role="status">正在读取本次发货表…</p> : report.isError ? <QueryError error={report.error} retry={() => void report.refetch()} /> : report.data && <>
       {report.data.rows.length === 0 ? <p className="mapping-help">商品与箱数据整理完成后会在这里显示。</p> : view === 'products' ? <>
-        <BatchTable label="本次发货商品表" headers={['完整票号', '店铺 / 国家 / 渠道', 'FBA / 目的仓', 'MSKU / FNSKU', '品名 / SKU', '商品数量', ...boxes.map((order) => `箱 ${order}`), '整票编码范围', '本票商品合计']}>
-          {report.data.rows.map((row, index, rows) => <tr key={row.id}><td><strong>{row.ticketNumber}</strong></td><td>{row.shop}<small className="mapping-subtext">{row.country} · {row.channel}</small></td><td>{row.fba}<small className="mapping-subtext">{row.destinationFc || '—'}</small></td><td>{row.msku}<small className="mapping-subtext">{row.fnsku}</small></td><td>{row.productName}<small className="mapping-subtext">{row.sku}</small></td><td className="demand-number">{row.quantity}</td>{boxes.map((order) => <td className="demand-number" key={order}>{row.boxes.find((box) => box.boxOrder === order)?.quantity ?? '—'}</td>)}<td>{index === 0 || reportTicketKey(rows[index - 1]!) !== reportTicketKey(row) ? ticketRanges.get(reportTicketKey(row)) || '待编码' : ''}</td><td className="demand-number">{row.groupQuantity}</td></tr>)}
+        <BatchTable label="本次发货商品表" headers={['完整票号', '店铺 / 国家 / 渠道', 'FBA / 目的仓', 'MSKU / FNSKU', '品名 / SKU', '商品数量', ...boxes.map((order) => `箱 ${order}`), '内部编码', '本票商品合计']}>
+          {report.data.rows.map((row, index, rows) => <tr key={row.id}><td><strong>{row.ticketNumber}</strong></td><td>{row.shop}<small className="mapping-subtext">{row.country} · {row.channel}</small></td><td>{row.fba}<small className="mapping-subtext">{row.destinationFc || '—'}</small></td><td>{row.msku}<small className="mapping-subtext">{row.fnsku}</small></td><td>{row.productName}<small className="mapping-subtext">{row.sku}</small></td><td className="demand-number">{row.quantity}</td>{boxes.map((order) => <td className="demand-number" key={order}>{row.boxes.find((box) => box.boxOrder === order)?.quantity ?? '—'}</td>)}<td>{getReportRowCodeLabel(row, ticketCodeDisplays.get(reportTicketKey(row)), index === 0 || reportTicketKey(rows[index - 1]!) !== reportTicketKey(row))}</td><td className="demand-number">{row.groupQuantity}</td></tr>)}
         </BatchTable><BatchPagination page={page} pageSize={50} total={report.data.total} change={setPage} />
       </> : <BatchTable label="本次发货逐箱表" headers={['完整票号 / FBA', '箱列 / 内部箱码', '商品', '箱内数量', '登记重量', '登记尺寸']}>
         {report.data.boxes.flatMap((box) => box.items.map((item, index) => <tr key={`${box.boxId}-${index}`}><td><strong>{box.ticketNumber}</strong><small className="mapping-subtext">{box.fba}</small></td><td>箱 {box.boxOrder} · {box.code}</td><td>{item.msku}<small className="mapping-subtext">{item.fnsku} / {item.sku}</small></td><td>{item.quantity}</td><td>{box.weight === null ? '缺失' : `${box.weight} ${box.weightUnit || ''}`}</td><td>{box.length ?? '—'} × {box.width ?? '—'} × {box.height ?? '—'} {box.lengthUnit || ''}</td></tr>))}

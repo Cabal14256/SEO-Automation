@@ -15,7 +15,126 @@ function report(): ShipmentReport {
     sourceObservedAt: '2026-10-17T01:00:00Z', dataRevisionId: randomUUID() }], boxes, total: 1, page: 1, pageSize: 50, maxBoxes: 12,
     confirmations: [{ groupId, groupVersion: 2, confirmationId }], blocked: [], generatedAt: '2026-10-17T01:00:00Z' };
 }
+type PackingExample = {
+  country: string; channel: string; prefix: string; fba: string;
+  products: Array<[string, Array<number | null>]>;
+  ticket?: number; codeOffset?: number;
+};
+function packingReport(examples: PackingExample[]): ShipmentReport {
+  const projection = report(), base = projection.rows[0]!, boxBase = projection.boxes[0]!, shippingRunId = randomUUID();
+  const tickets = new Map<number, string>();
+  projection.rows = []; projection.boxes = [];
+  for (const [inputOrder, example] of examples.entries()) {
+    const ticket = example.ticket ?? inputOrder;
+    if (!tickets.has(ticket)) tickets.set(ticket, randomUUID());
+    const groupId = randomUUID(), demandId = randomUUID();
+    const identity = { shippingRunId, ticketId: tickets.get(ticket)!, ticketNumber: `20261104-1-${ticket + 1}`,
+      sourceTicketIndex: ticket, inputOrder, groupId, demandId, fba: example.fba };
+    const boxCount = Math.max(...example.products.map(([, grid]) => grid.length));
+    const boxes = Array.from({ length: boxCount }, (_, index) => ({ ...boxBase, ...identity, boxId: randomUUID(),
+      boxOrder: index + 1, code: `${example.prefix}${(example.codeOffset ?? 0) + index + 1}`,
+      items: [] as ShipmentReport['boxes'][number]['items'] }));
+    for (const [sku, grid] of example.products) {
+      const product = { msku: `M-${sku}`, fnsku: `FN-${sku}`, sku };
+      const quantities = grid.flatMap((quantity, index) => {
+        if (quantity === null) return [];
+        const box = boxes[index]!; box.items.push({ ...product, quantity });
+        return [{ boxId: box.boxId, boxOrder: index + 1, code: box.code, quantity }];
+      });
+      const quantity = grid.reduce<number>((sum, value) => sum + (value ?? 0), 0);
+      projection.rows.push({ ...base, ...identity, ...product, id: randomUUID(), country: example.country, channel: example.channel,
+        productName: sku, quantity, boxes: quantities, codes: quantities.map((box) => box.code), groupQuantity: quantity, monthQuantity: quantity });
+    }
+    projection.boxes.push(...boxes);
+  }
+  return { ...projection, shippingRunId, shippingRunVersion: 1, shippingRunDate: '2026-11-04', shippingRunSequence: 1,
+    total: projection.rows.length, maxBoxes: Math.max(...projection.boxes.map((box) => box.boxOrder)) };
+}
+
 describe('shipment XLSX', () => {
+  it('exports the German and French packing staircases and each product’s actual carton codes', async () => {
+    const projection = packingReport([
+      { country: '德国', channel: 'KH', prefix: 'K', fba: 'FBA-GERMANY', products: [
+        ['VEN4', [380, null]], ['FENIX8', [50, 300]], ['VEN3', [null, 300]],
+        ['FENIX843', [120, null]], ['FORERUNNER', [50, null]],
+      ] },
+      { country: '法国', channel: 'KH', prefix: 'Q', fba: 'FBA-FRANCE', products: [
+        ['VP-S23', [null, 100, 200, null, null, null, null]],
+        ['PIXEL10-XL', [null, null, null, null, 200, null, null]],
+        ['PIXEL11', [null, null, null, null, null, null, 200]],
+        ['PIXEL11-XL', [null, null, null, null, null, 200, null]],
+        ['JZG-S23', [null, null, null, 200, null, null, null]],
+        ['NOTE14', [70, 100, null, null, null, null, null]],
+        ['ULTRA', [70, null, null, null, null, null, null]],
+        ['EDGE', [60, null, null, null, null, null, null]],
+      ] },
+    ]);
+    const before = structuredClone(projection), book = new ExcelJS.Workbook();
+    await book.xlsx.load(await createReportWorkbook(projection) as never);
+    expect(projection).toEqual(before);
+    const expected = [
+      ['VEN4', 380, 380, null, null, null, null, null, null, 'K1'],
+      ['FENIX843', 120, 120, null, null, null, null, null, null, 'K1'],
+      ['FORERUNNER', 50, 50, null, null, null, null, null, null, 'K1'],
+      ['FENIX8', 350, 50, 300, null, null, null, null, null, 'K1K2'],
+      ['VEN3', 300, null, 300, null, null, null, null, null, 'K2'],
+      Array(10).fill(null),
+      ['ULTRA', 70, 70, null, null, null, null, null, null, 'Q1'],
+      ['EDGE', 60, 60, null, null, null, null, null, null, 'Q1'],
+      ['NOTE14', 170, 70, 100, null, null, null, null, null, 'Q1Q2'],
+      ['VP-S23', 300, null, 100, 200, null, null, null, null, 'Q2Q3'],
+      ['JZG-S23', 200, null, null, null, 200, null, null, null, 'Q4'],
+      ['PIXEL10-XL', 200, null, null, null, null, 200, null, null, 'Q5'],
+      ['PIXEL11-XL', 200, null, null, null, null, null, 200, null, 'Q6'],
+      ['PIXEL11', 200, null, null, null, null, null, null, 200, 'Q7'],
+    ];
+    for (const sheet of [book.worksheets[0]!, book.getWorksheet('欧洲批次')!]) {
+      const headers = sheet.getRow(1).values as string[];
+      const fields = ['SKU', '发货数量', '箱1', '箱2', '箱3', '箱4', '箱5', '箱6', '箱7', '内部编码'];
+      expect(sheet.rowCount).toBe(15);
+      expect(Array.from({ length: 14 }, (_, index) => fields.map((field) => sheet.getCell(index + 2, headers.indexOf(field)).value))).toEqual(expected);
+      expect(sheet.getColumn(headers.indexOf('内部编码')).values).not.toContain('K1-K2');
+    }
+    const details = book.getWorksheet('逐箱明细')!, headers = details.getRow(1).values as string[];
+    expect(Array.from({ length: details.rowCount - 1 }, (_, index) => ['内部编码', 'SKU', '箱内数量'].map((field) => details.getCell(index + 2, headers.indexOf(field)).value)))
+      .toEqual([
+        ['K1', 'VEN4', 380], ['K1', 'FENIX8', 50], ['K1', 'FENIX843', 120], ['K1', 'FORERUNNER', 50],
+        ['K2', 'FENIX8', 300], ['K2', 'VEN3', 300],
+        ['Q1', 'NOTE14', 70], ['Q1', 'ULTRA', 70], ['Q1', 'EDGE', 60],
+        ['Q2', 'VP-S23', 100], ['Q2', 'NOTE14', 100], ['Q3', 'VP-S23', 200],
+        ['Q4', 'JZG-S23', 200], ['Q5', 'PIXEL10-XL', 200], ['Q6', 'PIXEL11-XL', 200], ['Q7', 'PIXEL11', 200],
+      ]);
+  });
+  it('labels unequal US air cartons per product while keeping a range for seven identical US sea cartons across FBAs', async () => {
+    const projection = packingReport([
+      { country: '美国', channel: 'KP', prefix: 'A', fba: 'FBA-US-AIR', products: [
+        ['AIR-PRO-RED', [232, null]], ['AIR-PRO-BLUE', [145, null]],
+        ['AIR-MAX-RED', [null, 232]], ['AIR-MAX-BLUE', [null, 145]],
+      ] },
+      ...Array.from({ length: 7 }, (_, index) => ({ country: '美国', channel: 'HY', prefix: 'B', fba: `FBA-US-SEA-${index + 1}`,
+        ticket: 1, codeOffset: index, products: [['SEA-BLUE', [63]], ['SEA-RED', [100]]] as PackingExample['products'] })),
+    ]);
+    const before = structuredClone(projection), book = new ExcelJS.Workbook();
+    await book.xlsx.load(await createReportWorkbook(projection) as never);
+    expect(projection).toEqual(before);
+    for (const sheet of [book.worksheets[0]!, book.getWorksheet('美国批次')!]) {
+      const headers = sheet.getRow(1).values as string[];
+      const air = Array.from({ length: 4 }, (_, index) => ['SKU', '箱1', '箱2', '内部编码'].map((field) => sheet.getCell(index + 2, headers.indexOf(field)).value));
+      expect(air).toEqual([
+        ['AIR-MAX-RED', null, 232, 'A2'], ['AIR-PRO-RED', 232, null, 'A1'],
+        ['AIR-MAX-BLUE', null, 145, 'A2'], ['AIR-PRO-BLUE', 145, null, 'A1'],
+      ]);
+      expect(sheet.getRow(6).hasValues).toBe(false);
+      expect(Array.from({ length: 14 }, (_, index) => sheet.getCell(index + 7, headers.indexOf('内部编码')).value))
+        .toEqual(['B1-B7', ...Array(13).fill(null)]);
+      expect(Array.from({ length: 14 }, (_, index) => sheet.getCell(index + 7, headers.indexOf('箱1')).value))
+        .toEqual([100, 63, 100, 63, 100, 63, 100, 63, 100, 63, 100, 63, 100, 63]);
+    }
+    const details = book.getWorksheet('逐箱明细')!, headers = details.getRow(1).values as string[];
+    expect(details.rowCount).toBe(19);
+    expect(Array.from({ length: 18 }, (_, index) => details.getCell(index + 2, headers.indexOf('内部编码')).value))
+      .toEqual(['A1', 'A1', 'A2', 'A2', 'B1', 'B1', 'B2', 'B2', 'B3', 'B3', 'B4', 'B4', 'B5', 'B5', 'B6', 'B6', 'B7', 'B7']);
+  });
   it('writes all twelve box columns, typed identifiers/dates and complete box products', async () => {
     const bytes = await createReportWorkbook(report(), { month: '2026-10' });
     const book = new ExcelJS.Workbook(); await book.xlsx.load(bytes as unknown as Parameters<typeof book.xlsx.load>[0]);
@@ -158,8 +277,10 @@ describe('shipment XLSX', () => {
         expect(Array.from({ length: 12 }, (_, offset) => sheet.getCell(line, headers.indexOf(`箱${offset + 1}`)).value)).toEqual(expectedGrid);
       }
       expect(sheet.getCell(2, headers.indexOf('FBA货件号')).value).toBe('FBASTAIR002');
-      expect(sheet.getCell(2, headers.indexOf('内部编码')).value).toBe('F1-F22');
-      expect(sheet.getColumn(headers.indexOf('内部编码')).values.filter((value, index) => index > 1 && value !== null)).toEqual(['F1-F22']);
+      expect(Array.from({ length: projection.rows.length }, (_, index) => sheet.getCell(index + 2, headers.indexOf('内部编码')).value)).toEqual([
+        'F13', 'F14', 'F15', 'F16', 'F17', 'F18', 'F19', 'F20', 'F21', 'F22',
+        'F1F2F6', 'F2', 'F3', 'F3F4', 'F4', 'F5', 'F5F6', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12', null,
+      ]);
       const sharedLines = sheet.getColumn(headers.indexOf('SKU')).values.flatMap((value, index) => value === 'S-shared' ? [index] : []);
       expect(sharedLines).toHaveLength(2);
       expect(sharedLines.map((line) => sheet.getCell(line, headers.indexOf('FBA货件号')).value).sort()).toEqual(['FBASTAIR001', 'FBASTAIR002']);
@@ -170,7 +291,7 @@ describe('shipment XLSX', () => {
     expect(actualDetails).toEqual(expectedDetails);
     expect(new Set(actualDetails.map((line) => line[1])).size).toBe(22);
   });
-  it('restarts each FBA at box one, ignores old allocation display positions and shows one complete ticket range', async () => {
+  it('restarts each FBA at box one, ignores old allocation display positions and shows its product box codes', async () => {
     const projection = report(), base = projection.rows[0]!, boxBase = projection.boxes[0]!;
     const shippingRunId = randomUUID(), ticketId = randomUUID(), ticketNumber = '20261024-4-UK-1';
     const identity = { shippingRunId, ticketId, ticketNumber, sourceTicketIndex: 1 };
@@ -212,7 +333,7 @@ describe('shipment XLSX', () => {
         expect(Array.from({ length: 10 }, (_, offset) => sheet.getCell(index + 2, headers.indexOf(`箱${offset + 1}`)).value)).toEqual(expected);
         expect(sheet.getCell(index + 2, headers.indexOf('FBA货件号')).value).toBe(example.fba);
         expect(sheet.getCell(index + 2, headers.indexOf('SKU')).value).toBe('S-SHARED');
-        expect(sheet.getCell(index + 2, headers.indexOf('内部编码')).value).toBe(index === 0 ? 'G1-G2、G7-G12、H1-H2' : null);
+        expect(sheet.getCell(index + 2, headers.indexOf('内部编码')).value).toBe(example.codes.join(''));
         expect(sheet.getCell(index + 2, headers.indexOf('发货数量')).value).toBe(example.quantities.reduce((sum, quantity) => sum + quantity, 0));
         expect(sheet.getCell(index + 2, headers.indexOf('本票商品合计')).value).toBe(index === 0 ? total : null);
       }
@@ -224,7 +345,7 @@ describe('shipment XLSX', () => {
     const detail = book.getWorksheet('逐箱明细')!, headers = detail.getRow(1).values as string[];
     const actual = Array.from({ length: detail.rowCount - 1 }, (_, index) => ['FBA货件号', '内部编码', '货件内箱序', '箱内数量', '发货表箱列'].map((header) => detail.getCell(index + 2, headers.indexOf(header)).value));
     expect(actual).toEqual(examples.flatMap((example) => example.codes.map((code, index) => [example.fba, code, index + 1, example.quantities[index], index + 1])));
-    expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain('shipment-record-v9');
+    expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain('shipment-record-v10');
   });
   it('sorts FBA blocks by box count and input order while retaining real box codes and product totals', async () => {
     const projection = report(), base = projection.rows[0]!, boxBase = projection.boxes[0]!;
@@ -265,8 +386,8 @@ describe('shipment XLSX', () => {
     for (const sheet of [book.worksheets[0]!, book.getWorksheet('欧洲批次')!]) {
       const headers = sheet.getRow(1).values as string[];
       expect(Array.from({ length: expected.length }, (_, index) => sheet.getCell(index + 2, headers.indexOf('FBA货件号')).value)).toEqual(expected);
-      expect(sheet.getCell(2, headers.indexOf('内部编码')).value).toBe('A2-A3、A10、A12、B1、Z1、AA1、AB2');
-      expect(sheet.getCell(3, headers.indexOf('内部编码')).value).toBeNull();
+      expect(Array.from({ length: expected.length }, (_, index) => sheet.getCell(index + 2, headers.indexOf('内部编码')).value))
+        .toEqual(['AB2', 'A10', 'AA1', 'B1', 'Z1', 'A12A2', 'A3']);
       expect(sheet.getCell(2, headers.indexOf('箱1')).value).toBe(2);
       expect(sheet.getCell(3, headers.indexOf('箱1')).value).toBe(10);
       expect(sheet.getCell(7, headers.indexOf('箱1')).value).toBe(12);
@@ -335,8 +456,8 @@ describe('shipment XLSX', () => {
       expect(sheet.getCell('A1').fill).toMatchObject({ fgColor: { argb: 'FF24344D' } });
       expect(sheet.autoFilter).toBe(`A1:${sheet.getColumn(headers.length - 1).letter}${sheet.rowCount}`);
     };
-    checkSheet(book.worksheets[0]!, ['FBA-A-FIRST', 'FBA-A-SECOND', null, 'FBA-B', null, 'FBA-C'], ['A1-A2', null, null, 'B1', null, 'C1、C3']);
-    checkSheet(book.getWorksheet('欧洲批次')!, ['FBA-A-FIRST', 'FBA-A-SECOND', null, 'FBA-C'], ['A1-A2', null, null, 'C1、C3']);
+    checkSheet(book.worksheets[0]!, ['FBA-A-FIRST', 'FBA-A-SECOND', null, 'FBA-B', null, 'FBA-C'], ['A1', 'A2', null, 'B1', null, 'C1C3']);
+    checkSheet(book.getWorksheet('欧洲批次')!, ['FBA-A-FIRST', 'FBA-A-SECOND', null, 'FBA-C'], ['A1', 'A2', null, 'C1C3']);
     checkSheet(book.getWorksheet('美国批次')!, ['FBA-B'], ['B1']);
     const detail = book.getWorksheet('逐箱明细')!;
     expect(detail.rowCount).toBe(6);
@@ -400,7 +521,7 @@ describe('shipment XLSX', () => {
     expect(summary.getCell(3, headers.indexOf('业务日期')).value).toBeInstanceOf(Date);
     expect(summary.getCell(3, headers.indexOf('箱1')).value).toBe(2);
     expect(book.getWorksheet('逐箱明细')!.rowCount).toBe(9);
-    expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain('shipment-record-v9');
+    expect(book.getWorksheet('版本说明')!.getColumn(2).values).toContain('shipment-record-v10');
     expect(book.getWorksheet('版本说明')!.getCell('A2').fill).not.toMatchObject({ type: 'pattern', pattern: 'solid' });
   });
   it('imports two-sheet evidence without losing zero or leading zeros', async () => {
