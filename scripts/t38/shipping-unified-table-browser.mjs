@@ -385,19 +385,20 @@ async function unifiedNavigation(state) {
   await expect(page.getByRole('button', { name: '需求处理', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '发货成品', exact: true })).toHaveCount(0);
   await expect(table().locator('canvas')).toHaveCount(1); await expect(table().locator('table')).toHaveCount(0);
-  const submenu = page.getByRole('navigation', { name: '发货管理子导航', exact: true });
+  const submenu = page.locator('.sidebar > .navigation');
   const shippingNavigation = [
     { label: '发货工作台', view: 'demands' },
     { label: '发票与单据', view: 'documents' },
   ];
-  await expect(submenu.getByRole('link')).toHaveCount(shippingNavigation.length);
-  await expect(submenu.getByRole('link')).toHaveText(shippingNavigation.map(({ label }) => label));
+  await expect(submenu.locator(':scope > a')).toHaveCount(shippingNavigation.length);
+  await expect(submenu.locator(':scope > a')).toHaveText(shippingNavigation.map(({ label }) => label));
   for (const { label, view } of shippingNavigation) {
     const link = submenu.getByRole('link', { name: label, exact: true });
     await expect(link).toBeVisible();
     await expect(link).toHaveAttribute('href', `/shipping?view=${view}`);
   }
-  for (const label of ['领星单据与分配', '物流与交接', '报关与 9810', '批次归档']) await expect(submenu.getByRole('button', { name: label + '（待维护）', exact: true })).toBeDisabled();
+  for (const label of ['工作台', '发货管理', '领星单据与分配', '物流与交接', '报关与 9810', '批次归档', '费用对账']) await expect(submenu.getByText(label, { exact: true })).toHaveCount(0);
+  await expect(submenu.getByRole('button', { name: '设置', exact: true })).toHaveAttribute('aria-expanded', 'false');
   await expect(submenu.getByRole('link', { name: '发货工作台', exact: true })).toHaveAttribute('aria-current', 'page');
   for (const label of ['草稿箱', '导入记录', '生成所选批次 XLSX', '批次导出记录', '刷新工作区']) {
     const button = page.getByRole('button', { name: label, exact: true });

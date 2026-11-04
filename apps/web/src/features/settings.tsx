@@ -1,8 +1,8 @@
 import { Link, Navigate } from '@tanstack/react-router';
-import { Files, ListChecks, Store } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { User } from '../api';
 import { AppShell } from '../pages';
+import { settingsItems } from '../settings-navigation';
 import './settings.css';
 
 export function SettingsRoute() {
@@ -15,18 +15,9 @@ export function SettingsLayout({ user, children }: { user: User; children: React
       <div className="content-width settings-page">
         <header className="settings-page-heading"><h1>设置</h1></header>
         <nav className="settings-navigation" aria-label="设置分类">
-          <Link to="/settings/seller-mappings" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
-            <Store size={18} aria-hidden="true" /><span>店铺映射</span>
-          </Link>
-          <Link to="/settings/document-profiles" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
-            <Files size={18} aria-hidden="true" /><span>单据资料</span>
-          </Link>
-          <Link to="/settings/seller-export-codes" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
-            <Store size={18} aria-hidden="true" /><span>店铺导出代号</span>
-          </Link>
-          <Link to="/settings/service-mappings" className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
-            <ListChecks size={18} aria-hidden="true" /><span>发票服务映射</span>
-          </Link>
+          {settingsItems.map(({ to, label, icon: Icon }) => <Link key={to} to={to} className="settings-navigation-link" activeProps={{ className: 'settings-navigation-link-active', 'aria-current': 'page' }}>
+            <Icon size={18} aria-hidden="true" /><span>{label}</span>
+          </Link>)}
         </nav>
         <div className="settings-content">{children}</div>
       </div>

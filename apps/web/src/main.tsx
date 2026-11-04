@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { createRootRoute, createRoute, createRouter, Navigate, Outlet, RouterProvider } from '@tanstack/react-router';
+import { createRootRoute, createRoute, createRouter, Navigate, Outlet, redirect, RouterProvider } from '@tanstack/react-router';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { DashboardRoute, LoginRoute, NotFoundPage } from './pages';
+import { LoginRoute, NotFoundPage } from './pages';
 import { SellerMappingsRoute } from './features/seller-mappings';
 import { SettingsRoute } from './features/settings';
 import { ServiceMappingsRoute } from './features/service-mappings';
@@ -11,7 +11,6 @@ import { DocumentProfilesRoute } from './features/document-profiles';
 import { ImportsRoute } from './features/imports';
 import { BatchesRoute } from './features/batches';
 import { ShippingRoute } from './features/shipping-workspace';
-import { FinanceRoute } from './features/workflow-workspace';
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -28,7 +27,7 @@ const rootRoute = createRootRoute({
 const dashboardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
-  component: DashboardRoute,
+  component: () => <Navigate to="/shipping" search={{ view: 'demands' }} replace />,
 });
 
 const loginRoute = createRoute({
@@ -53,6 +52,11 @@ const sellerMappingsRoute = createRoute({
 
 const importsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/imports', component: ImportsRoute });
 const shippingRoute = createRoute({ getParentRoute: () => rootRoute, path: '/shipping', component: ShippingRoute,
+  beforeLoad: ({ search }) => {
+    if (search.view && ['fulfillment', 'logistics', 'customs', 'archives'].includes(search.view)) {
+      throw redirect({ to: '/shipping', search: { view: 'demands' }, replace: true });
+    }
+  },
   validateSearch: (search: Record<string, unknown>): { view?: 'demands' | 'batches' | 'reports' | 'physical' | 'documents' | 'fulfillment' | 'logistics' | 'customs' | 'archives'; groupId?: string; documentId?: string; recordId?: string; pool?: 'ungrouped' } => ({
     view: search.view === 'batches' || search.view === 'reports' || search.view === 'physical' || search.view === 'documents' || search.view === 'fulfillment' || search.view === 'logistics' || search.view === 'customs' || search.view === 'archives' ? search.view : 'demands',
     groupId: typeof search.groupId === 'string' && /^[0-9a-f-]{36}$/i.test(search.groupId) ? search.groupId : undefined,
@@ -61,7 +65,7 @@ const shippingRoute = createRoute({ getParentRoute: () => rootRoute, path: '/shi
     pool: search.pool === 'ungrouped' ? 'ungrouped' : undefined,
   }),
 });
-const financeRoute = createRoute({ getParentRoute: () => rootRoute, path: '/finance', component: FinanceRoute,
+const financeRoute = createRoute({ getParentRoute: () => rootRoute, path: '/finance', component: () => <Navigate to="/shipping" search={{ view: 'demands' }} replace />,
   validateSearch: (search: Record<string, unknown>): { groupId?: string; recordId?: string } => ({
     groupId: typeof search.groupId === 'string' && /^[0-9a-f-]{36}$/i.test(search.groupId) ? search.groupId : undefined,
     recordId: typeof search.recordId === 'string' && /^[0-9a-f-]{36}$/i.test(search.recordId) ? search.recordId : undefined,

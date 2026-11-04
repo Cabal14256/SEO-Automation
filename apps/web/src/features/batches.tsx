@@ -114,7 +114,7 @@ function WeeklyDetail({ id, initialGroupId, initialDemandId, initialTab, create,
   if (query.isError) return <QueryError error={query.error} retry={() => void query.refetch()} />;
   const detail = query.data;
   return <><BatchPanel title={batchScopeLabel(detail.batch)} help="按发货次管理处理组；成员由人工选择，可跨导入日期安排。" action={<IconButton icon={RefreshCw} label="刷新发货批次" loading={query.isFetching} onClick={() => void query.refetch()} />}>
-    <div className="batch-workspace-toolbar"><Button type="button" variant="primary" icon={Plus} onClick={create}>新建分组</Button>{groupId && <><Button type="button" icon={ArrowRight} onClick={() => process(groupId)}>打开处理向导</Button><Link to="/shipping" search={{ view: 'archives', groupId }} className="secondary-button">完成检查与归档</Link><Link to="/finance" search={{ groupId }} className="secondary-button">费用对账</Link></>}<span className="batch-workspace-total">{detail.ungrouped.length} 票未分组需求</span></div>
+    <div className="batch-workspace-toolbar"><Button type="button" variant="primary" icon={Plus} onClick={create}>新建分组</Button>{groupId && <Button type="button" icon={ArrowRight} onClick={() => process(groupId)}>打开处理向导</Button>}<span className="batch-workspace-total">{detail.ungrouped.length} 票未分组需求</span></div>
     <GroupsList detail={detail} selected={groupId} select={setGroupId} />
   </BatchPanel>
   {groupId && <BatchGroupDetail key={groupId} id={groupId} week={detail} selectGroup={setGroupId} initialDemandId={initialDemandId} initialTab={initialTab} />}

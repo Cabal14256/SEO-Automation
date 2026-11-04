@@ -13,7 +13,6 @@ import { BatchProcessWizard, type ProcessStage } from './batch-process-wizard';
 import { DemandBatchAssignment, readDemandAssignment, type DemandAssignment } from './demand-batch-assignment';
 import { DocumentsWorkspace } from './documents';
 import { ShippingLayout, type ShippingView } from './shipping-layout';
-import { WorkflowWorkspace } from './workflow-workspace';
 
 export function ShippingRoute() {
   const session = useQuery({ queryKey: ['session'], queryFn: api.session, retry: false });
@@ -27,7 +26,7 @@ function ShippingWorkspace({ user }: { user: User }) {
   const search = useSearch({ strict: false });
   const navigate = useNavigate();
   const client = useQueryClient();
-  const view: ShippingView = search.view === 'physical' ? 'documents' : search.view === 'documents' || search.view === 'fulfillment' || search.view === 'logistics' || search.view === 'customs' || search.view === 'archives' ? search.view : 'demands';
+  const view: ShippingView = search.view === 'physical' || search.view === 'documents' ? 'documents' : 'demands';
   const workbenchActive = view === 'demands';
   const [assignment, setAssignment] = useState<DemandAssignment | null>(() => readDemandAssignment(user.id));
   const [creation, setCreation] = useState(false);
@@ -59,6 +58,5 @@ function ShippingWorkspace({ user }: { user: User }) {
       {process && <BatchProcessWizard key={process.groupId} {...process} open={view === 'demands' && process.open} userId={user.id} close={closeProcess} complete={closeProcess} selectGroup={(groupId, batchId) => openGroup(batchId ?? process.batchId, groupId)} viewDetail={() => { closeProcess(); void navigate({ to: '/batches/$batchId', params: { batchId: process.batchId }, search: { groupId: process.groupId } }); }} />}
     </>}</section>
     <section className="shipping-view" aria-label="发票与单据工作区" hidden={view !== 'documents'}>{mounted('documents') && <DocumentsWorkspace active={view === 'documents'} />}</section>
-    {(['fulfillment', 'logistics', 'customs', 'archives'] as const).map((target) => <section key={target} className="shipping-view" aria-label={`${target === 'fulfillment' ? '领星单据与分配' : target === 'logistics' ? '物流与交接' : target === 'customs' ? '报关与 9810' : '批次归档'}工作区`} hidden={view !== target}>{mounted(target) && <WorkflowWorkspace kind={target === 'archives' ? 'archive' : target} active={view === target} />}</section>)}
   </ShippingLayout>;
 }

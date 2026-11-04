@@ -1,4 +1,4 @@
-import { demoTaskInputSchema, isWorkflowUnderMaintenance, workflowMaintenanceMessage } from '@scm/contracts';
+import { demoTaskInputSchema } from '@scm/contracts';
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { Link, Navigate, useLocation, useNavigate, useSearch } from '@tanstack/react-router';
 import {
@@ -9,7 +9,6 @@ import {
   ClipboardList,
   Clock3,
   Files,
-  LayoutDashboard,
   LoaderCircle,
   LogIn,
   LogOut,
@@ -18,12 +17,8 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
-  ReceiptText,
   RefreshCw,
   Settings,
-  Truck,
-  Landmark,
-  Archive,
   X,
 } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
@@ -31,6 +26,7 @@ import { api, ApiError, type DashboardResponse, type Task, type User } from './a
 import { Button, IconButton, IconLink } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Tooltip } from './components/ui/tooltip';
+import { settingsItems } from './settings-navigation';
 import './navigation.css';
 
 const statusLabels: Record<Task['status'], string> = {
@@ -145,22 +141,19 @@ function LoginPage({ initialSessionError }: { initialSessionError: string | null
 const shippingItems = [
   { view: 'demands', label: '发货工作台', icon: ClipboardList },
   { view: 'documents', label: '发票与单据', icon: Files },
-  { view: 'fulfillment', label: '领星单据与分配', icon: ClipboardList },
-  { view: 'logistics', label: '物流与交接', icon: Truck },
-  { view: 'customs', label: '报关与 9810', icon: Landmark },
-  { view: 'archives', label: '批次归档', icon: Archive },
 ] as const;
 
 function Navigation({ compact = false, onNavigate, onExpand }: { compact?: boolean; onNavigate?: () => void; onExpand?: () => void }) {
   const pathname = useLocation({ select: (location) => location.pathname });
   const search = useSearch({ strict: false });
-  const shippingActive = ['/shipping', '/imports', '/batches', '/batch-reports'].some((path) => pathname === path || pathname.startsWith(`${path}/`));
-  const view = pathname === '/shipping' && (search.view === 'physical' || search.view === 'documents' || search.view === 'fulfillment' || search.view === 'logistics' || search.view === 'customs' || search.view === 'archives') ? search.view : 'demands';
-  const [expanded, setExpanded] = useState(shippingActive);
+  const shippingActive = ['/shipping', '/imports', '/batches', '/batch-reports'].some((path) => pathname === path || pathname.startsWith(path + '/'));
+  const view = pathname === '/shipping' && (search.view === 'physical' || search.view === 'documents') ? 'documents' : 'demands';
+  const settingsActive = pathname === '/settings' || pathname.startsWith('/settings/');
+  const [expanded, setExpanded] = useState(settingsActive);
   const submenuId = useId();
   const groupButton = useRef<HTMLButtonElement>(null);
   const focusExpandedGroup = useRef(false);
-  useEffect(() => { if (shippingActive) setExpanded(true); }, [shippingActive, pathname, view]);
+  useEffect(() => { if (settingsActive) setExpanded(true); }, [settingsActive, pathname]);
   useEffect(() => {
     if (!compact && focusExpandedGroup.current) { focusExpandedGroup.current = false; groupButton.current?.focus(); }
   }, [compact]);
@@ -170,34 +163,26 @@ function Navigation({ compact = false, onNavigate, onExpand }: { compact?: boole
   };
   return (
     <nav aria-label="业务导航" className="navigation">
-      {!compact && <p className="nav-heading">业务协同</p>}
-      {compact
-        ? <IconLink className={`nav-link${pathname === '/' ? ' nav-link-active' : ''}`} aria-current={pathname === '/' ? 'page' : undefined} activeProps={{}} activeOptions={{ exact: true }} to="/" onClick={onNavigate} icon={LayoutDashboard} label="工作台" />
-        : <Link className={`nav-link${pathname === '/' ? ' nav-link-active' : ''}`} aria-current={pathname === '/' ? 'page' : undefined} activeProps={{}} activeOptions={{ exact: true }} to="/" onClick={onNavigate}><LayoutDashboard size={19} aria-hidden="true" /><span>工作台</span></Link>}
+      {shippingItems.map(({ view: itemView, label, icon: Icon }) => {
+        const active = shippingActive && view === itemView;
+        const className = 'nav-link' + (active ? ' nav-link-active' : '');
+        return compact
+          ? <IconLink key={itemView} to="/shipping" search={{ view: itemView }} icon={Icon} label={label} className={className} aria-current={active ? 'page' : undefined} activeProps={{}} onClick={onNavigate} />
+          : <Link key={itemView} to="/shipping" search={{ view: itemView }} className={className} aria-current={active ? 'page' : undefined} activeProps={{}} onClick={onNavigate}><Icon size={19} aria-hidden="true" /><span>{label}</span></Link>;
+      })}
       <div className="navigation-group">
         {compact
-          ? <IconButton className={`nav-link navigation-group-toggle${shippingActive ? ' nav-link-active' : ''}`} icon={Package} label="发货管理" data-active={shippingActive} aria-expanded={false} aria-controls={submenuId} onClick={toggleGroup} />
-          : <button ref={groupButton} type="button" className="nav-link navigation-group-toggle" data-active={shippingActive} aria-expanded={expanded} aria-controls={submenuId} onClick={toggleGroup}><Package size={19} aria-hidden="true" /><span>发货管理</span><ChevronDown className="navigation-group-chevron" size={16} aria-hidden="true" /></button>}
-        <nav id={submenuId} className="navigation-submenu" aria-label="发货管理子导航" hidden={compact || !expanded}>
-          {shippingItems.map(({ view: itemView, label, icon: Icon }) => isWorkflowUnderMaintenance(itemView === 'archives' ? 'archive' : itemView)
-            ? <button key={itemView} type="button" disabled className="nav-link navigation-child-link nav-link-disabled navigation-maintenance" aria-label={`${label}${workflowMaintenanceMessage}`}><Icon size={16} aria-hidden="true" /><span className="navigation-maintenance-label"><span>{label}</span><small>{workflowMaintenanceMessage}</small></span></button>
-            : <Link key={itemView} to="/shipping" search={{ view: itemView }} activeProps={{}} className={`nav-link navigation-child-link${shippingActive && view === itemView ? ' nav-link-active' : ''}`} aria-current={shippingActive && view === itemView ? 'page' : undefined} onClick={onNavigate}><Icon size={16} aria-hidden="true" /><span>{label}</span></Link>)}
+          ? <IconButton className={'nav-link navigation-group-toggle' + (settingsActive ? ' nav-link-active' : '')} icon={Settings} label="设置" data-active={settingsActive} aria-expanded={false} aria-controls={submenuId} onClick={toggleGroup} />
+          : <button ref={groupButton} type="button" className="nav-link navigation-group-toggle" data-active={settingsActive} aria-expanded={expanded} aria-controls={submenuId} onClick={toggleGroup}><Settings size={19} aria-hidden="true" /><span>设置</span><ChevronDown className="navigation-group-chevron" size={16} aria-hidden="true" /></button>}
+        <nav id={submenuId} className="navigation-submenu" aria-label="设置子导航" hidden={compact || !expanded}>
+          {settingsItems.map(({ to, label, icon: Icon }) => {
+            const active = pathname === to;
+            return <Link key={to} to={to} activeProps={{}} className={'nav-link navigation-child-link' + (active ? ' nav-link-active' : '')} aria-current={active ? 'page' : undefined} onClick={onNavigate}><Icon size={16} aria-hidden="true" /><span>{label}</span></Link>;
+          })}
         </nav>
       </div>
-      {compact ? <IconLink to="/finance" icon={ReceiptText} label="费用对账" className={`nav-link${pathname === '/finance' ? ' nav-link-active' : ''}`} aria-current={pathname === '/finance' ? 'page' : undefined} activeProps={{}} onClick={onNavigate} /> : <Link to="/finance" className={`nav-link${pathname === '/finance' ? ' nav-link-active' : ''}`} aria-current={pathname === '/finance' ? 'page' : undefined} activeProps={{}} onClick={onNavigate}><ReceiptText size={19} aria-hidden="true" /><span>费用对账</span></Link>}
     </nav>
   );
-}
-
-function SettingsNavigation({ compact = false, mobile = false, onNavigate }: { compact?: boolean; mobile?: boolean; onNavigate?: () => void }) {
-  const pathname = useLocation({ select: (location) => location.pathname });
-  const active = pathname === '/settings' || pathname.startsWith('/settings/');
-  const current = active ? 'page' as const : undefined;
-  if (mobile) return <IconLink to="/settings" icon={Settings} label="设置" className={`navigation-settings-mobile${active ? ' navigation-settings-active' : ''}`} aria-current={current} activeProps={{}} onClick={onNavigate} />;
-  const className = `nav-link navigation-settings-link${active ? ' nav-link-active' : ''}`;
-  return compact
-    ? <IconLink to="/settings" icon={Settings} label="设置" className={className} aria-current={current} activeProps={{}} onClick={onNavigate} />
-    : <Link to="/settings" className={className} aria-current={current} activeProps={{}} onClick={onNavigate}><Settings size={19} aria-hidden="true" /><span>设置</span></Link>;
 }
 
 export function AppShell({ user, children, title = '任务工作台' }: { user: User; children: ReactNode; title?: string }) {
@@ -225,7 +210,6 @@ export function AppShell({ user, children, title = '任务工作台' }: { user: 
         <Brand compact={collapsed} />
         <Navigation compact={collapsed} onExpand={() => { setCollapsed(false); window.localStorage.setItem('scm-sidebar-collapsed', 'false'); }} />
         <div className="sidebar-foot">
-          <nav className="navigation-settings" aria-label="全局设置"><SettingsNavigation compact={collapsed} /></nav>
           <Tooltip label={collapsed ? '展开侧栏' : '收起侧栏'}>{(tip) => <Button {...tip} variant="collapse" type="button"
             icon={collapsed ? PanelLeftOpen : PanelLeftClose} aria-label={collapsed ? '展开侧栏' : '收起侧栏'}
             onClick={(event) => { tip.onClick?.(event); toggleSidebar(); }}>{!collapsed && <span>收起侧栏</span>}</Button>}</Tooltip>
@@ -237,7 +221,6 @@ export function AppShell({ user, children, title = '任务工作台' }: { user: 
           <div className="route-name"><span>发货协同</span><strong>{title}</strong></div>
           <div className="account-controls">
             <div className="account-name"><span>{user.name}</span><small>管理员</small></div>
-            <SettingsNavigation mobile onNavigate={() => setMenuOpen(false)} />
             <IconButton className="signout-button" type="button" icon={LogOut} label="退出登录" onClick={() => signOut.mutate()} loading={signOut.isPending} />
           </div>
         </header>
